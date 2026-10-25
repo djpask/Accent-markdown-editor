@@ -26,20 +26,72 @@ pub fn render_ui(
 ) {
     let pal = apply_theme(ctx, session.theme);
 
-    // Global keyboard shortcuts (Escape, F10, Ctrl+L, Ctrl+,, Ctrl+D, Ctrl+T, Ctrl+H)
+    // Wake up auto-hidden top/bottom bars when the mouse pointer approaches the top or bottom window edge
+    if session.chrome_autohidden {
+        let win_rect = ctx.screen_rect();
+        let wake_up = ctx.input(|i| {
+            let moved = i.pointer.delta().length_sq() > 0.25;
+            if let Some(pos) = i.pointer.hover_pos().or_else(|| i.pointer.latest_pos()) {
+                let near_top = pos.y <= win_rect.top() + 54.0;
+                let near_bottom = pos.y >= win_rect.bottom() - 54.0;
+                near_top || near_bottom || (moved && (pos.y <= 72.0 || pos.y >= win_rect.bottom() - 72.0))
+            } else {
+                false
+            }
+        });
+        if wake_up {
+            actions.push(Action::SetChromeAutohidden(false));
+        }
+    }
+
+    // Global keyboard shortcuts
     ctx.input(|i| {
         if i.key_pressed(egui::Key::Escape) {
             if session.overlay != ActiveOverlay::None {
                 actions.push(Action::SetOverlay(ActiveOverlay::None));
             } else if session.search_bar_open {
                 actions.push(Action::ToggleSearchBar);
+            } else if session.chrome_autohidden {
+                actions.push(Action::SetChromeAutohidden(false));
             }
         }
         if i.key_pressed(egui::Key::F10) {
             actions.push(Action::SetOverlay(ActiveOverlay::MainMenu));
         }
-        if i.modifiers.ctrl && i.key_pressed(egui::Key::L) {
+        if i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt && i.key_pressed(egui::Key::L)
+        {
             actions.push(Action::ToggleViewWhileTyping);
+        }
+        if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::E) {
+            actions.push(Action::SetEditorOnlyRaw);
+        }
+        if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::P) {
+            let toggle = !(session.preview_active && session.preview_layout == PreviewLayout::HalfWidth);
+            actions.push(Action::SetPreviewMode {
+                active: toggle,
+                layout: PreviewLayout::HalfWidth,
+            });
+        }
+        if i.modifiers.ctrl && i.modifiers.alt && i.key_pressed(egui::Key::P) {
+            let toggle = !(session.preview_active && session.preview_layout == PreviewLayout::FullWidth);
+            actions.push(Action::SetPreviewMode {
+                active: toggle,
+                layout: PreviewLayout::FullWidth,
+            });
+        }
+        if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::J) {
+            let toggle = !(session.preview_active && session.preview_layout == PreviewLayout::HalfHeight);
+            actions.push(Action::SetPreviewMode {
+                active: toggle,
+                layout: PreviewLayout::HalfHeight,
+            });
+        }
+        if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::W) {
+            let toggle = !(session.preview_active && session.preview_layout == PreviewLayout::Windowed);
+            actions.push(Action::SetPreviewMode {
+                active: toggle,
+                layout: PreviewLayout::Windowed,
+            });
         }
         if i.modifiers.ctrl && i.key_pressed(egui::Key::Comma) {
             actions.push(Action::SetOverlay(ActiveOverlay::PreferencesDialog));
@@ -50,10 +102,35 @@ pub fn render_ui(
         if i.modifiers.ctrl && i.key_pressed(egui::Key::T) {
             actions.push(Action::ToggleHemingway);
         }
-        if i.modifiers.ctrl && i.key_pressed(egui::Key::H) {
+        if i.modifiers.ctrl && (i.key_pressed(egui::Key::H) || i.key_pressed(egui::Key::F)) {
             actions.push(Action::ToggleSearchBar);
         }
+        if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::S) {
+            actions.push(Action::SaveDocument);
+        }
+        if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::S) {
+            actions.push(Action::SetOverlay(ActiveOverlay::SaveFileDialog));
+        }
+        if i.modifiers.ctrl && i.key_pressed(egui::Key::N) {
+            actions.push(Action::NewDocument);
+        }
+        if i.modifiers.ctrl && i.key_pressed(egui::Key::O) {
+            actions.push(Action::SetOverlay(ActiveOverlay::OpenFileDialog));
+        }
+        if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::B) {
+            actions.push(Action::ApplyFormat(FormatCommand::Bold));
+        }
+        if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::I) {
+            actions.push(Action::ApplyFormat(FormatCommand::Italic));
+        }
+        if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::X) {
+            actions.push(Action::ApplyFormat(FormatCommand::Strikethrough));
+        }
     });
+
+    let chrome_hidden = session.chrome_autohidden
+        && session.overlay == ActiveOverlay::None
+        && !session.search_bar_open;
 
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(pal.bg_canvas))
@@ -72,16 +149,20 @@ pub fn render_ui(
                 sync_cursor_to_widget,
             );
 
-            // 2. Render Top Headerbar (47px + 1px bottom border) with real CSD drag & buttons
-            render_headerbar(ctx, ui, &painter, rect, session, &pal, actions);
+            // 2. Render Top Headerbar (47px + 1px bottom border) unless auto-hidden while typing
+            if !chrome_hidden {
+                render_headerbar(ctx, ui, &painter, rect, session, &pal, actions);
+            }
 
             // 3. Render Find/Replace Bar if open
             if session.search_bar_open {
                 render_search_bar(ui, &painter, rect, session, &pal, actions);
             }
 
-            // 4. Render Bottom Overlay Bar (interactive formatting toolbar + word counter)
-            render_bottom_bar(ui, &painter, rect, session, &pal, actions);
+            // 4. Render Bottom Overlay Bar unless auto-hidden while typing
+            if !chrome_hidden {
+                render_bottom_bar(ui, &painter, rect, session, &pal, actions);
+            }
 
             // 5. Outer 1px window frame border
             painter.rect_stroke(
@@ -150,12 +231,12 @@ fn overlay_bounds(win_rect: Rect, session: &Session) -> Rect {
             Rect::from_min_max(Pos2::new(72.0, 44.0), Pos2::new(320.0, 274.0))
         }
         ActiveOverlay::PreviewMenu => Rect::from_min_max(
-            Pos2::new(win_rect.right() - 348.0, 44.0),
-            Pos2::new(win_rect.right() - 48.0, 324.0),
+            Pos2::new(win_rect.right() - 418.0, 44.0),
+            Pos2::new(win_rect.right() - 44.0, 324.0),
         ),
         ActiveOverlay::MainMenu => Rect::from_min_max(
             Pos2::new(win_rect.right() - 302.0, 44.0),
-            Pos2::new(win_rect.right() - 6.0, 446.0),
+            Pos2::new(win_rect.right() - 6.0, 412.0),
         ),
         ActiveOverlay::LineWidthMenu => Rect::from_min_max(
             Pos2::new(win_rect.right() - 390.0, 44.0),
@@ -298,7 +379,9 @@ fn render_headerbar(
     let close_rect = Rect::from_center_size(close_center, Vec2::new(26.0, 26.0));
 
     // Left: New doc icon (x=28)
-    let new_hit = ui.interact(new_doc_rect, ui.id().with("new_doc_btn"), Sense::click());
+    let new_hit = ui
+        .interact(new_doc_rect, ui.id().with("new_doc_btn"), Sense::click())
+        .on_hover_text(I18n::tr(session.locale, "tooltip_new_doc"));
     if new_hit.hovered() {
         painter.rect_filled(new_doc_rect, CornerRadius::same(6), pal.bg_pill_button);
     }
@@ -308,7 +391,9 @@ fn render_headerbar(
     }
 
     // Left: "Apri v" (x=62..114)
-    let open_hit = ui.interact(open_rect, ui.id().with("open_menu_btn"), Sense::click());
+    let open_hit = ui
+        .interact(open_rect, ui.id().with("open_menu_btn"), Sense::click())
+        .on_hover_text(I18n::tr(session.locale, "tooltip_open"));
     if session.overlay == ActiveOverlay::OpenMenu || open_hit.hovered() {
         painter.rect_filled(open_rect, CornerRadius::same(6), pal.bg_pill_button);
     }
@@ -326,12 +411,16 @@ fn render_headerbar(
     }
 
     // Left: "Salva | v" (x=136..210)
-    let save_hit = ui.interact(save_btn_rect, ui.id().with("save_main_btn"), Sense::click());
-    let save_menu_hit = ui.interact(
-        save_menu_rect,
-        ui.id().with("save_menu_btn"),
-        Sense::click(),
-    );
+    let save_hit = ui
+        .interact(save_btn_rect, ui.id().with("save_main_btn"), Sense::click())
+        .on_hover_text(I18n::tr(session.locale, "tooltip_save"));
+    let save_menu_hit = ui
+        .interact(
+            save_menu_rect,
+            ui.id().with("save_menu_btn"),
+            Sense::click(),
+        )
+        .on_hover_text(I18n::tr(session.locale, "tooltip_save_menu"));
     if session.overlay == ActiveOverlay::SaveMenu
         || save_hit.hovered()
         || save_menu_hit.hovered()
@@ -406,7 +495,9 @@ fn render_headerbar(
     );
 
     // Always-visible Line-Width selector pill (`80ch`, `110ch`, `140ch`, `Fluid`)
-    let lw_hit = ui.interact(lw_rect, ui.id().with("lw_header_btn"), Sense::click());
+    let lw_hit = ui
+        .interact(lw_rect, ui.id().with("lw_header_btn"), Sense::click())
+        .on_hover_text(I18n::tr(session.locale, "tooltip_line_width"));
     let lw_fill = if session.overlay == ActiveOverlay::LineWidthMenu || lw_hit.hovered() {
         pal.bg_pill_button
     } else {
@@ -425,7 +516,9 @@ fn render_headerbar(
     }
 
     // Search icon button
-    let search_hit = ui.interact(search_rect, ui.id().with("search_btn"), Sense::click());
+    let search_hit = ui
+        .interact(search_rect, ui.id().with("search_btn"), Sense::click())
+        .on_hover_text(I18n::tr(session.locale, "tooltip_search"));
     if session.search_bar_open || search_hit.hovered() {
         painter.rect_filled(search_rect, CornerRadius::same(6), pal.bg_pill_button);
     }
@@ -435,11 +528,13 @@ fn render_headerbar(
     }
 
     // Preview / Mode button (Book icon + layout selector dropdown when active)
-    let prev_hit = ui.interact(
-        preview_pill_rect,
-        ui.id().with("preview_btn"),
-        Sense::click(),
-    );
+    let prev_hit = ui
+        .interact(
+            preview_pill_rect,
+            ui.id().with("preview_btn"),
+            Sense::click(),
+        )
+        .on_hover_text(I18n::tr(session.locale, "tooltip_preview"));
     if session.preview_active
         || session.view_while_typing
         || session.overlay == ActiveOverlay::PreviewMenu
@@ -479,7 +574,9 @@ fn render_headerbar(
     }
 
     // Hamburger Main Menu button
-    let menu_hit = ui.interact(menu_rect, ui.id().with("main_menu_btn"), Sense::click());
+    let menu_hit = ui
+        .interact(menu_rect, ui.id().with("main_menu_btn"), Sense::click())
+        .on_hover_text(I18n::tr(session.locale, "tooltip_main_menu"));
     if session.overlay == ActiveOverlay::MainMenu || menu_hit.hovered() {
         painter.rect_filled(menu_rect, CornerRadius::same(6), pal.bg_pill_button);
     }
@@ -489,20 +586,26 @@ fn render_headerbar(
     }
 
     // Real CSD Window Controls: Minimize ('-'), Maximize ('□'), Close ('×')
-    let min_hit = ui.interact(min_rect, ui.id().with("win_min_btn"), Sense::click());
+    let min_hit = ui
+        .interact(min_rect, ui.id().with("win_min_btn"), Sense::click())
+        .on_hover_text(I18n::tr(session.locale, "tooltip_minimize"));
     draw_window_button(painter, min_center, pal.bg_pill_button, fg, '-');
     if min_hit.clicked() {
         ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
     }
 
-    let max_hit = ui.interact(max_rect, ui.id().with("win_max_btn"), Sense::click());
+    let max_hit = ui
+        .interact(max_rect, ui.id().with("win_max_btn"), Sense::click())
+        .on_hover_text(I18n::tr(session.locale, "tooltip_maximize"));
     draw_window_button(painter, max_center, pal.bg_pill_button, fg, '□');
     if max_hit.clicked() {
         let is_max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
         ctx.send_viewport_cmd(ViewportCommand::Maximized(!is_max));
     }
 
-    let close_hit = ui.interact(close_rect, ui.id().with("win_close_btn"), Sense::click());
+    let close_hit = ui
+        .interact(close_rect, ui.id().with("win_close_btn"), Sense::click())
+        .on_hover_text(I18n::tr(session.locale, "tooltip_close"));
     draw_window_button(painter, close_center, pal.bg_pill_button, fg, 'x');
     if close_hit.clicked() {
         ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -587,10 +690,24 @@ fn render_workspace_area(
     actions: &mut Vec<Action>,
     sync_cursor_to_widget: &mut bool,
 ) {
-    let top_y = if session.search_bar_open { 88.0 } else { 48.0 };
+    let chrome_hidden = session.chrome_autohidden
+        && session.overlay == ActiveOverlay::None
+        && !session.search_bar_open;
+    let top_y = if chrome_hidden {
+        8.0
+    } else if session.search_bar_open {
+        88.0
+    } else {
+        48.0
+    };
+    let bot_y = if chrome_hidden {
+        win_rect.bottom() - 8.0
+    } else {
+        win_rect.bottom() - 44.0
+    };
     let content_rect = Rect::from_min_max(
         Pos2::new(win_rect.left(), top_y),
-        Pos2::new(win_rect.right(), win_rect.bottom() - 44.0),
+        Pos2::new(win_rect.right(), bot_y),
     );
 
     if !session.preview_active || session.preview_layout == PreviewLayout::Windowed {
@@ -772,10 +889,16 @@ fn render_editor_pane(
         for seg in &segments {
             let leading_space = if seg.is_line_start {
                 if seg.is_heading_hashes {
-                    let lvl = seg.heading_level.unwrap_or(1);
-                    (base_indent - (f32::from(lvl) + 1.0) * char_w).max(0.0)
+                    if seg.collapsed_delimiter {
+                        base_indent
+                    } else {
+                        let lvl = seg.heading_level.unwrap_or(1);
+                        (base_indent - (f32::from(lvl) + 1.0) * char_w).max(0.0)
+                    }
                 } else if seg.blockquote {
                     base_indent + 2.0 * char_w
+                } else if seg.list_item && seg.collapsed_delimiter {
+                    base_indent + 24.0
                 } else if seg.code_block {
                     base_indent + 5.0
                 } else {
@@ -783,6 +906,12 @@ fn render_editor_pane(
                 }
             } else {
                 0.0
+            };
+
+            let seg_line_step = match seg.heading_level {
+                Some(1) if view_while_typing => line_step * 1.30,
+                Some(2) if view_while_typing => line_step * 1.16,
+                _ => line_step,
             };
 
             if seg.collapsed_delimiter {
@@ -794,21 +923,31 @@ fn render_editor_pane(
                     TextFormat {
                         font_id: FontId::new(0.01, egui::FontFamily::Monospace),
                         color: Color32::TRANSPARENT,
-                        line_height: Some(line_step),
+                        line_height: Some(seg_line_step),
                         ..Default::default()
                     },
                 );
                 continue;
             }
 
+            let eff_font_size = match seg.heading_level {
+                Some(1) if view_while_typing && !seg.is_heading_hashes => font_size * 1.42,
+                Some(2) if view_while_typing && !seg.is_heading_hashes => font_size * 1.24,
+                Some(3) if view_while_typing && !seg.is_heading_hashes => font_size * 1.12,
+                Some(_) if view_while_typing && !seg.is_heading_hashes => font_size * 1.04,
+                _ => font_size,
+            };
+
             let font_id = if seg.code_inline || seg.code_block {
-                resolve_code_font(&code_family, font_size, seg.bold, seg.italic)
+                resolve_code_font(&code_family, eff_font_size, seg.bold, seg.italic)
             } else {
-                resolve_prose_font(&prose_family, font_size, seg.bold, seg.italic)
+                resolve_prose_font(&prose_family, eff_font_size, seg.bold, seg.italic)
             };
 
             let fg_base = if focus_mode && seg.line_index != active_cursor_line {
                 pal_copy.fg_focus_dimmed
+            } else if seg.heading_level.is_some() && view_while_typing {
+                pal_copy.fg_heading
             } else {
                 pal_copy.fg_primary
             };
@@ -828,6 +967,18 @@ fn render_editor_pane(
                 Color32::TRANSPARENT
             };
 
+            let strikethrough = if seg.strikethrough && !seg.collapsed_delimiter {
+                Stroke::new(1.3, color)
+            } else {
+                Stroke::NONE
+            };
+            let underline = if seg.link && view_while_typing && !seg.collapsed_delimiter && !seg.muted
+            {
+                Stroke::new(1.0, pal_copy.accent_link)
+            } else {
+                Stroke::NONE
+            };
+
             job.append(
                 &seg.text,
                 leading_space,
@@ -835,7 +986,9 @@ fn render_editor_pane(
                     font_id,
                     color,
                     background,
-                    line_height: Some(line_step),
+                    strikethrough,
+                    underline,
+                    line_height: Some(seg_line_step),
                     ..Default::default()
                 },
             );
@@ -866,7 +1019,7 @@ fn render_editor_pane(
                     .layouter(&mut layouter)
                     .show(ui);
 
-                // Populate fenced code block background shapes and mid-height strikethroughs on `scroll_painter`
+                // Populate block/inline visual overlays on `scroll_painter`
                 let live_spans = session.buffer.compute_live_spans(
                     session.dialect,
                     session.view_while_typing,
@@ -874,8 +1027,20 @@ fn render_editor_pane(
                 );
                 let mut bg_shapes = Vec::new();
                 for ls in &live_spans {
+                    let is_collapsed =
+                        ls.visibility == accent_core::DelimiterVisibility::Collapsed;
                     match &ls.span.kind {
-                        accent_core::AstSpanKind::CodeBlock { .. } => {
+                        accent_core::AstSpanKind::Heading { level: 1 } if is_collapsed => {
+                            let r_bot = output.galley.pos_from_ccursor(egui::text::CCursor::new(
+                                ls.span.char_range.end.saturating_sub(1),
+                            ));
+                            let rule_y = output.galley_pos.y + r_bot.max.y + 1.5;
+                            scroll_painter.line_segment(
+                                [Pos2::new(x_body, rule_y), Pos2::new(x_right, rule_y)],
+                                Stroke::new(1.0, pal.border_headerbar),
+                            );
+                        }
+                        accent_core::AstSpanKind::CodeBlock { info, .. } => {
                             let r_top = output.galley.pos_from_ccursor(egui::text::CCursor::new(
                                 ls.span.char_range.start,
                             ));
@@ -890,37 +1055,203 @@ fn render_editor_pane(
                                         Pos2::new(x_body, sy),
                                         Pos2::new(x_right, ey),
                                     ),
-                                    CornerRadius::ZERO,
+                                    CornerRadius::same(4),
                                     pal.bg_code_block,
                                 ));
+                                if is_collapsed && !info.trim().is_empty() {
+                                    scroll_painter.text(
+                                        Pos2::new(x_right - 10.0, sy + 14.0),
+                                        Align2::RIGHT_CENTER,
+                                        info.trim(),
+                                        font_ui_bold(11.0),
+                                        pal.fg_muted,
+                                    );
+                                }
                             }
                         }
-                        accent_core::AstSpanKind::Strikethrough => {
-                            let (sc, ec) = if ls.visibility
-                                == accent_core::DelimiterVisibility::Collapsed
-                                && ls.span.char_range.len() >= 4
-                            {
-                                (
-                                    ls.span.char_range.start + 2,
-                                    ls.span.char_range.end.saturating_sub(2),
-                                )
+                        accent_core::AstSpanKind::BlockQuote if is_collapsed => {
+                            let r_top = output.galley.pos_from_ccursor(egui::text::CCursor::new(
+                                ls.span.char_range.start,
+                            ));
+                            let r_bot = output.galley.pos_from_ccursor(egui::text::CCursor::new(
+                                ls.span.char_range.end.saturating_sub(1),
+                            ));
+                            let sy = output.galley_pos.y + r_top.min.y + 2.0;
+                            let ey = output.galley_pos.y + r_bot.max.y - 2.0;
+                            if ey > sy {
+                                scroll_painter.rect_filled(
+                                    Rect::from_min_max(
+                                        Pos2::new(x_body + 4.0, sy),
+                                        Pos2::new(x_body + 8.0, ey),
+                                    ),
+                                    CornerRadius::same(2),
+                                    pal.border_headerbar,
+                                );
+                            }
+                        }
+                        accent_core::AstSpanKind::ListItem { task } if is_collapsed => {
+                            let r_top = output.galley.pos_from_ccursor(egui::text::CCursor::new(
+                                ls.span.char_range.start,
+                            ));
+                            let cy = output.galley_pos.y + r_top.min.y + 10.5;
+                            if let Some(checked) = task {
+                                let cb_rect = Rect::from_center_size(
+                                    Pos2::new(x_body + 10.0, cy),
+                                    Vec2::new(14.0, 14.0),
+                                );
+                                if *checked {
+                                    scroll_painter.rect_filled(
+                                        cb_rect,
+                                        CornerRadius::same(3),
+                                        pal.accent_orange,
+                                    );
+                                    scroll_painter.line_segment(
+                                        [
+                                            Pos2::new(cb_rect.left() + 3.0, cb_rect.center().y),
+                                            Pos2::new(
+                                                cb_rect.center().x - 0.5,
+                                                cb_rect.bottom() - 3.5,
+                                            ),
+                                        ],
+                                        Stroke::new(1.6, Color32::WHITE),
+                                    );
+                                    scroll_painter.line_segment(
+                                        [
+                                            Pos2::new(
+                                                cb_rect.center().x - 0.5,
+                                                cb_rect.bottom() - 3.5,
+                                            ),
+                                            Pos2::new(cb_rect.right() - 2.8, cb_rect.top() + 3.2),
+                                        ],
+                                        Stroke::new(1.6, Color32::WHITE),
+                                    );
+                                } else {
+                                    scroll_painter.rect_stroke(
+                                        cb_rect,
+                                        CornerRadius::same(3),
+                                        Stroke::new(1.3, pal.fg_muted),
+                                        StrokeKind::Middle,
+                                    );
+                                }
                             } else {
-                                (ls.span.char_range.start, ls.span.char_range.end)
-                            };
-                            let r0 = output
-                                .galley
-                                .pos_from_ccursor(egui::text::CCursor::new(sc));
-                            let r1 = output
-                                .galley
-                                .pos_from_ccursor(egui::text::CCursor::new(ec));
-                            let strike_y = output.galley_pos.y + r0.min.y + 7.4;
+                                scroll_painter.circle_filled(
+                                    Pos2::new(x_body + 10.0, cy),
+                                    3.2,
+                                    pal.fg_primary,
+                                );
+                            }
+                        }
+                        accent_core::AstSpanKind::ThematicBreak if is_collapsed => {
+                            let r_top = output.galley.pos_from_ccursor(egui::text::CCursor::new(
+                                ls.span.char_range.start,
+                            ));
+                            let cy = output.galley_pos.y + r_top.min.y + 10.5;
                             scroll_painter.line_segment(
-                                [
-                                    Pos2::new(output.galley_pos.x + r0.min.x, strike_y),
-                                    Pos2::new(output.galley_pos.x + r1.max.x, strike_y),
-                                ],
-                                Stroke::new(1.3, pal.fg_primary),
+                                [Pos2::new(x_body, cy), Pos2::new(x_right, cy)],
+                                Stroke::new(1.5, pal.border_headerbar),
                             );
+                        }
+                        accent_core::AstSpanKind::Table { headers, rows } if is_collapsed => {
+                            let r_top = output.galley.pos_from_ccursor(egui::text::CCursor::new(
+                                ls.span.char_range.start,
+                            ));
+                            let r_bot = output.galley.pos_from_ccursor(egui::text::CCursor::new(
+                                ls.span.char_range.end.saturating_sub(1),
+                            ));
+                            let sy = output.galley_pos.y + r_top.min.y + 2.0;
+                            let ey = (output.galley_pos.y + r_bot.max.y - 2.0).max(sy + 32.0);
+                            let total_rows = (1 + rows.len()).max(1);
+                            let row_h = (ey - sy) / (total_rows as f32);
+                            let cols = headers.len().max(1);
+                            let table_w = (x_right - x_body).max(120.0);
+
+                            // Compute proportional column widths from max character length per column
+                            let mut col_weights: Vec<f32> = headers
+                                .iter()
+                                .map(|h| (h.chars().count().max(6) + 4) as f32)
+                                .collect();
+                            for row in rows {
+                                for (c_idx, cell) in row.iter().enumerate() {
+                                    if c_idx < col_weights.len() {
+                                        let w = (cell.chars().count().max(6) + 4) as f32;
+                                        if w > col_weights[c_idx] {
+                                            col_weights[c_idx] = w;
+                                        }
+                                    }
+                                }
+                            }
+                            let weight_sum: f32 = col_weights.iter().sum::<f32>().max(1.0);
+                            let col_widths: Vec<f32> = if col_weights.is_empty() {
+                                vec![table_w / (cols as f32); cols]
+                            } else {
+                                col_weights
+                                    .iter()
+                                    .map(|w| table_w * (*w / weight_sum))
+                                    .collect()
+                            };
+
+                            let table_rect =
+                                Rect::from_min_max(Pos2::new(x_body, sy), Pos2::new(x_right, ey));
+                            scroll_painter.rect_filled(
+                                table_rect,
+                                CornerRadius::same(4),
+                                pal.bg_canvas,
+                            );
+
+                            for r_idx in 0..total_rows {
+                                let ry = sy + (r_idx as f32) * row_h;
+                                let row_rect = Rect::from_min_max(
+                                    Pos2::new(x_body, ry),
+                                    Pos2::new(x_right, ry + row_h),
+                                );
+                                if r_idx == 0 {
+                                    scroll_painter.rect_filled(
+                                        row_rect,
+                                        CornerRadius::ZERO,
+                                        pal.bg_code_block,
+                                    );
+                                } else if r_idx % 2 == 1 {
+                                    scroll_painter.rect_filled(
+                                        row_rect,
+                                        CornerRadius::ZERO,
+                                        pal.bg_code_block.gamma_multiply(0.45),
+                                    );
+                                }
+                                let cells = if r_idx == 0 {
+                                    headers.as_slice()
+                                } else {
+                                    rows[r_idx - 1].as_slice()
+                                };
+                                let mut cx = x_body;
+                                for (c_idx, cell_text) in cells.iter().enumerate() {
+                                    let cw = col_widths
+                                        .get(c_idx)
+                                        .copied()
+                                        .unwrap_or(table_w / (cols as f32));
+                                    let cell_r = Rect::from_min_max(
+                                        Pos2::new(cx, ry),
+                                        Pos2::new(cx + cw, ry + row_h),
+                                    );
+                                    scroll_painter.rect_stroke(
+                                        cell_r,
+                                        CornerRadius::ZERO,
+                                        Stroke::new(1.0, pal.border_headerbar),
+                                        StrokeKind::Middle,
+                                    );
+                                    scroll_painter.with_clip_rect(cell_r.shrink(2.0)).text(
+                                        Pos2::new(cell_r.left() + 10.0, cell_r.center().y),
+                                        Align2::LEFT_CENTER,
+                                        cell_text,
+                                        if r_idx == 0 {
+                                            font_ui_bold(13.5)
+                                        } else {
+                                            font_ui_regular(13.5)
+                                        },
+                                        pal.fg_primary,
+                                    );
+                                    cx += cw;
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -1371,22 +1702,24 @@ fn render_bottom_bar(
 
     if session.toolbar_expanded {
         let icon_xs = [
-            (28.0_f32, FormatCommand::Bold),
-            (68.0, FormatCommand::Italic),
-            (108.0, FormatCommand::Strikethrough),
-            (148.0, FormatCommand::Heading),
-            (189.0, FormatCommand::BulletList),
-            (229.0, FormatCommand::OrderedList),
-            (269.0, FormatCommand::TaskList),
-            (310.0, FormatCommand::BlockQuote),
-            (349.0, FormatCommand::Code),
-            (389.0, FormatCommand::Link),
-            (429.0, FormatCommand::Image),
-            (469.0, FormatCommand::Table),
+            (28.0_f32, FormatCommand::Bold, "tooltip_bold"),
+            (68.0, FormatCommand::Italic, "tooltip_italic"),
+            (108.0, FormatCommand::Strikethrough, "tooltip_strike"),
+            (148.0, FormatCommand::Heading, "tooltip_heading"),
+            (189.0, FormatCommand::BulletList, "tooltip_bullet"),
+            (229.0, FormatCommand::OrderedList, "tooltip_ordered"),
+            (269.0, FormatCommand::TaskList, "tooltip_task"),
+            (310.0, FormatCommand::BlockQuote, "tooltip_quote"),
+            (349.0, FormatCommand::Code, "tooltip_code"),
+            (389.0, FormatCommand::Link, "tooltip_link"),
+            (429.0, FormatCommand::Image, "tooltip_image"),
+            (469.0, FormatCommand::Table, "tooltip_table"),
         ];
-        for (idx, &(ix, cmd)) in icon_xs.iter().enumerate() {
+        for (idx, &(ix, cmd, tip_key)) in icon_xs.iter().enumerate() {
             let btn_r = Rect::from_center_size(Pos2::new(ix, y_mid), Vec2::new(32.0, 32.0));
-            let hit = ui.interact(btn_r, ui.id().with(("fmt_toolbar_btn", idx)), Sense::click());
+            let hit = ui
+                .interact(btn_r, ui.id().with(("fmt_toolbar_btn", idx)), Sense::click())
+                .on_hover_text(I18n::tr(session.locale, tip_key));
             if hit.hovered() {
                 painter.rect_filled(btn_r, CornerRadius::same(6), pal.bg_pill_button);
             }
@@ -1413,7 +1746,9 @@ fn render_bottom_bar(
         );
     }
 
-    let pill_hit = ui.interact(pill_rect, ui.id().with("toolbar_toggle"), Sense::click());
+    let pill_hit = ui
+        .interact(pill_rect, ui.id().with("toolbar_toggle"), Sense::click())
+        .on_hover_text(I18n::tr(session.locale, "tooltip_toolbar_toggle"));
     if pill_hit.clicked() {
         actions.push(Action::ToggleToolbar);
     }
@@ -1434,7 +1769,9 @@ fn render_bottom_bar(
         Pos2::new(win_rect.right() - 160.0, win_rect.bottom() - 42.0),
         Pos2::new(win_rect.right() - 12.0, win_rect.bottom() - 6.0),
     );
-    let stat_hit = ui.interact(stat_btn_rect, ui.id().with("stats_menu_btn"), Sense::click());
+    let stat_hit = ui
+        .interact(stat_btn_rect, ui.id().with("stats_menu_btn"), Sense::click())
+        .on_hover_text(I18n::tr(session.locale, "tooltip_stats"));
     if session.overlay == ActiveOverlay::StatsMenu || stat_hit.hovered() {
         painter.rect_filled(stat_btn_rect, CornerRadius::same(8), pal.bg_pill_button);
     }
@@ -1594,10 +1931,11 @@ fn render_popovers(
         }
         ActiveOverlay::PreviewMenu => {
             // Unambiguous, mutually-exclusive Editing & Viewing Mode Menu:
-            // Exactly ONE row out of the 6 modes has a checkmark `✓` at any time!
+            // Exactly ONE row out of the 6 modes has a checkmark `✓` at any time,
+            // and every row shows its keyboard shortcut right-aligned!
             let pop_rect = Rect::from_min_max(
-                Pos2::new(win_rect.right() - 348.0, 44.0),
-                Pos2::new(win_rect.right() - 48.0, 324.0),
+                Pos2::new(win_rect.right() - 418.0, 44.0),
+                Pos2::new(win_rect.right() - 44.0, 324.0),
             );
             painter.rect_filled(pop_rect, CornerRadius::same(12), pal.bg_popover);
             painter.rect_stroke(
@@ -1619,17 +1957,19 @@ fn render_popovers(
             let editor_modes = [
                 (
                     I18n::tr(session.locale, "editor_only_raw"),
+                    "Ctrl+Shift+E",
                     !session.preview_active && !session.view_while_typing,
                     Action::SetEditorOnlyRaw,
                 ),
                 (
                     I18n::tr(session.locale, "view_while_typing"),
+                    "Ctrl+L",
                     !session.preview_active && session.view_while_typing,
                     Action::SetEditorLivePreview,
                 ),
             ];
 
-            for (idx, (label, is_selected, act)) in editor_modes.into_iter().enumerate() {
+            for (idx, (label, shortcut, is_selected, act)) in editor_modes.into_iter().enumerate() {
                 let ry = pop_rect.top() + 46.0 + (idx as f32) * 34.0;
                 let row_r = Rect::from_min_max(
                     Pos2::new(pop_rect.left() + 8.0, ry - 15.0),
@@ -1669,8 +2009,16 @@ fn render_popovers(
                     pal.fg_primary,
                 );
 
+                painter.text(
+                    Pos2::new(pop_rect.right() - 36.0, ry),
+                    Align2::RIGHT_CENTER,
+                    shortcut,
+                    font_ui_regular(12.5),
+                    pal.fg_muted,
+                );
+
                 if is_selected {
-                    let ck = Pos2::new(pop_rect.right() - 22.0, ry);
+                    let ck = Pos2::new(pop_rect.right() - 20.0, ry);
                     painter.line_segment(
                         [Pos2::new(ck.x - 4.5, ck.y), Pos2::new(ck.x - 1.0, ck.y + 3.5)],
                         Stroke::new(1.8, pal.accent_orange),
@@ -1713,22 +2061,26 @@ fn render_popovers(
                 (
                     PreviewLayout::HalfWidth,
                     I18n::tr(session.locale, "half_width"),
+                    "Ctrl+Shift+P",
                 ),
                 (
                     PreviewLayout::FullWidth,
                     I18n::tr(session.locale, "full_width"),
+                    "Ctrl+Alt+P",
                 ),
                 (
                     PreviewLayout::HalfHeight,
                     I18n::tr(session.locale, "half_height"),
+                    "Ctrl+Shift+J",
                 ),
                 (
                     PreviewLayout::Windowed,
                     I18n::tr(session.locale, "windowed"),
+                    "Ctrl+Shift+W",
                 ),
             ];
 
-            for (idx, (layout, label)) in layouts.into_iter().enumerate() {
+            for (idx, (layout, label, shortcut)) in layouts.into_iter().enumerate() {
                 let ry = pop_rect.top() + 154.0 + (idx as f32) * 34.0;
                 let row_r = Rect::from_min_max(
                     Pos2::new(pop_rect.left() + 8.0, ry - 15.0),
@@ -1791,8 +2143,16 @@ fn render_popovers(
                     pal.fg_primary,
                 );
 
+                painter.text(
+                    Pos2::new(pop_rect.right() - 36.0, ry),
+                    Align2::RIGHT_CENTER,
+                    shortcut,
+                    font_ui_regular(12.5),
+                    pal.fg_muted,
+                );
+
                 if is_selected {
-                    let ck = Pos2::new(pop_rect.right() - 22.0, ry);
+                    let ck = Pos2::new(pop_rect.right() - 20.0, ry);
                     painter.line_segment(
                         [Pos2::new(ck.x - 4.5, ck.y), Pos2::new(ck.x - 1.0, ck.y + 3.5)],
                         Stroke::new(1.8, pal.accent_orange),
@@ -1818,7 +2178,7 @@ fn render_popovers(
         ActiveOverlay::MainMenu => {
             let pop_rect = Rect::from_min_max(
                 Pos2::new(win_rect.right() - 302.0, 44.0),
-                Pos2::new(win_rect.right() - 6.0, 446.0),
+                Pos2::new(win_rect.right() - 6.0, 412.0),
             );
             painter.rect_filled(pop_rect, CornerRadius::same(12), pal.bg_popover);
             painter.rect_stroke(
@@ -1906,31 +2266,25 @@ fn render_popovers(
                     session.focus_mode,
                 ),
                 (
-                    I18n::tr(session.locale, "view_while_typing"),
-                    "Ctrl+L",
-                    176.0,
-                    session.view_while_typing && !session.preview_active,
-                ),
-                (
                     I18n::tr(session.locale, "find_replace"),
                     "Ctrl+H",
-                    216.0,
+                    182.0,
                     session.search_bar_open,
                 ),
                 (
                     I18n::tr(session.locale, "preferences"),
                     "Ctrl+,",
-                    256.0,
+                    222.0,
                     false,
                 ),
-                (I18n::tr(session.locale, "open_tutorial"), "", 296.0, false),
+                (I18n::tr(session.locale, "open_tutorial"), "", 260.0, false),
                 (
                     I18n::tr(session.locale, "keyboard_shortcuts"),
                     "Ctrl+?",
-                    326.0,
+                    292.0,
                     false,
                 ),
-                (I18n::tr(session.locale, "about"), "", 356.0, false),
+                (I18n::tr(session.locale, "about"), "", 324.0, false),
             ];
             for (idx, (label, shortcut, dy, active)) in items.into_iter().enumerate() {
                 let y = pop_rect.top() + dy;
@@ -1966,15 +2320,14 @@ fn render_popovers(
                     match idx {
                         0 => actions.push(Action::ToggleHemingway),
                         1 => actions.push(Action::ToggleFocusMode),
-                        2 => actions.push(Action::ToggleViewWhileTyping),
-                        3 => {
+                        2 => {
                             actions.push(Action::ToggleSearchBar);
                             actions.push(Action::SetOverlay(ActiveOverlay::None));
                         }
-                        4 => actions.push(Action::SetOverlay(ActiveOverlay::PreferencesDialog)),
-                        5 => actions.push(Action::OpenTutorial),
-                        6 => actions.push(Action::SetOverlay(ActiveOverlay::ShortcutsDialog)),
-                        7 => actions.push(Action::SetOverlay(ActiveOverlay::AboutDialog)),
+                        3 => actions.push(Action::SetOverlay(ActiveOverlay::PreferencesDialog)),
+                        4 => actions.push(Action::OpenTutorial),
+                        5 => actions.push(Action::SetOverlay(ActiveOverlay::ShortcutsDialog)),
+                        6 => actions.push(Action::SetOverlay(ActiveOverlay::AboutDialog)),
                         _ => actions.push(Action::SetOverlay(ActiveOverlay::None)),
                     }
                 }
@@ -2577,7 +2930,7 @@ fn render_shortcuts_dialog(
         CornerRadius::ZERO,
         Color32::from_rgba_unmultiplied(0, 0, 0, 48),
     );
-    let dlg_rect = Rect::from_center_size(win_rect.center(), Vec2::new(520.0, 360.0));
+    let dlg_rect = Rect::from_center_size(win_rect.center(), Vec2::new(540.0, 490.0));
     painter.rect_filled(dlg_rect, CornerRadius::same(14), pal.bg_popover);
     painter.rect_stroke(
         dlg_rect,
@@ -2606,7 +2959,12 @@ fn render_shortcuts_dialog(
         actions.push(Action::SetOverlay(ActiveOverlay::None));
     }
     let shortcuts = [
+        ("Ctrl+Shift+E", I18n::tr(session.locale, "editor_only_raw")),
         ("Ctrl+L", I18n::tr(session.locale, "view_while_typing")),
+        ("Ctrl+Shift+P", I18n::tr(session.locale, "half_width")),
+        ("Ctrl+Alt+P", I18n::tr(session.locale, "full_width")),
+        ("Ctrl+Shift+J", I18n::tr(session.locale, "half_height")),
+        ("Ctrl+Shift+W", I18n::tr(session.locale, "windowed")),
         ("Ctrl+T", I18n::tr(session.locale, "hemingway_mode")),
         ("Ctrl+D", I18n::tr(session.locale, "focus_mode")),
         ("Ctrl+H", I18n::tr(session.locale, "find_replace")),
@@ -2615,7 +2973,7 @@ fn render_shortcuts_dialog(
         ("Esc", "Chiudi menu / finestra di dialogo"),
     ];
     for (idx, (key, label)) in shortcuts.into_iter().enumerate() {
-        let ry = dlg_rect.top() + 74.0 + (idx as f32) * 38.0;
+        let ry = dlg_rect.top() + 68.0 + (idx as f32) * 33.0;
         painter.text(
             Pos2::new(dlg_rect.left() + 32.0, ry),
             Align2::LEFT_CENTER,

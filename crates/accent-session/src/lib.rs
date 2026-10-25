@@ -259,6 +259,107 @@ impl I18n {
             (Locale::En, "reading_time") => "reading time",
             (Locale::Es, "reading_time") => "de tiempo de lectura",
 
+            // Hover Tooltips (Headerbar & Bottom Formatting Bar)
+            (Locale::It, "tooltip_new_doc") => "Nuovo documento (Ctrl+N)",
+            (Locale::En, "tooltip_new_doc") => "New Document (Ctrl+N)",
+            (Locale::Es, "tooltip_new_doc") => "Nuevo documento (Ctrl+N)",
+
+            (Locale::It, "tooltip_open") => "Apri documento recente o sfoglia i file (Ctrl+O)",
+            (Locale::En, "tooltip_open") => "Open recent document or browse files (Ctrl+O)",
+            (Locale::Es, "tooltip_open") => "Abrir documento reciente o explorar archivos (Ctrl+O)",
+
+            (Locale::It, "tooltip_save") => "Salva il documento corrente (Ctrl+S)",
+            (Locale::En, "tooltip_save") => "Save current document (Ctrl+S)",
+            (Locale::Es, "tooltip_save") => "Guardar el documento actual (Ctrl+S)",
+
+            (Locale::It, "tooltip_save_menu") => "Salva come... o esporta in altri formati (Ctrl+Shift+S)",
+            (Locale::En, "tooltip_save_menu") => "Save As... or export to other formats (Ctrl+Shift+S)",
+            (Locale::Es, "tooltip_save_menu") => "Guardar como... o exportar a otros formatos (Ctrl+Shift+S)",
+
+            (Locale::It, "tooltip_line_width") => "Scegli larghezza colonna di testo (80ch, 110ch, 140ch, Fluida)",
+            (Locale::En, "tooltip_line_width") => "Choose text column width (80ch, 110ch, 140ch, Fluid)",
+            (Locale::Es, "tooltip_line_width") => "Elegir ancho de columna de texto (80ch, 110ch, 140ch, Fluido)",
+
+            (Locale::It, "tooltip_search") => "Trova e sostituisci nel documento (Ctrl+F / Ctrl+H)",
+            (Locale::En, "tooltip_search") => "Find and replace in document (Ctrl+F / Ctrl+H)",
+            (Locale::Es, "tooltip_search") => "Buscar y reemplazar en el documento (Ctrl+F / Ctrl+H)",
+
+            (Locale::It, "tooltip_preview") => "Modalità editor e pannello di anteprima (Ctrl+L / Ctrl+Shift+P)",
+            (Locale::En, "tooltip_preview") => "Editor modes and preview panel (Ctrl+L / Ctrl+Shift+P)",
+            (Locale::Es, "tooltip_preview") => "Modos de editor y panel de vista previa (Ctrl+L / Ctrl+Shift+P)",
+
+            (Locale::It, "tooltip_main_menu") => "Menu principale, temi e preferenze (F10)",
+            (Locale::En, "tooltip_main_menu") => "Main menu, themes and preferences (F10)",
+            (Locale::Es, "tooltip_main_menu") => "Menú principal, temas y preferencias (F10)",
+
+            (Locale::It, "tooltip_minimize") => "Riduci a icona la finestra",
+            (Locale::En, "tooltip_minimize") => "Minimize window",
+            (Locale::Es, "tooltip_minimize") => "Minimizar ventana",
+
+            (Locale::It, "tooltip_maximize") => "Ingrandisci o ripristina la finestra",
+            (Locale::En, "tooltip_maximize") => "Maximize or restore window",
+            (Locale::Es, "tooltip_maximize") => "Maximizar o restaurar ventana",
+
+            (Locale::It, "tooltip_close") => "Chiudi Accent",
+            (Locale::En, "tooltip_close") => "Close Accent",
+            (Locale::Es, "tooltip_close") => "Cerrar Accent",
+
+            (Locale::It, "tooltip_bold") => "Grassetto (**testo**) (Ctrl+B)",
+            (Locale::En, "tooltip_bold") => "Bold (**text**) (Ctrl+B)",
+            (Locale::Es, "tooltip_bold") => "Negrita (**texto**) (Ctrl+B)",
+
+            (Locale::It, "tooltip_italic") => "Corsivo (*testo*) (Ctrl+I)",
+            (Locale::En, "tooltip_italic") => "Italic (*text*) (Ctrl+I)",
+            (Locale::Es, "tooltip_italic") => "Cursiva (*texto*) (Ctrl+I)",
+
+            (Locale::It, "tooltip_strikethrough") => "Barrato (~~testo~~) (Ctrl+Shift+X)",
+            (Locale::En, "tooltip_strikethrough") => "Strikethrough (~~text~~) (Ctrl+Shift+X)",
+            (Locale::Es, "tooltip_strikethrough") => "Tachado (~~texto~~) (Ctrl+Shift+X)",
+
+            (Locale::It, "tooltip_heading") => "Inserisci titolo / intestazione (##)",
+            (Locale::En, "tooltip_heading") => "Insert heading (##)",
+            (Locale::Es, "tooltip_heading") => "Insertar encabezado (##)",
+
+            (Locale::It, "tooltip_bullet_list") => "Inserisci elenco puntato (-)",
+            (Locale::En, "tooltip_bullet_list") => "Insert bullet list (-)",
+            (Locale::Es, "tooltip_bullet_list") => "Insertar lista con viñetas (-)",
+
+            (Locale::It, "tooltip_ordered_list") => "Inserisci elenco numerato (1.)",
+            (Locale::En, "tooltip_ordered_list") => "Insert numbered list (1.)",
+            (Locale::Es, "tooltip_ordered_list") => "Insertar lista numerada (1.)",
+
+            (Locale::It, "tooltip_task_list") => "Inserisci elenco di attività (- [ ])",
+            (Locale::En, "tooltip_task_list") => "Insert task list (- [ ])",
+            (Locale::Es, "tooltip_task_list") => "Insertar lista de tareas (- [ ])",
+
+            (Locale::It, "tooltip_blockquote") => "Inserisci citazione (>)",
+            (Locale::En, "tooltip_blockquote") => "Insert blockquote (>)",
+            (Locale::Es, "tooltip_blockquote") => "Insertar cita (>)",
+
+            (Locale::It, "tooltip_code") => "Codice inline (`codice`)",
+            (Locale::En, "tooltip_code") => "Inline code (`code`)",
+            (Locale::Es, "tooltip_code") => "Código en línea (`código`)",
+
+            (Locale::It, "tooltip_link") => "Inserisci collegamento ([testo](url))",
+            (Locale::En, "tooltip_link") => "Insert link ([text](url))",
+            (Locale::Es, "tooltip_link") => "Insertar enlace ([texto](url))",
+
+            (Locale::It, "tooltip_image") => "Inserisci immagine (![alt](url))",
+            (Locale::En, "tooltip_image") => "Insert image (![alt](url))",
+            (Locale::Es, "tooltip_image") => "Insertar imagen (![alt](url))",
+
+            (Locale::It, "tooltip_table") => "Inserisci tabella Markdown",
+            (Locale::En, "tooltip_table") => "Insert Markdown table",
+            (Locale::Es, "tooltip_table") => "Insertar tabla Markdown",
+
+            (Locale::It, "tooltip_toggle_toolbar") => "Mostra o nascondi barra degli strumenti di formattazione",
+            (Locale::En, "tooltip_toggle_toolbar") => "Show or hide formatting toolbar",
+            (Locale::Es, "tooltip_toggle_toolbar") => "Mostrar u ocultar barra de formato",
+
+            (Locale::It, "tooltip_stats") => "Statistiche documento (parole, caratteri, frasi, paragrafi, tempo di lettura)",
+            (Locale::En, "tooltip_stats") => "Document statistics (words, characters, sentences, paragraphs, reading time)",
+            (Locale::Es, "tooltip_stats") => "Estadísticas del documento (palabras, caracteres, oraciones, párrafos, tiempo de lectura)",
+
             _ => "",
         }
     }
@@ -523,6 +624,7 @@ pub enum Action {
     ToggleFocusMode,
     ToggleToolbar,
     ToggleSearchBar,
+    SetChromeAutohidden(bool),
     SetSearchQuery(String),
     SetReplaceText(String),
     FindNext,
@@ -567,6 +669,7 @@ pub struct Session {
     pub focus_mode: bool,
     pub toolbar_expanded: bool,
     pub search_bar_open: bool,
+    pub chrome_autohidden: bool,
     pub search_query: String,
     pub replace_text: String,
     pub stat_metric: StatMetric,
@@ -578,7 +681,7 @@ pub struct Session {
 impl Default for Session {
     fn default() -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let sample_path = PathBuf::from("/tmp/oracle_sample.md");
+        let sample_path = PathBuf::from("/tmp/esempio_accent.md");
         if !sample_path.exists() {
             let _ = std::fs::write(&sample_path, DEFAULT_SAMPLE_MARKDOWN);
         }
@@ -593,7 +696,7 @@ impl Default for Session {
             }
         }
         Self {
-            document_title: "oracle_sample.md".to_string(),
+            document_title: "esempio_accent.md".to_string(),
             current_file_path: Some(sample_path),
             is_dirty: false,
             recent_files,
@@ -614,6 +717,7 @@ impl Default for Session {
             focus_mode: false,
             toolbar_expanded: true,
             search_bar_open: false,
+            chrome_autohidden: false,
             search_query: String::new(),
             replace_text: String::new(),
             stat_metric: StatMetric::Words,
@@ -667,7 +771,13 @@ impl Session {
             Action::ToggleHemingway => self.hemingway_mode = !self.hemingway_mode,
             Action::ToggleFocusMode => self.focus_mode = !self.focus_mode,
             Action::ToggleToolbar => self.toolbar_expanded = !self.toolbar_expanded,
-            Action::ToggleSearchBar => self.search_bar_open = !self.search_bar_open,
+            Action::ToggleSearchBar => {
+                self.search_bar_open = !self.search_bar_open;
+                self.chrome_autohidden = false;
+            }
+            Action::SetChromeAutohidden(hidden) => {
+                self.chrome_autohidden = hidden;
+            }
             Action::SetSearchQuery(q) => self.search_query = q,
             Action::SetReplaceText(r) => self.replace_text = r,
             Action::FindNext => {
@@ -718,6 +828,7 @@ impl Session {
                 }
             }
             Action::SetOverlay(overlay) => {
+                self.chrome_autohidden = false;
                 if self.overlay == overlay {
                     self.overlay = ActiveOverlay::None;
                 } else {
@@ -728,6 +839,9 @@ impl Session {
                 if new_text != self.buffer.text() {
                     self.display_word_count_override = None;
                     self.is_dirty = true;
+                    if self.overlay == ActiveOverlay::None && !self.search_bar_open {
+                        self.chrome_autohidden = true;
+                    }
                     self.buffer.set_text(&new_text);
                 }
             }
@@ -737,6 +851,7 @@ impl Session {
             Action::ApplyFormat(cmd) => {
                 self.display_word_count_override = None;
                 self.is_dirty = true;
+                self.chrome_autohidden = false;
                 match cmd {
                     FormatCommand::Bold => self.buffer.wrap_selection("**", "**", "bold"),
                     FormatCommand::Italic => self.buffer.wrap_selection("*", "*", "italic"),
@@ -766,6 +881,7 @@ impl Session {
                 self.document_title = "untitled.md".to_string();
                 self.current_file_path = None;
                 self.is_dirty = false;
+                self.chrome_autohidden = false;
                 self.display_word_count_override = None;
                 self.buffer.set_text("# Nuovo Documento\n\nInizia a scrivere qui...\n");
                 self.buffer.set_cursor(self.buffer.len_chars());
@@ -785,6 +901,7 @@ impl Session {
                     }
                     self.current_file_path = Some(path.clone());
                     self.is_dirty = false;
+                    self.chrome_autohidden = false;
                     self.display_word_count_override = None;
                     self.buffer.set_text(&content);
                     self.buffer.set_cursor(0);
@@ -803,6 +920,7 @@ impl Session {
                 self.document_title = "tutorial_accent.md".to_string();
                 self.current_file_path = Some(tutorial_path);
                 self.is_dirty = false;
+                self.chrome_autohidden = false;
                 self.display_word_count_override = None;
                 self.buffer.set_text(TUTORIAL_MARKDOWN);
                 self.buffer.set_cursor(0);
@@ -858,6 +976,9 @@ impl Session {
             Action::InsertText(text) => {
                 self.display_word_count_override = None;
                 self.is_dirty = true;
+                if self.overlay == ActiveOverlay::None && !self.search_bar_open {
+                    self.chrome_autohidden = true;
+                }
                 self.buffer.insert_text(&text);
             }
             Action::MoveCursor(offset) => {

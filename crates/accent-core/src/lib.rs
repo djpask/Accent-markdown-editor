@@ -4,87 +4,54 @@ use ropey::Rope;
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
 
-/// Default sample document replicating the exact structure and lines observed in Phase 0 Oracle baseline.
+/// Default sample document showcasing Accent's multi-dialect Markdown capabilities.
 pub const DEFAULT_SAMPLE_MARKDOWN: &str = "\
-#### Allegati
-Aggiungere l'elenco dei nomi dei file eventualmente allegati
-(campi  F_Nome_Allegato_Originale__c,
-G_Nome_Allegato_Originale__c, H_Nome_Allegato_Originale__c,
-I_Nome_Allegato_Originale__c,L_Nome_Allegato_Originale__c,
-N_Nome_Allegato_Originale__c, O_Nome_Allegato_Originale__c)
+# Guida ed Esempi di Accent
 
-### 4.4 Altre funzioni
-Le altre funzioni verranno descritte in seguito ad una prima
-realizzazione dell'applicazione.
+Accent è un editor e visualizzatore Markdown multipiattaforma
+progettato in **Rust** puro per offrire un ambiente di scrittura
+rapido, pulito e privo di distrazioni.
 
-# Other markdown examples
+### 1.1 Scrittura e Formattazione Inline
+Durante la stesura puoi utilizzare **grassetto**, *corsivo*, testo
+~~barrato~~, frammenti di `codice inline` e collegamenti ipertestuali
+come [Documentazione Ufficiale Rust](https://doc.rust-lang.org).
 
-- [X] Elemento
-- [ ] efeee
-- [ ] 334
+Quando attivi la modalità **Anteprima durante la digitazione** (`Ctrl+L`),
+tutti i marcatori sintattici vengono tradotti visivamente e riappaiono
+solo quando posizioni il cursore sulla riga o sulla parola interessata.
 
+## 2. Elenchi, Attività e Citazioni
 
-# [sito web repubblica](https://www.repubblica.it)
+- [x] Architettura stratificata a cinque livelli (`L1`–`L5`)
+- [ ] Ripristino automatico da crash tramite journal atomico
+- [ ] Esportazione diretta in HTML5, PDF, DOCX ed EPUB
 
-![Argon rocks!](Argon_rocks%21.png)
+- Primo elemento di elenco puntato standard
+- Secondo elemento con *formattazione* integrata
 
-> Citazione, riga 2 rigaga 3
-> riga lunghissimaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-> altra riga
+> La chiarezza tipografica e l'assenza di distrazioni permettono di
+> concentrarsi esclusivamente sul contenuto.
+> Ogni modifica aggiorna in tempo reale l'albero sintattico e le
+> statistiche del documento.
 
+![Schema Architettura Accent](accent_architettura.png)
 
-<fdfdefae rfererea raerae rearaeraegg t  ts>
+---
 
-
-```
-if
-then
-else
-```
-
-
-all you can ~~eat~~ drink
-
-| Fascicolo | Triage | Comunicazione |
-|:---|:---:|:---|
-| DB001234 | Media | sì |
-| DB001235 | Alta | no |
-| DB001236 | Critica | sì |
-| DB001237 | Bassa | no |
-
-## 5. Architettura del Sistema e Flussi Operativi
-
-L'editor **Accent** è progettato interamente in *Rust* puro sopra il motore grafico immediato `egui` / `eframe`, garantendo prestazioni native, assenza di dipendenze esterne a runtime e piena compatibilità multipiattaforma.
-
-### 5.1 Gestione del Buffer e AST Multi-Dialetto
-Il documento sorgente viene mantenuto in memoria tramite una struttura dati **Rope** (`ropey::Rope`) che consente inserimenti, cancellazioni e conversioni tra offset di byte, caratteri Unicode e righe in tempo logaritmico $O(\\log N)$.
-
-1. **CommonMark Standard**: supporto rigoroso per la specifica base, incluse le regole sugli underscore intraparola (`F_Nome_Allegato_Originale__c`).
-2. **GitHub Flavored Markdown (GFM)**: tabelle, elenchi di attività (`- [x]`), testo barrato (`~~barrato~~`), autolink e blocchi di avviso.
-3. **GitLab Flavored Markdown (GLFM)**: blocchi matematici inline e display, note a piè di pagina e metadati frontmatter.
+## 3. Esempio di Blocco di Codice
 
 ```rust
-fn verify_document_integrity(buffer: &DocumentBuffer) -> bool {
+fn calcola_statistiche(buffer: &DocumentBuffer) -> DocumentStats {
     let stats = buffer.stats();
-    stats.words > 0 && stats.lines > 0
+    assert!(stats.words > 0);
+    stats
 }
 ```
 
-### 5.2 Modalità di Scrittura e Visualizzazione
-Durante la stesura di documenti lunghi è possibile scorrere verticalmente il testo con la rotellina del mouse, la barra di scorrimento laterale o i tasti `PagSu` / `PagGiù` e le frecce direzionali:
+## 4. Tabella Riepilogativa dei Componenti
 
-- **Solo editor (Markdown sorgente)**: mostra sempre tutti i delimitatori di formattazione (`**`, `*`, `~~`, `` ` ``).
-- **Anteprima durante la digitazione**: nasconde i delimitatori di sintassi quando il cursore si trova fuori dallo span attivo e li rivela istantaneamente non appena il cursore entra nella parola.
-- **Pannello di anteprima (A metà larghezza / A tutta pagina / A metà altezza / Finestra separata)**: affianca o sostituisce l'editor con il rendering visuale completo di tabelle, citazioni, codice ed elenchi interattivi.
-
-> Nota operativa: tutte le modifiche effettuate nell'editor aggiornano in tempo reale sia le statistiche nella barra inferiore sia il pannello di anteprima sincronizzato.
-
-#### 5.2.1 Requisiti di Persistenza Atomica
-Ogni salvataggio su disco avviene tramite scrittura su file temporaneo, sincronizzazione fisica (`fsync`) e rinomina atomica per prevenire qualsiasi perdita di dati anche in caso di interruzione improvvisa.
-
-### 5.3 Tabella di Riepilogo dei Moduli
-
-| Modulo | Livello | Responsabilità Principale | Stato |
+| Componente | Livello | Funzione Principale | Stato |
 |:---|:---:|:---|:---:|
 | `accent-core` | L1 | Buffer Rope, parser AST `comrak`, Live Spans | Attivo |
 | `accent-storage` | L2 | Salvataggio atomico e journal di ripristino | Attivo |
@@ -93,8 +60,21 @@ Ogni salvataggio su disco avviene tramite scrittura su file temporaneo, sincroni
 | `accent-session` | L4 | Stato sessione, configurazione, localizzazione | Attivo |
 | `accent-ui` | L5 | Interfaccia utente `egui`, temi, scorciatoie | Attivo |
 
-### 5.4 Note Conclusive e Verifiche di Scorrimento
-Questa sezione conclusiva permette di verificare comodamente lo scorrimento verticale fino in fondo al documento di esempio (`oracle_sample.md`), controllando che l'indicatore di posizione, i blocchi di codice e le intestazioni fuori margine mantengano un allineamento perfetto durante lo scroll continuo.
+## 5. Architettura del Sistema e Flussi Operativi
+
+Il documento sorgente viene mantenuto in memoria tramite una struttura
+dati **Rope** (`ropey::Rope`) che consente inserimenti, cancellazioni
+e conversioni tra offset di byte, caratteri Unicode e righe in tempo
+logaritmico $O(\\log N)$.
+
+1. **CommonMark Standard**: supporto rigoroso per la specifica base, incluse le regole sugli underscore intraparola (`campo_identificativo_documento__c`).
+2. **GitHub Flavored Markdown (GFM)**: tabelle, elenchi di attività (`- [x]`), testo barrato (`~~barrato~~`), autolink e blocchi di avviso.
+3. **GitLab Flavored Markdown (GLFM)**: blocchi matematici inline e display, note a piè di pagina e metadati frontmatter.
+
+#### 5.1 Persistenza Atomica e Scorrevolezza
+Ogni salvataggio su disco avviene tramite scrittura su file temporaneo,
+sincronizzazione fisica (`fsync`) e rinomina atomica per prevenire
+qualsiasi perdita di dati anche in caso di interruzione improvvisa.
 ";
 
 /// Interactive tutorial document opened via Main Menu -> "Apri tutorial" (`SPECS.md`).
@@ -237,7 +217,11 @@ pub enum AstSpanKind {
     CodeBlock { fenced: bool, info: String },
     BlockQuote,
     ListItem { task: Option<bool> },
-    Table,
+    Table {
+        headers: Vec<String>,
+        rows: Vec<Vec<String>>,
+    },
+    ThematicBreak,
     Alert { alert_type: String },
     FrontMatter,
     FootnoteDefinition { name: String },
@@ -297,6 +281,7 @@ pub struct EditorTextSegment {
     pub heading_level: Option<u8>,
     pub is_heading_hashes: bool,
     pub blockquote: bool,
+    pub list_item: bool,
     pub code_block: bool,
     pub bold: bool,
     pub italic: bool,
@@ -424,9 +409,8 @@ impl Default for DocumentBuffer {
 impl DocumentBuffer {
     pub fn from_str_content(text: &str) -> Self {
         let rope = Rope::from_str(text);
-        // Default initial caret at start of `all you can ~~eat~~ drink`
         let default_caret = text
-            .find("all you can")
+            .find("Accent è un editor")
             .map(|b| rope.byte_to_char(b))
             .unwrap_or(0);
         Self {
@@ -597,6 +581,25 @@ impl DocumentBuffer {
         DocumentStats::compute(&self.text())
     }
 
+    /// Returns the half-open byte range of `line_idx` excluding any trailing `\r` or `\n`.
+    pub fn line_content_byte_range(&self, line_idx: usize) -> Range<usize> {
+        if line_idx >= self.rope.len_lines() {
+            return 0..0;
+        }
+        let line_start = self.rope.line_to_byte(line_idx);
+        let slice = self.rope.line(line_idx);
+        let mut content_len = slice.len_bytes();
+        while content_len > 0 {
+            let b = slice.byte(content_len - 1);
+            if b == b'\n' || b == b'\r' {
+                content_len -= 1;
+            } else {
+                break;
+            }
+        }
+        line_start..(line_start + content_len)
+    }
+
     /// Parses the document using `comrak` with the requested `MarkdownDialect` and returns all AST `Sourcepos` spans.
     pub fn extract_ast_spans(&self, dialect: MarkdownDialect) -> Vec<AstSpan> {
         let text = self.text();
@@ -638,6 +641,109 @@ impl DocumentBuffer {
             let mut delimiter_byte_ranges = Vec::new();
             if sr.start < sr.end && sr.end <= text.len() {
                 match &span.kind {
+                    AstSpanKind::Heading { .. } => {
+                        let lr = self.line_content_byte_range(span.start_line);
+                        if !lr.is_empty() && lr.end <= text.len() {
+                            let raw_line = &text[lr.clone()];
+                            let trimmed = raw_line.trim_start_matches([' ', '\t']);
+                            let leading_ws = raw_line.len() - trimmed.len();
+                            let hash_count = trimmed.chars().take_while(|&c| c == '#').count();
+                            let after_hashes = &trimmed[hash_count..];
+                            let space_len = usize::from(after_hashes.starts_with(' '));
+                            let prefix_end = lr.start + leading_ws + hash_count + space_len;
+                            if hash_count > 0 && prefix_end > lr.start && prefix_end <= lr.end {
+                                delimiter_byte_ranges.push(lr.start..prefix_end);
+                            }
+                        }
+                    }
+                    AstSpanKind::CodeBlock { fenced: true, .. } => {
+                        let start_lr = self.line_content_byte_range(span.start_line);
+                        if !start_lr.is_empty() && start_lr.end <= text.len() {
+                            let raw_l = text[start_lr.clone()].trim_start();
+                            if raw_l.starts_with("```") || raw_l.starts_with("~~~") {
+                                delimiter_byte_ranges.push(start_lr);
+                            }
+                        }
+                        if span.end_line > span.start_line {
+                            let end_lr = self.line_content_byte_range(span.end_line);
+                            if !end_lr.is_empty() && end_lr.end <= text.len() {
+                                let raw_l = text[end_lr.clone()].trim_start();
+                                if raw_l.starts_with("```") || raw_l.starts_with("~~~") {
+                                    delimiter_byte_ranges.push(end_lr);
+                                }
+                            }
+                        }
+                    }
+                    AstSpanKind::BlockQuote => {
+                        for l_idx in span.start_line..=span.end_line {
+                            let lr = self.line_content_byte_range(l_idx);
+                            if !lr.is_empty() && lr.end <= text.len() {
+                                let raw_l = &text[lr.clone()];
+                                let trimmed = raw_l.trim_start_matches([' ', '\t']);
+                                if let Some(after_gt) = trimmed.strip_prefix('>') {
+                                    let leading_ws = raw_l.len() - trimmed.len();
+                                    let space_len = usize::from(after_gt.starts_with(' '));
+                                    let prefix_end = lr.start + leading_ws + 1 + space_len;
+                                    delimiter_byte_ranges.push(lr.start..prefix_end);
+                                }
+                            }
+                        }
+                    }
+                    AstSpanKind::ListItem { task } => {
+                        let lr = self.line_content_byte_range(span.start_line);
+                        if !lr.is_empty() && lr.end <= text.len() {
+                            let raw_l = &text[lr.clone()];
+                            let trimmed = raw_l.trim_start_matches([' ', '\t']);
+                            let leading_ws = raw_l.len() - trimmed.len();
+                            let is_task_prefix = task.is_some()
+                                && trimmed.len() >= 5
+                                && matches!(
+                                    &trimmed[..5],
+                                    "- [ ]"
+                                        | "- [x]"
+                                        | "- [X]"
+                                        | "* [ ]"
+                                        | "* [x]"
+                                        | "* [X]"
+                                        | "+ [ ]"
+                                        | "+ [x]"
+                                        | "+ [X]"
+                                );
+                            if is_task_prefix {
+                                let after_box = &trimmed[5..];
+                                let space_len = usize::from(after_box.starts_with(' '));
+                                let prefix_end = lr.start + leading_ws + 5 + space_len;
+                                delimiter_byte_ranges.push(lr.start..prefix_end);
+                            } else if trimmed.starts_with("- ")
+                                || trimmed.starts_with("* ")
+                                || trimmed.starts_with("+ ")
+                            {
+                                let prefix_end = lr.start + leading_ws + 2;
+                                delimiter_byte_ranges.push(lr.start..prefix_end);
+                            }
+                        }
+                    }
+                    AstSpanKind::Table { .. } => {
+                        for l_idx in span.start_line..=span.end_line {
+                            let lr = self.line_content_byte_range(l_idx);
+                            if !lr.is_empty() && lr.end <= text.len() {
+                                delimiter_byte_ranges.push(lr);
+                            }
+                        }
+                    }
+                    AstSpanKind::ThematicBreak => {
+                        let lr = self.line_content_byte_range(span.start_line);
+                        if !lr.is_empty() && lr.end <= text.len() {
+                            delimiter_byte_ranges.push(lr);
+                        }
+                    }
+                    AstSpanKind::MathBlock => {
+                        let slice = &text[sr.clone()];
+                        if slice.starts_with("$$") && slice.ends_with("$$") && sr.len() >= 4 {
+                            delimiter_byte_ranges.push(sr.start..(sr.start + 2));
+                            delimiter_byte_ranges.push((sr.end - 2)..sr.end);
+                        }
+                    }
                     AstSpanKind::Strong | AstSpanKind::Strikethrough => {
                         if sr.len() >= 4 {
                             delimiter_byte_ranges.push(sr.start..(sr.start + 2));
@@ -665,6 +771,10 @@ impl DocumentBuffer {
                         }
                     }
                     AstSpanKind::Link {
+                        content_byte_range: Some(cr),
+                        ..
+                    }
+                    | AstSpanKind::Image {
                         content_byte_range: Some(cr),
                         ..
                     } => {
@@ -704,7 +814,38 @@ impl DocumentBuffer {
             NodeValue::TaskItem(symbol) => Some(AstSpanKind::ListItem {
                 task: Some(symbol.is_some()),
             }),
-            NodeValue::Table(_) => Some(AstSpanKind::Table),
+            NodeValue::Table(_) => {
+                let mut headers = Vec::new();
+                let mut rows = Vec::new();
+                for row_node in node.children() {
+                    let is_header =
+                        matches!(row_node.data.borrow().value, NodeValue::TableRow(true));
+                    let mut cells = Vec::new();
+                    for cell_node in row_node.children() {
+                        let mut cell_inlines = Vec::new();
+                        for c in cell_node.children() {
+                            Self::collect_preview_inlines(
+                                c,
+                                &mut cell_inlines,
+                                false,
+                                false,
+                                false,
+                                None,
+                            );
+                        }
+                        let cell_text: String =
+                            cell_inlines.iter().map(|i| i.text.as_str()).collect();
+                        cells.push(cell_text);
+                    }
+                    if is_header {
+                        headers = cells;
+                    } else {
+                        rows.push(cells);
+                    }
+                }
+                Some(AstSpanKind::Table { headers, rows })
+            }
+            NodeValue::ThematicBreak => Some(AstSpanKind::ThematicBreak),
             NodeValue::Alert(alert) => Some(AstSpanKind::Alert {
                 alert_type: format!("{:?}", alert.alert_type),
             }),
@@ -742,7 +883,24 @@ impl DocumentBuffer {
         drop(data);
 
         if let Some(kind) = maybe_kind {
-            let byte_range = self.sourcepos_to_byte_range(sp);
+            let mut byte_range = self.sourcepos_to_byte_range(sp);
+            if matches!(kind, AstSpanKind::CodeInline | AstSpanKind::MathInline)
+                && !byte_range.is_empty()
+            {
+                let delim_b = if matches!(kind, AstSpanKind::CodeInline) {
+                    b'`'
+                } else {
+                    b'$'
+                };
+                while byte_range.start > 0
+                    && self.rope.byte(byte_range.start - 1) == delim_b
+                    && byte_range.end < self.rope.len_bytes()
+                    && self.rope.byte(byte_range.end) == delim_b
+                {
+                    byte_range.start -= 1;
+                    byte_range.end += 1;
+                }
+            }
             if !byte_range.is_empty() {
                 let char_range =
                     self.byte_to_char(byte_range.start)..self.byte_to_char(byte_range.end);
@@ -818,23 +976,31 @@ impl DocumentBuffer {
             let content_end = line_start + content_len;
             let raw_line = &text[line_start..content_end];
 
-            let heading_level = live_spans.iter().find_map(|ls| match &ls.span.kind {
+            let heading_span = live_spans.iter().find_map(|ls| match &ls.span.kind {
                 AstSpanKind::Heading { level }
                     if ls.span.start_line <= line_idx && line_idx <= ls.span.end_line =>
                 {
-                    Some(*level)
+                    Some((*level, ls.visibility == DelimiterVisibility::Collapsed))
                 }
                 _ => None,
             });
-            let in_code_block = live_spans.iter().any(|ls| {
+            let heading_level = heading_span.map(|(lvl, _)| lvl);
+
+            let code_block_span = live_spans.iter().find(|ls| {
                 matches!(ls.span.kind, AstSpanKind::CodeBlock { .. })
                     && ls.span.start_line <= line_idx
                     && line_idx <= ls.span.end_line
             });
+            let in_code_block = code_block_span.is_some();
+
             let in_blockquote = live_spans.iter().any(|ls| {
                 matches!(ls.span.kind, AstSpanKind::BlockQuote)
                     && ls.span.start_line <= line_idx
                     && line_idx <= ls.span.end_line
+            });
+            let is_list_item_start = live_spans.iter().any(|ls| {
+                matches!(ls.span.kind, AstSpanKind::ListItem { .. })
+                    && ls.span.start_line == line_idx
             });
 
             if content_len == 0 {
@@ -851,23 +1017,41 @@ impl DocumentBuffer {
                 continue;
             }
 
-            if in_code_block {
+            if let Some(cb_ls) = code_block_span {
+                let is_fence_delim = cb_ls
+                    .delimiter_byte_ranges
+                    .iter()
+                    .any(|dr| dr.start == line_start && dr.end == content_end);
+                let fence_collapsed =
+                    is_fence_delim && cb_ls.visibility == DelimiterVisibility::Collapsed;
                 out.push(EditorTextSegment {
-                    text: text[line_start..full_line_end].to_string(),
-                    byte_range: line_start..full_line_end,
+                    text: text[line_start..content_end].to_string(),
+                    byte_range: line_start..content_end,
                     is_line_start: true,
                     line_index: line_idx,
                     code_block: true,
                     code_inline: true,
+                    muted: is_fence_delim,
+                    collapsed_delimiter: fence_collapsed,
                     ..Default::default()
                 });
+                if content_end < full_line_end {
+                    out.push(EditorTextSegment {
+                        text: text[content_end..full_line_end].to_string(),
+                        byte_range: content_end..full_line_end,
+                        is_line_start: false,
+                        line_index: line_idx,
+                        code_block: true,
+                        ..Default::default()
+                    });
+                }
                 continue;
             }
 
             let mut content_start = line_start;
             let mut next_is_line_start = true;
 
-            if let Some(level) = heading_level {
+            if let Some((level, heading_collapsed)) = heading_span {
                 let trimmed = raw_line.trim_start();
                 let leading_ws = raw_line.len() - trimmed.len();
                 let hash_count = trimmed.chars().take_while(|&c| c == '#').count();
@@ -884,6 +1068,8 @@ impl DocumentBuffer {
                         heading_level: Some(level),
                         is_heading_hashes: true,
                         bold: true,
+                        muted: heading_collapsed,
+                        collapsed_delimiter: heading_collapsed,
                         ..Default::default()
                     });
                     content_start = prefix_end;
@@ -899,6 +1085,7 @@ impl DocumentBuffer {
                 line_idx,
                 heading_level,
                 in_blockquote,
+                is_list_item_start,
                 next_is_line_start,
             );
             out.extend(inline_segs);
@@ -912,6 +1099,7 @@ impl DocumentBuffer {
                     line_index: line_idx,
                     heading_level,
                     blockquote: in_blockquote,
+                    list_item: is_list_item_start,
                     ..Default::default()
                 });
             }
@@ -929,6 +1117,7 @@ impl DocumentBuffer {
         line_idx: usize,
         heading_level: Option<u8>,
         in_blockquote: bool,
+        is_list_item_start: bool,
         first_is_line_start: bool,
     ) -> Vec<EditorTextSegment> {
         if range.is_empty() {
@@ -1011,6 +1200,7 @@ impl DocumentBuffer {
                 line_index: line_idx,
                 heading_level,
                 blockquote: in_blockquote,
+                list_item: is_list_item_start,
                 bold: base_bold,
                 ..Default::default()
             };
@@ -1658,7 +1848,7 @@ mod tests {
 
         buf.set_cursor(0);
         buf.insert_text("Test ");
-        assert!(buf.text().starts_with("Test #### Allegati"));
+        assert!(buf.text().starts_with("Test # Guida ed Esempi di Accent"));
     }
 
     #[test]
@@ -1674,11 +1864,11 @@ mod tests {
     #[test]
     fn test_intraword_underscores_never_trigger_bold_or_emphasis() {
         let sample = "\
-F_1a_data_violazione_il__c
-(campi  F_Nome_Allegato_Originale__c,
-G_Nome_Allegato_Originale__c, H_Nome_Allegato_Originale__c,
-I_Nome_Allegato_Originale__c,L_Nome_Allegato_Originale__c,
-N_Nome_Allegato_Originale__c, O_Nome_Allegato_Originale__c)
+campo_data_registrazione__c
+(campi  campo_identificativo_documento__c,
+valore_configurazione_sistema__c, codice_riferimento_interno__c,
+parametro_sincronizzazione__c, attributo_personalizzato__c,
+indice_archivio_principale__c, stato_elaborazione_finale__c)
 ";
         let buf = DocumentBuffer::from_str_content(sample);
         for dialect in [
@@ -1745,10 +1935,10 @@ N_Nome_Allegato_Originale__c, O_Nome_Allegato_Originale__c)
 
     #[test]
     fn test_caret_aware_live_spans_collapsed_vs_expanded_and_zero_drift() {
-        let md = "Inizio **parola** e ~~eat~~ fine\n";
+        let md = "Inizio **parola** e ~~barrato~~ fine\n";
         let buf = DocumentBuffer::from_str_content(md);
 
-        // 1. Caret at byte 0 (outside both **parola** and ~~eat~~) with view_while_typing = true
+        // 1. Caret at byte 0 (outside both **parola** and ~~barrato~~) with view_while_typing = true
         let collapsed_spans = buf.compute_live_spans(MarkdownDialect::Gfm, true, 0..0);
         let strong_span = collapsed_spans
             .iter()
@@ -1772,7 +1962,7 @@ N_Nome_Allegato_Originale__c, O_Nome_Allegato_Originale__c)
             .find(|s| matches!(s.span.kind, AstSpanKind::Strong))
             .expect("Strong span present");
         assert_eq!(strong_expanded.visibility, DelimiterVisibility::Expanded);
-        // While ~~eat~~ (bytes 20..27) remains Collapsed!
+        // While ~~barrato~~ remains Collapsed!
         let strike_still_collapsed = expanded_spans
             .iter()
             .find(|s| matches!(s.span.kind, AstSpanKind::Strikethrough))
@@ -1784,12 +1974,91 @@ N_Nome_Allegato_Originale__c, O_Nome_Allegato_Originale__c)
     }
 
     #[test]
+    fn test_view_while_typing_collapses_headings_tables_quotes_lists_and_code_fences() {
+        let md = "\
+# Titolo Principale
+
+Paragrafo neutro dove risiede il cursore.
+
+## Sottotitolo
+
+- [x] Attività completata
+- Voce elenco
+
+> Citazione importante
+
+```rust
+let x = 42;
+```
+
+| Colonna A | Colonna B |
+|:---|:---|
+| Valore 1 | Valore 2 |
+";
+        let buf = DocumentBuffer::from_str_content(md);
+        let neutral_pos = md.find("Paragrafo neutro").unwrap();
+
+        let segs = buf.build_editor_segments(
+            MarkdownDialect::Gfm,
+            true,
+            neutral_pos..(neutral_pos + 1),
+        );
+        // 1:1 text preservation across all blocks
+        let reconstructed: String = segs.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(reconstructed, md);
+
+        // Verify `# ` and `## ` heading prefixes are collapsed when caret is outside
+        assert!(segs
+            .iter()
+            .any(|s| s.is_heading_hashes && s.text == "# " && s.collapsed_delimiter));
+        assert!(segs
+            .iter()
+            .any(|s| s.is_heading_hashes && s.text == "## " && s.collapsed_delimiter));
+
+        // Verify `- [x] `, `- `, `> `, and ` ```rust ` are collapsed when caret is outside
+        assert!(segs
+            .iter()
+            .any(|s| s.text == "- [x] " && s.collapsed_delimiter));
+        assert!(segs
+            .iter()
+            .any(|s| s.text == "- " && s.collapsed_delimiter));
+        assert!(segs
+            .iter()
+            .any(|s| s.text == "> " && s.collapsed_delimiter));
+        assert!(segs
+            .iter()
+            .any(|s| s.text == "```rust" && s.collapsed_delimiter));
+
+        // Verify table lines are collapsed when caret is outside, and expand when caret enters table
+        let live_outside = buf.compute_live_spans(
+            MarkdownDialect::Gfm,
+            true,
+            neutral_pos..(neutral_pos + 1),
+        );
+        let table_outside = live_outside
+            .iter()
+            .find(|s| matches!(s.span.kind, AstSpanKind::Table { .. }))
+            .expect("Table span present");
+        assert_eq!(table_outside.visibility, DelimiterVisibility::Collapsed);
+        assert_eq!(table_outside.delimiter_byte_ranges.len(), 3);
+
+        let table_pos = md.find("Valore 1").unwrap();
+        let live_inside =
+            buf.compute_live_spans(MarkdownDialect::Gfm, true, table_pos..(table_pos + 1));
+        let table_inside = live_inside
+            .iter()
+            .find(|s| matches!(s.span.kind, AstSpanKind::Table { .. }))
+            .expect("Table span present");
+        assert_eq!(table_inside.visibility, DelimiterVisibility::Expanded);
+    }
+
+    #[test]
     fn test_classify_lines_outdented_headings_and_code() {
         let buf = DocumentBuffer::default();
         let lines = buf.classify_lines();
         assert!(matches!(
             lines.first(),
-            Some(LineKind::Heading { level: 4, .. })
+            Some(LineKind::Heading { level: 1, .. })
         ));
         assert!(lines.iter().any(|l| matches!(l, LineKind::CodeBody { .. })));
         assert!(lines
