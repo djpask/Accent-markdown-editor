@@ -1,0 +1,18 @@
+[package]
+name = "accent-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+accent-core = { path = "../accent-core" }
+accent-storage = { path = "../accent-storage" }
+accent-mermaid = { path = "../accent-mermaid" }
+accent-export = { path = "../accent-export" }
+accent-session = { path = "../accent-session" }
+eframe.workspace = true
+egui.workspace = true
+fontdb.workspace = true
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true

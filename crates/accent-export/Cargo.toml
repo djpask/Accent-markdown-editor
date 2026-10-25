@@ -1,0 +1,10 @@
+[package]
+name = "accent-export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+accent-core = { path = "../accent-core" }
+pulldown-cmark.workspace = true
+serde.workspace = true

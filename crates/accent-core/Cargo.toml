@@ -1,0 +1,12 @@
+[package]
+name = "accent-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ropey.workspace = true
+comrak.workspace = true
+pulldown-cmark.workspace = true
+serde.workspace = true
+serde_json.workspace = true

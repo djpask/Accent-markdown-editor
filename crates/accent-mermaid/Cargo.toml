@@ -1,0 +1,9 @@
+[package]
+name = "accent-mermaid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+accent-core = { path = "../accent-core" }
+serde.workspace = true
