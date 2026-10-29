@@ -360,6 +360,19 @@ impl I18n {
             (Locale::En, "tooltip_stats") => "Document statistics (words, characters, sentences, paragraphs, reading time)",
             (Locale::Es, "tooltip_stats") => "Estadísticas del documento (palabras, caracteres, oraciones, párrafos, tiempo de lectura)",
 
+            // Phase 4: Crash Recovery Banner (it, en, es)
+            (Locale::It, "recovery_banner_msg") => "⚠ Documento ripristinato da una chiusura imprevista (modifiche recuperate dal journal)",
+            (Locale::En, "recovery_banner_msg") => "⚠ Document restored from an unexpected exit (unsaved edits recovered from journal)",
+            (Locale::Es, "recovery_banner_msg") => "⚠ Documento restaurado tras un cierre inesperado (cambios recuperados del journal)",
+
+            (Locale::It, "recovery_confirm_save") => "Conferma e Salva",
+            (Locale::En, "recovery_confirm_save") => "Confirm & Save",
+            (Locale::Es, "recovery_confirm_save") => "Confirmar y Guardar",
+
+            (Locale::It, "recovery_discard") => "Scarta ripristino",
+            (Locale::En, "recovery_discard") => "Discard Recovery",
+            (Locale::Es, "recovery_discard") => "Descartar recuperación",
+
             _ => "",
         }
     }
@@ -639,6 +652,8 @@ pub enum Action {
     OpenTutorial,
     SaveDocument,
     SaveAsFile(PathBuf),
+    ConfirmRecoverySave,
+    DiscardRecovery,
     SetFileDialogDir(PathBuf),
     SetFileDialogInput(String),
     ExportDocument(String),
@@ -646,11 +661,21 @@ pub enum Action {
     MoveCursor(usize),
 }
 
+/// Debounce threshold for *Save-while-typing* WAL journaling (`< 300ms` per `SPECS.md` Pillar 8).
+pub const JOURNAL_DEBOUNCE_MS: u64 = 200;
+
 #[derive(Debug, Clone)]
 pub struct Session {
     pub document_title: String,
     pub current_file_path: Option<PathBuf>,
     pub is_dirty: bool,
+    pub recovery_dir: PathBuf,
+    pub original_file_hash: Option<String>,
+    pub last_edit_instant: Option<std::time::Instant>,
+    pub last_edit_utc_ms: u64,
+    pub journal_pending_flush: bool,
+    pub recovered_from_crash: bool,
+    pub recovery_banner_active: bool,
     pub recent_files: Vec<PathBuf>,
     pub file_dialog_dir: PathBuf,
     pub file_dialog_input: String,
@@ -680,6 +705,12 @@ pub struct Session {
 
 impl Default for Session {
     fn default() -> Self {
+        Self::with_recovery_dir(accent_storage::default_recovery_dir())
+    }
+}
+
+impl Session {
+    pub fn with_recovery_dir(recovery_dir: PathBuf) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let sample_path = PathBuf::from("/tmp/esempio_accent.md");
         if !sample_path.exists() {
@@ -695,15 +726,24 @@ impl Default for Session {
                 recent_files.push(candidate);
             }
         }
-        Self {
+        let default_buf = DocumentBuffer::default();
+        let initial_hash = Some(accent_storage::compute_content_hash(&default_buf.text()));
+        let mut session = Self {
             document_title: "esempio_accent.md".to_string(),
             current_file_path: Some(sample_path),
             is_dirty: false,
+            recovery_dir,
+            original_file_hash: initial_hash,
+            last_edit_instant: None,
+            last_edit_utc_ms: 0,
+            journal_pending_flush: false,
+            recovered_from_crash: false,
+            recovery_banner_active: false,
             recent_files,
             file_dialog_dir: cwd,
             file_dialog_input: "documento.md".to_string(),
             status_message: None,
-            buffer: DocumentBuffer::default(),
+            buffer: default_buf,
             theme: ThemeMode::Sepia,
             locale: Locale::It,
             dialect: MarkdownDialect::Gfm,
@@ -723,11 +763,126 @@ impl Default for Session {
             stat_metric: StatMetric::Words,
             overlay: ActiveOverlay::None,
             display_word_count_override: None,
+        };
+        session.check_startup_crash_recovery();
+        session
+    }
+
+    fn mark_dirty_edit(&mut self) {
+        self.display_word_count_override = None;
+        self.is_dirty = true;
+        self.journal_pending_flush = true;
+        self.last_edit_instant = Some(std::time::Instant::now());
+        self.last_edit_utc_ms = accent_storage::current_utc_ms();
+    }
+
+    /// Immediately persists the current buffer state into the recovery WAL journal.
+    pub fn flush_journal_now(&mut self) -> std::io::Result<PathBuf> {
+        let cur_char = self.buffer.cursor();
+        let cur_byte = self.buffer.char_to_byte(cur_char);
+        let entry = accent_storage::RecoveryJournalEntry::new(
+            self.current_file_path.clone(),
+            self.document_title.clone(),
+            self.buffer.text(),
+            cur_char,
+            cur_byte,
+            self.original_file_hash.clone(),
+            self.is_dirty,
+        );
+        let written = accent_storage::write_journal_entry(&self.recovery_dir, &entry)?;
+        self.journal_pending_flush = false;
+        Ok(written)
+    }
+
+    /// Checks whether the `< 300ms` debounce window has elapsed and flushes the journal if needed.
+    pub fn poll_journal_flush(&mut self, now: std::time::Instant) -> bool {
+        if !self.is_dirty || !self.journal_pending_flush {
+            return false;
+        }
+        let debounce = std::time::Duration::from_millis(JOURNAL_DEBOUNCE_MS);
+        let ready = match self.last_edit_instant {
+            Some(last) => now.saturating_duration_since(last) >= debounce,
+            None => true,
+        };
+        if ready {
+            let _ = self.flush_journal_now();
+            true
+        } else {
+            false
         }
     }
-}
 
-impl Session {
+    /// Returns the remaining duration before the pending journal flush should be triggered.
+    pub fn time_until_next_journal_flush(
+        &self,
+        now: std::time::Instant,
+    ) -> Option<std::time::Duration> {
+        if !self.is_dirty || !self.journal_pending_flush {
+            return None;
+        }
+        let debounce = std::time::Duration::from_millis(JOURNAL_DEBOUNCE_MS);
+        match self.last_edit_instant {
+            Some(last) => Some(debounce.saturating_sub(now.saturating_duration_since(last))),
+            None => Some(std::time::Duration::ZERO),
+        }
+    }
+
+    /// Restores the editor buffer and cursor from a `RecoveryJournalEntry` discovered on startup.
+    pub fn restore_from_journal_entry(&mut self, entry: accent_storage::RecoveryJournalEntry) {
+        self.document_title = entry.document_title.clone();
+        self.file_dialog_input = entry.document_title.clone();
+        if let Some(ref target) = entry.target_path {
+            if let Some(parent) = target.parent() {
+                self.file_dialog_dir = parent.to_path_buf();
+            }
+        }
+        self.current_file_path = entry.target_path;
+        self.original_file_hash = entry.original_file_hash;
+        self.display_word_count_override = None;
+        self.buffer.set_text(&entry.content);
+        self.buffer
+            .set_cursor(entry.cursor_char_offset.min(self.buffer.len_chars()));
+        self.is_dirty = true;
+        self.journal_pending_flush = false;
+        self.recovered_from_crash = true;
+        self.recovery_banner_active = true;
+        self.chrome_autohidden = false;
+        self.status_message = Some(I18n::tr(self.locale, "recovery_banner_msg").to_string());
+    }
+
+    /// Scans `self.recovery_dir` on startup to automatically restore any unclosed dirty session.
+    pub fn check_startup_crash_recovery(&mut self) -> bool {
+        if let Some(entry) = accent_storage::find_recovery_journal_for_path(
+            &self.recovery_dir,
+            self.current_file_path.as_deref(),
+        ) {
+            self.restore_from_journal_entry(entry);
+            return true;
+        }
+        if let Some(entry) = accent_storage::scan_recovery_journals(&self.recovery_dir)
+            .into_iter()
+            .next()
+        {
+            self.restore_from_journal_entry(entry);
+            return true;
+        }
+        false
+    }
+
+    /// Cleans up the recovery journal when the application closes normally without unsaved edits.
+    pub fn on_clean_exit(&mut self) {
+        if self.is_dirty {
+            if self.journal_pending_flush {
+                let _ = self.flush_journal_now();
+            }
+        } else {
+            let _ = accent_storage::remove_journal_for_target(
+                &self.recovery_dir,
+                self.current_file_path.as_deref(),
+            );
+        }
+    }
+
     pub fn apply(&mut self, action: Action) {
         match action {
             Action::SetTheme(theme) => self.theme = theme,
@@ -821,8 +976,7 @@ impl Session {
                         updated.push_str(&current[..pos]);
                         updated.push_str(&self.replace_text);
                         updated.push_str(&current[pos + self.search_query.len()..]);
-                        self.display_word_count_override = None;
-                        self.is_dirty = true;
+                        self.mark_dirty_edit();
                         self.buffer.set_text(&updated);
                     }
                 }
@@ -837,9 +991,11 @@ impl Session {
             }
             Action::UpdateBufferText(new_text) => {
                 if new_text != self.buffer.text() {
-                    self.display_word_count_override = None;
-                    self.is_dirty = true;
-                    if self.overlay == ActiveOverlay::None && !self.search_bar_open {
+                    self.mark_dirty_edit();
+                    if self.overlay == ActiveOverlay::None
+                        && !self.search_bar_open
+                        && !self.recovery_banner_active
+                    {
                         self.chrome_autohidden = true;
                     }
                     self.buffer.set_text(&new_text);
@@ -847,10 +1003,13 @@ impl Session {
             }
             Action::SetSelection(primary, secondary) => {
                 self.buffer.set_selection(primary, secondary);
+                if self.is_dirty {
+                    self.journal_pending_flush = true;
+                    self.last_edit_instant = Some(std::time::Instant::now());
+                }
             }
             Action::ApplyFormat(cmd) => {
-                self.display_word_count_override = None;
-                self.is_dirty = true;
+                self.mark_dirty_edit();
                 self.chrome_autohidden = false;
                 match cmd {
                     FormatCommand::Bold => self.buffer.wrap_selection("**", "**", "bold"),
@@ -878,17 +1037,42 @@ impl Session {
                 }
             }
             Action::NewDocument => {
+                let _ = accent_storage::remove_journal_for_target(&self.recovery_dir, None);
                 self.document_title = "untitled.md".to_string();
                 self.current_file_path = None;
                 self.is_dirty = false;
+                self.journal_pending_flush = false;
+                self.recovered_from_crash = false;
+                self.recovery_banner_active = false;
                 self.chrome_autohidden = false;
                 self.display_word_count_override = None;
-                self.buffer.set_text("# Nuovo Documento\n\nInizia a scrivere qui...\n");
+                let init_txt = "# Nuovo Documento\n\nInizia a scrivere qui...\n";
+                self.original_file_hash = Some(accent_storage::compute_content_hash(init_txt));
+                self.buffer.set_text(init_txt);
                 self.buffer.set_cursor(self.buffer.len_chars());
                 self.overlay = ActiveOverlay::None;
             }
             Action::OpenFile(path) => {
-                if let Ok(content) = std::fs::read_to_string(&path) {
+                let disk_content = std::fs::read_to_string(&path).ok();
+                let disk_hash = disk_content
+                    .as_deref()
+                    .map(accent_storage::compute_content_hash);
+
+                if let Some(mut entry) = accent_storage::find_recovery_journal_for_path(
+                    &self.recovery_dir,
+                    Some(&path),
+                ) {
+                    if entry.original_file_hash.is_none() {
+                        entry.original_file_hash = disk_hash;
+                    }
+                    self.restore_from_journal_entry(entry);
+                    self.recent_files.retain(|p| p != &path);
+                    self.recent_files.insert(0, path);
+                    if self.recent_files.len() > 8 {
+                        self.recent_files.truncate(8);
+                    }
+                    self.overlay = ActiveOverlay::None;
+                } else if let Some(content) = disk_content {
                     let title = path
                         .file_name()
                         .and_then(|n| n.to_str())
@@ -900,7 +1084,11 @@ impl Session {
                         self.file_dialog_dir = parent.to_path_buf();
                     }
                     self.current_file_path = Some(path.clone());
+                    self.original_file_hash = disk_hash;
                     self.is_dirty = false;
+                    self.journal_pending_flush = false;
+                    self.recovered_from_crash = false;
+                    self.recovery_banner_active = false;
                     self.chrome_autohidden = false;
                     self.display_word_count_override = None;
                     self.buffer.set_text(&content);
@@ -917,9 +1105,18 @@ impl Session {
             Action::OpenTutorial => {
                 let tutorial_path = PathBuf::from("/tmp/accent_tutorial.md");
                 let _ = std::fs::write(&tutorial_path, TUTORIAL_MARKDOWN);
+                let _ = accent_storage::remove_journal_for_target(
+                    &self.recovery_dir,
+                    Some(&tutorial_path),
+                );
                 self.document_title = "tutorial_accent.md".to_string();
                 self.current_file_path = Some(tutorial_path);
+                self.original_file_hash =
+                    Some(accent_storage::compute_content_hash(TUTORIAL_MARKDOWN));
                 self.is_dirty = false;
+                self.journal_pending_flush = false;
+                self.recovered_from_crash = false;
+                self.recovery_banner_active = false;
                 self.chrome_autohidden = false;
                 self.display_word_count_override = None;
                 self.buffer.set_text(TUTORIAL_MARKDOWN);
@@ -927,19 +1124,66 @@ impl Session {
                 self.status_message = Some("Tutorial caricato".to_string());
                 self.overlay = ActiveOverlay::None;
             }
-            Action::SaveDocument => {
+            Action::SaveDocument | Action::ConfirmRecoverySave => {
                 let target = self
                     .current_file_path
                     .clone()
                     .unwrap_or_else(|| PathBuf::from("/tmp/accent_autosave.md"));
-                if accent_storage::atomic_save(&target, &self.buffer.text()).is_ok() {
+                let text = self.buffer.text();
+                if accent_storage::atomic_save(&target, &text).is_ok() {
+                    let _ = accent_storage::remove_journal_for_target(
+                        &self.recovery_dir,
+                        self.current_file_path.as_deref(),
+                    );
+                    let _ = accent_storage::remove_journal_for_target(
+                        &self.recovery_dir,
+                        Some(&target),
+                    );
                     self.is_dirty = false;
+                    self.journal_pending_flush = false;
+                    self.recovered_from_crash = false;
+                    self.recovery_banner_active = false;
+                    self.chrome_autohidden = false;
+                    self.original_file_hash = Some(accent_storage::compute_content_hash(&text));
                     self.current_file_path = Some(target.clone());
                     self.status_message = Some(format!("Salvato in {}", target.display()));
                 }
             }
+            Action::DiscardRecovery => {
+                let _ = accent_storage::remove_journal_for_target(
+                    &self.recovery_dir,
+                    self.current_file_path.as_deref(),
+                );
+                self.is_dirty = false;
+                self.journal_pending_flush = false;
+                self.recovered_from_crash = false;
+                self.recovery_banner_active = false;
+                self.chrome_autohidden = false;
+                self.display_word_count_override = None;
+                if let Some(path) = self.current_file_path.clone() {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        self.original_file_hash =
+                            Some(accent_storage::compute_content_hash(&content));
+                        self.buffer.set_text(&content);
+                        self.buffer.set_cursor(0);
+                    }
+                } else {
+                    let init_txt = "# Nuovo Documento\n\nInizia a scrivere qui...\n";
+                    self.original_file_hash = Some(accent_storage::compute_content_hash(init_txt));
+                    self.buffer.set_text(init_txt);
+                    self.buffer.set_cursor(0);
+                }
+                self.status_message = Some("Ripristino scartato".to_string());
+            }
             Action::SaveAsFile(path) => {
-                if accent_storage::atomic_save(&path, &self.buffer.text()).is_ok() {
+                let text = self.buffer.text();
+                if accent_storage::atomic_save(&path, &text).is_ok() {
+                    let _ = accent_storage::remove_journal_for_target(
+                        &self.recovery_dir,
+                        self.current_file_path.as_deref(),
+                    );
+                    let _ =
+                        accent_storage::remove_journal_for_target(&self.recovery_dir, Some(&path));
                     let title = path
                         .file_name()
                         .and_then(|n| n.to_str())
@@ -947,7 +1191,12 @@ impl Session {
                         .to_string();
                     self.document_title = title;
                     self.current_file_path = Some(path.clone());
+                    self.original_file_hash = Some(accent_storage::compute_content_hash(&text));
                     self.is_dirty = false;
+                    self.journal_pending_flush = false;
+                    self.recovered_from_crash = false;
+                    self.recovery_banner_active = false;
+                    self.chrome_autohidden = false;
                     self.recent_files.retain(|p| p != &path);
                     self.recent_files.insert(0, path.clone());
                     self.status_message = Some(format!("Salvato come {}", path.display()));
@@ -974,15 +1223,21 @@ impl Session {
                 self.overlay = ActiveOverlay::None;
             }
             Action::InsertText(text) => {
-                self.display_word_count_override = None;
-                self.is_dirty = true;
-                if self.overlay == ActiveOverlay::None && !self.search_bar_open {
+                self.mark_dirty_edit();
+                if self.overlay == ActiveOverlay::None
+                    && !self.search_bar_open
+                    && !self.recovery_banner_active
+                {
                     self.chrome_autohidden = true;
                 }
                 self.buffer.insert_text(&text);
             }
             Action::MoveCursor(offset) => {
                 self.buffer.set_cursor(offset);
+                if self.is_dirty {
+                    self.journal_pending_flush = true;
+                    self.last_edit_instant = Some(std::time::Instant::now());
+                }
             }
         }
     }
@@ -1156,5 +1411,73 @@ mod tests {
         let (x_fluid, w_fluid) = session.line_width.compute_column_bounds(1200.0);
         assert!(w_fluid > 980.0);
         assert!(x_fluid >= 68.0);
+    }
+
+    #[test]
+    fn test_crash_recovery_debounced_wal_and_session_restoration() {
+        let base_dir = std::env::temp_dir().join(format!(
+            "accent_session_wal_test_{}_{}",
+            std::process::id(),
+            accent_storage::current_utc_ms()
+        ));
+        let recovery_dir = base_dir.join("recovery");
+        std::fs::create_dir_all(&recovery_dir).expect("create recovery_dir");
+
+        let doc_path = base_dir.join("session_crash_test.md");
+        let initial_content = "# Documento Iniziale\n\nParagrafo originale.\n";
+        accent_storage::atomic_save(&doc_path, initial_content).expect("save initial file");
+
+        // 1. Start session, open file, edit text without saving, and trigger debounced WAL flush
+        {
+            let mut session = Session::with_recovery_dir(recovery_dir.clone());
+            session.apply(Action::OpenFile(doc_path.clone()));
+            assert!(!session.is_dirty);
+            assert!(!session.recovered_from_crash);
+
+            let edited = "# Documento Iniziale\n\nParagrafo originale.\nFrase scritta prima del crash improvviso";
+            session.apply(Action::UpdateBufferText(edited.to_string()));
+            session.apply(Action::MoveCursor(edited.chars().count()));
+            assert!(session.is_dirty);
+            assert!(session.journal_pending_flush);
+
+            // Simulate elapsed time >= JOURNAL_DEBOUNCE_MS (< 300ms)
+            let future = std::time::Instant::now()
+                + std::time::Duration::from_millis(JOURNAL_DEBOUNCE_MS + 20);
+            assert!(session.poll_journal_flush(future));
+            assert!(!session.journal_pending_flush);
+            // Drop session without saving (simulating SIGKILL / power loss)
+        }
+
+        // Verify original file on disk was NOT touched before explicit save
+        assert_eq!(
+            std::fs::read_to_string(&doc_path).expect("read disk file"),
+            initial_content
+        );
+
+        // 2. Restart session and open the same file -> must automatically restore from WAL
+        let mut restarted = Session::with_recovery_dir(recovery_dir.clone());
+        restarted.apply(Action::OpenFile(doc_path.clone()));
+        assert!(restarted.is_dirty);
+        assert!(restarted.recovered_from_crash);
+        assert!(restarted.recovery_banner_active);
+        assert!(restarted
+            .buffer
+            .text()
+            .contains("Frase scritta prima del crash improvviso"));
+
+        // 3. Confirm & Save -> atomically updates target file and removes recovery journal
+        restarted.apply(Action::ConfirmRecoverySave);
+        assert!(!restarted.is_dirty);
+        assert!(!restarted.recovered_from_crash);
+        assert!(!restarted.recovery_banner_active);
+        assert!(
+            accent_storage::find_recovery_journal_for_path(&recovery_dir, Some(&doc_path))
+                .is_none()
+        );
+        assert!(std::fs::read_to_string(&doc_path)
+            .expect("read saved file")
+            .contains("Frase scritta prima del crash improvviso"));
+
+        let _ = std::fs::remove_dir_all(&base_dir);
     }
 }

@@ -61,10 +61,10 @@ Keep these checkboxes updated as phases complete (`[ ]` Pending, `[~]` In Progre
   - [x] Implement inline live formatting in `accent-ui` editor canvas.
   - [x] Implement side-by-side Split Preview and separate OS Window Preview (`ctx.show_viewport_immediate`).
 
-- [ ] **Phase 4: Uncompromising Reliability (Crash Recovery WAL & Atomic Save)**
-  - [ ] Implement `< 300ms` debounced crash-recovery journaling in `accent-storage`.
-  - [ ] Implement automatic dirty-session restoration on startup after simulated crash.
-  - [ ] Implement `write-temp -> fsync -> atomic rename` file saving with comprehensive unit tests.
+- [x] **Phase 4: Uncompromising Reliability (Crash Recovery WAL & Atomic Save)**
+  - [x] Implement `< 300ms` debounced crash-recovery journaling in `accent-storage`.
+  - [x] Implement automatic dirty-session restoration on startup after simulated crash.
+  - [x] Implement `write-temp -> fsync -> atomic rename` file saving with comprehensive unit tests.
 
 - [ ] **Phase 5: Native Mermaid GPU Rendering & 100% Rust Export Pipeline**
   - [ ] Integrate pure-Rust Mermaid SVG generation + `resvg` texture rasterization with hash caching.

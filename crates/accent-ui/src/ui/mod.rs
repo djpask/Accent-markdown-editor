@@ -130,7 +130,8 @@ pub fn render_ui(
 
     let chrome_hidden = session.chrome_autohidden
         && session.overlay == ActiveOverlay::None
-        && !session.search_bar_open;
+        && !session.search_bar_open
+        && !session.recovery_banner_active;
 
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(pal.bg_canvas))
@@ -157,6 +158,11 @@ pub fn render_ui(
             // 3. Render Find/Replace Bar if open
             if session.search_bar_open {
                 render_search_bar(ui, &painter, rect, session, &pal, actions);
+            }
+
+            // 3b. Render Crash Recovery Notification Banner if restored from dirty WAL journal
+            if session.recovery_banner_active {
+                render_recovery_banner(ui, &painter, rect, session, &pal, actions);
             }
 
             // 4. Render Bottom Overlay Bar unless auto-hidden while typing
@@ -436,6 +442,13 @@ fn render_headerbar(
         font_ui_bold(14.5),
         fg,
     );
+    if session.is_dirty {
+        painter.circle_filled(
+            Pos2::new(180.0, y_mid - 6.0),
+            3.2,
+            Color32::from_rgb(0xd4, 0x6a, 0x1e),
+        );
+    }
     painter.line_segment(
         [Pos2::new(185.5, 13.0), Pos2::new(185.5, 35.0)],
         Stroke::new(1.0, pal.border_headerbar),
@@ -681,6 +694,104 @@ fn render_search_bar(
     }
 }
 
+fn render_recovery_banner(
+    ui: &mut Ui,
+    painter: &Painter,
+    win_rect: Rect,
+    session: &Session,
+    pal: &AccentPalette,
+    actions: &mut Vec<Action>,
+) {
+    let top_offset = if session.search_bar_open { 88.0 } else { 48.0 };
+    let banner_rect = Rect::from_min_max(
+        Pos2::new(win_rect.left(), top_offset),
+        Pos2::new(win_rect.right(), top_offset + 44.0),
+    );
+    let banner_bg = match session.theme {
+        ThemeMode::Dark => Color32::from_rgb(0x42, 0x35, 0x22),
+        ThemeMode::Sepia => Color32::from_rgb(0xf2, 0xe4, 0xca),
+        ThemeMode::Light => Color32::from_rgb(0xfd, 0xf2, 0xdb),
+    };
+    let banner_border = Color32::from_rgb(0xc8, 0x8a, 0x2e);
+    painter.rect_filled(banner_rect, CornerRadius::ZERO, banner_bg);
+    painter.line_segment(
+        [
+            Pos2::new(banner_rect.left(), banner_rect.bottom()),
+            Pos2::new(banner_rect.right(), banner_rect.bottom()),
+        ],
+        Stroke::new(1.0, banner_border),
+    );
+
+    let y_mid = banner_rect.center().y;
+    let msg = I18n::tr(session.locale, "recovery_banner_msg");
+    painter.text(
+        Pos2::new(banner_rect.left() + 24.0, y_mid),
+        Align2::LEFT_CENTER,
+        msg,
+        font_ui_bold(13.0),
+        pal.fg_primary,
+    );
+
+    let discard_rect = Rect::from_center_size(
+        Pos2::new(banner_rect.right() - 102.0, y_mid),
+        Vec2::new(148.0, 28.0),
+    );
+    let confirm_rect = Rect::from_center_size(
+        Pos2::new(banner_rect.right() - 264.0, y_mid),
+        Vec2::new(152.0, 28.0),
+    );
+
+    let confirm_hit = ui.interact(
+        confirm_rect,
+        ui.id().with("recovery_confirm_save_btn"),
+        Sense::click(),
+    );
+    let confirm_fill = if confirm_hit.hovered() {
+        Color32::from_rgb(0x28, 0x7a, 0x4b)
+    } else {
+        Color32::from_rgb(0x2e, 0x8b, 0x57)
+    };
+    painter.rect_filled(confirm_rect, CornerRadius::same(6), confirm_fill);
+    painter.text(
+        confirm_rect.center(),
+        Align2::CENTER_CENTER,
+        I18n::tr(session.locale, "recovery_confirm_save"),
+        font_ui_bold(12.5),
+        Color32::WHITE,
+    );
+    if confirm_hit.clicked() {
+        actions.push(Action::ConfirmRecoverySave);
+    }
+
+    let discard_hit = ui.interact(
+        discard_rect,
+        ui.id().with("recovery_discard_btn"),
+        Sense::click(),
+    );
+    let discard_fill = if discard_hit.hovered() {
+        pal.bg_pill_button
+    } else {
+        pal.bg_pill_button.gamma_multiply(0.75)
+    };
+    painter.rect_filled(discard_rect, CornerRadius::same(6), discard_fill);
+    painter.rect_stroke(
+        discard_rect,
+        CornerRadius::same(6),
+        Stroke::new(1.0, pal.border_headerbar),
+        StrokeKind::Inside,
+    );
+    painter.text(
+        discard_rect.center(),
+        Align2::CENTER_CENTER,
+        I18n::tr(session.locale, "recovery_discard"),
+        font_ui_bold(12.5),
+        pal.fg_primary,
+    );
+    if discard_hit.clicked() {
+        actions.push(Action::DiscardRecovery);
+    }
+}
+
 fn render_workspace_area(
     ui: &mut Ui,
     painter: &Painter,
@@ -692,14 +803,18 @@ fn render_workspace_area(
 ) {
     let chrome_hidden = session.chrome_autohidden
         && session.overlay == ActiveOverlay::None
-        && !session.search_bar_open;
-    let top_y = if chrome_hidden {
+        && !session.search_bar_open
+        && !session.recovery_banner_active;
+    let mut top_y = if chrome_hidden {
         8.0
     } else if session.search_bar_open {
         88.0
     } else {
         48.0
     };
+    if session.recovery_banner_active {
+        top_y += 44.0;
+    }
     let bot_y = if chrome_hidden {
         win_rect.bottom() - 8.0
     } else {
@@ -2013,14 +2128,16 @@ fn render_bottom_bar(
         actions.push(Action::ToggleToolbar);
     }
 
-    if let Some(msg) = &session.status_message {
-        painter.text(
-            Pos2::new(win_rect.center().x + 40.0, y_mid),
-            Align2::CENTER_CENTER,
-            msg,
-            font_ui_regular(12.5),
-            pal.fg_muted,
-        );
+    if !session.recovery_banner_active {
+        if let Some(msg) = &session.status_message {
+            painter.text(
+                Pos2::new(pill_x + 28.0, y_mid),
+                Align2::LEFT_CENTER,
+                msg,
+                font_ui_regular(12.5),
+                pal.fg_muted,
+            );
+        }
     }
 
     // Bottom-right word counter
