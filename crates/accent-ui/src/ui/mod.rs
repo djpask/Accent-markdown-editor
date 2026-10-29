@@ -810,7 +810,7 @@ fn render_workspace_area(
 
 fn render_editor_pane(
     ui: &mut Ui,
-    painter: &Painter,
+    _painter: &Painter,
     pane_rect: Rect,
     session: &Session,
     pal: &AccentPalette,
@@ -856,12 +856,11 @@ fn render_editor_pane(
     let prose_family = session.typography.prose_font_family.clone();
     let code_family = session.typography.code_font_family.clone();
     let selection_bytes = session.buffer.selection_byte_range();
-    let eff_caret_key = if !view_while_typing {
-        None
-    } else if selection_bytes.start != selection_bytes.end {
+    let pre_selection_bytes = selection_bytes.clone();
+    let eff_caret_key = if view_while_typing {
         Some(selection_bytes.clone())
     } else {
-        Some(session.buffer.line_content_byte_range(session.buffer.cursor_line()))
+        None
     };
     let active_cursor_line = if focus_mode {
         session.buffer.cursor_line()
@@ -882,6 +881,8 @@ fn render_editor_pane(
         wrap_w_bits: u32,
         font_size_bits: u32,
         line_step_bits: u32,
+        ppp_bits: u32,
+        atlas_size: [usize; 2],
         prose_family: String,
         code_family: String,
     }
@@ -890,6 +891,11 @@ fn render_editor_pane(
         let eff_wrap_w = wrap_width.max(col_width + base_indent + 16.0);
         let is_session_buf = text_str == session.buffer.as_str();
         let cache_id = Id::new("accent_editor_galley_cache");
+        let gen_id = Id::new("accent_editor_atlas_gen");
+        let pre_atlas = ui.fonts(|f| f.font_image_size());
+        let ppp_bits = ui.ctx().pixels_per_point().to_bits();
+        let pass_nr = ui.ctx().cumulative_pass_nr();
+
         let key = EditorGalleyCacheKey {
             buf_rev: if is_session_buf { buf_rev } else { 0 },
             dialect,
@@ -901,11 +907,13 @@ fn render_editor_pane(
             wrap_w_bits: eff_wrap_w.to_bits(),
             font_size_bits: font_size.to_bits(),
             line_step_bits: line_step.to_bits(),
+            ppp_bits,
+            atlas_size: pre_atlas,
             prose_family: prose_family.clone(),
             code_family: code_family.clone(),
         };
 
-        if is_session_buf {
+        if is_session_buf && pass_nr >= 2 {
             if let Some((cached_key, cached_galley)) = ui.ctx().data_mut(|d| {
                 d.get_temp::<(EditorGalleyCacheKey, Arc<egui::Galley>)>(cache_id)
             }) {
@@ -1027,10 +1035,48 @@ fn render_editor_pane(
             );
         }
 
-        let galley = ui.fonts(|f| f.layout_job(job));
-        if is_session_buf {
+        let (mut last_seen_atlas, mut atlas_gen) = ui
+            .ctx()
+            .data_mut(|d| d.get_temp::<([usize; 2], u32)>(gen_id))
+            .unwrap_or((pre_atlas, 0));
+        if last_seen_atlas != pre_atlas {
+            atlas_gen = atlas_gen.wrapping_add(1);
+            last_seen_atlas = pre_atlas;
             ui.ctx()
-                .data_mut(|d| d.insert_temp(cache_id, (key, Arc::clone(&galley))));
+                .data_mut(|d| d.insert_temp(gen_id, (last_seen_atlas, atlas_gen)));
+        }
+
+        let caret_jitter = if view_while_typing {
+            ((selection_bytes
+                .start
+                .wrapping_mul(31)
+                .wrapping_add(selection_bytes.end))
+                % 17) as f32
+                * 0.0002
+        } else {
+            0.0
+        };
+        job.wrap.max_width = eff_wrap_w + (atlas_gen as f32) * 0.0005 + caret_jitter;
+        let mut galley = ui.fonts(|f| f.layout_job(job.clone()));
+        let post_atlas = ui.fonts(|f| f.font_image_size());
+        if post_atlas != pre_atlas {
+            // The Font Atlas texture grew mid-way through `layout_job`, invalidating earlier rows' UVs!
+            // Re-layout immediately with incremented `atlas_gen` against the new `post_atlas` dimensions.
+            atlas_gen = atlas_gen.wrapping_add(1);
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(gen_id, (post_atlas, atlas_gen)));
+            job.wrap.max_width = eff_wrap_w + (atlas_gen as f32) * 0.0005 + caret_jitter;
+            galley = ui.fonts(|f| f.layout_job(job));
+            ui.ctx().request_repaint();
+        }
+
+        if is_session_buf && pass_nr >= 2 && post_atlas == pre_atlas {
+            let mut final_key = key;
+            final_key.atlas_size = post_atlas;
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(cache_id, (final_key, Arc::clone(&galley))));
+        } else if pass_nr < 2 {
+            ui.ctx().request_repaint();
         }
         galley
     };
@@ -1046,6 +1092,11 @@ fn render_editor_pane(
                 let scroll_painter = ui.painter().clone();
                 let code_bg_shape_idx = scroll_painter.add(egui::Shape::Noop);
 
+                // Suppress egui's oversized full-line-height cursor bar so we can draw a crisp
+                // character-proportioned caret directly on `scroll_painter`.
+                let prev_cursor_stroke = ui.visuals().text_cursor.stroke;
+                ui.visuals_mut().text_cursor.stroke = Stroke::NONE;
+
                 let te_id = Id::new("accent_live_markdown_editor");
                 let mut output = TextEdit::multiline(&mut editable_text)
                     .id(te_id)
@@ -1057,11 +1108,68 @@ fn render_editor_pane(
                     .layouter(&mut layouter)
                     .show(ui);
 
+                ui.visuals_mut().text_cursor.stroke = prev_cursor_stroke;
+
+                // Capture post-TextEdit cursor range immediately so mouse clicks on collapsed spans
+                // convert CCursor char indices to UTF-8 byte offsets and trigger an immediate repaint (<16ms).
+                let click_anchor_id = Id::new("accent_editor_click_anchor");
+                let (primary_pressed, primary_down, pointer_pos, press_origin) =
+                    ui.ctx().input(|i| {
+                        (
+                            i.pointer.primary_pressed(),
+                            i.pointer.primary_down(),
+                            i.pointer.interact_pos(),
+                            i.pointer.press_origin(),
+                        )
+                    });
+
+                let mut active_cursor_range = output
+                    .cursor_range
+                    .map(|cr| cr.as_ccursor_range())
+                    .or_else(|| output.state.cursor.char_range());
+
+                if primary_pressed {
+                    if let Some(cr) = active_cursor_range {
+                        ui.ctx().data_mut(|d| {
+                            d.insert_temp(click_anchor_id, (pointer_pos, cr.primary.index));
+                        });
+                    }
+                } else if primary_down {
+                    let is_stationary_click = match (press_origin, pointer_pos) {
+                        (Some(orig), Some(cur)) => orig.distance(cur) < 3.5,
+                        _ => false,
+                    };
+                    if is_stationary_click {
+                        if let Some((_, anchored_char)) = ui
+                            .ctx()
+                            .data_mut(|d| d.get_temp::<(Option<Pos2>, usize)>(click_anchor_id))
+                        {
+                            let locked = egui::text::CCursorRange::one(egui::text::CCursor::new(
+                                anchored_char,
+                            ));
+                            output.state.cursor.set_char_range(Some(locked));
+                            output.state.clone().store(ui.ctx(), output.response.id);
+                            active_cursor_range = Some(locked);
+                        }
+                    }
+                } else {
+                    ui.ctx()
+                        .data_mut(|d| d.remove::<(Option<Pos2>, usize)>(click_anchor_id));
+                }
+
+                let post_selection_bytes = if let Some(cr) = active_cursor_range {
+                    let p = cr.primary.index;
+                    let s = cr.secondary.index;
+                    session.buffer.char_to_byte(p.min(s))..session.buffer.char_to_byte(p.max(s))
+                } else {
+                    pre_selection_bytes.clone()
+                };
+
                 // Populate block/inline visual overlays on `scroll_painter` with O(1) viewport culling
                 let live_spans = session.buffer.compute_live_spans_arc(
                     session.dialect,
                     session.view_while_typing,
-                    session.buffer.selection_byte_range(),
+                    post_selection_bytes.clone(),
                 );
                 let vis_min_y = (pane_rect.top() - output.galley_pos.y - 400.0).max(0.0);
                 let vis_max_y = (pane_rect.bottom() - output.galley_pos.y + 400.0).max(0.0);
@@ -1396,7 +1504,7 @@ fn render_editor_pane(
                         egui::text::CCursor::new(sel.end),
                     );
                     output.state.cursor.set_char_range(Some(c_range));
-                    output.state.store(ui.ctx(), output.response.id);
+                    output.state.clone().store(ui.ctx(), output.response.id);
                     let cur_local = output
                         .galley
                         .pos_from_ccursor(egui::text::CCursor::new(session.buffer.cursor()));
@@ -1407,16 +1515,22 @@ fn render_editor_pane(
                     if session.overlay == ActiveOverlay::None && !session.search_bar_open {
                         output.response.request_focus();
                     }
-                } else if let Some(c_range) = output.state.cursor.char_range() {
+                } else if let Some(c_range) = active_cursor_range {
                     let p = c_range.primary.index;
                     let s = c_range.secondary.index;
+                    let new_sel_chars = p.min(s)..p.max(s);
                     let cur_sel = session.buffer.selection_char_range();
-                    let cursor_moved = p != session.buffer.cursor();
-                    if cursor_moved
-                        || (p.min(s)..p.max(s)) != cur_sel
-                        || output.response.changed()
-                    {
+                    let cursor_moved = p != session.buffer.cursor()
+                        || new_sel_chars != cur_sel
+                        || post_selection_bytes != pre_selection_bytes;
+                    if cursor_moved || output.response.changed() {
                         actions.push(Action::SetSelection(p, s));
+                        ui.ctx().data_mut(|d| {
+                            d.remove::<(EditorGalleyCacheKey, Arc<egui::Galley>)>(Id::new(
+                                "accent_editor_galley_cache",
+                            ));
+                        });
+                        ui.ctx().request_repaint();
                     }
                     if cursor_moved || output.response.changed() {
                         let cur_local = output
@@ -1429,17 +1543,48 @@ fn render_editor_pane(
                     }
                 }
 
-                // Ensure a crisp caret line is always visible in headless screenshot mode when unfocused
-                if !output.response.has_focus() && !session.preview_active {
+                // Draw a crisp, character-proportioned caret centered vertically on the active text glyph
+                if !(session.preview_active && session.preview_layout == PreviewLayout::FullWidth) {
+                    let caret_char_idx = output
+                        .state
+                        .cursor
+                        .char_range()
+                        .map(|r| r.primary.index)
+                        .unwrap_or_else(|| session.buffer.cursor());
                     let cur_rect = output
                         .galley
-                        .pos_from_ccursor(egui::text::CCursor::new(session.buffer.cursor()));
+                        .pos_from_ccursor(egui::text::CCursor::new(caret_char_idx));
+                    let cur_line = session.buffer.cursor_line();
+                    let caret_font_size = if session.view_while_typing {
+                        let h_lvl = live_spans.iter().find_map(|ls| match ls.span.kind {
+                            accent_core::AstSpanKind::Heading { level }
+                                if ls.span.start_line <= cur_line
+                                    && cur_line <= ls.span.end_line =>
+                            {
+                                Some(level)
+                            }
+                            _ => None,
+                        });
+                        match h_lvl {
+                            Some(1) => font_size * 1.42,
+                            Some(2) => font_size * 1.24,
+                            Some(3) => font_size * 1.12,
+                            Some(_) => font_size * 1.04,
+                            None => font_size,
+                        }
+                    } else {
+                        font_size
+                    };
                     let cx = (output.galley_pos.x + cur_rect.min.x).max(x_body);
-                    let cy = output.galley_pos.y + cur_rect.min.y;
-                    if cy >= pane_rect.top() && cy < pane_rect.bottom() {
+                    let text_center_y =
+                        output.galley_pos.y + row_top(cur_rect) + caret_font_size * 0.22;
+                    let caret_h = (caret_font_size * 1.02).max(14.0);
+                    let cy_top = text_center_y - caret_h * 0.52;
+                    let cy_bot = text_center_y + caret_h * 0.48;
+                    if cy_bot >= pane_rect.top() && cy_top <= pane_rect.bottom() {
                         scroll_painter.line_segment(
-                            [Pos2::new(cx, cy + 2.0), Pos2::new(cx, cy + 20.0)],
-                            Stroke::new(1.3, pal.fg_primary),
+                            [Pos2::new(cx, cy_top), Pos2::new(cx, cy_bot)],
+                            Stroke::new(1.5, pal.fg_primary),
                         );
                     }
                 }

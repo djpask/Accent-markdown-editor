@@ -128,6 +128,7 @@ impl eframe::App for AccentApp {
         // Borrow-Checker Rule (AGENTS.md Section 3):
         // Treat Session as read-only during UI rendering, collect Actions into a frame-local Vec,
         // and drain/apply all actions at the end of update().
+        let atlas_before = ctx.fonts(|f| f.font_image_size());
         let mut actions = Vec::new();
         ui::render_ui(
             ctx,
@@ -135,6 +136,7 @@ impl eframe::App for AccentApp {
             &mut actions,
             &mut self.sync_cursor_to_widget,
         );
+        let atlas_after = ctx.fonts(|f| f.font_image_size());
         let had_actions = !actions.is_empty();
         for action in actions {
             if matches!(
@@ -153,7 +155,7 @@ impl eframe::App for AccentApp {
             }
             self.session.apply(action);
         }
-        if had_actions {
+        if had_actions || atlas_before != atlas_after || self.frame_count <= 3 {
             ctx.request_repaint();
         }
 

@@ -79,8 +79,7 @@ To prevent spaghetti code and `egui` borrow-checker conflicts, Accent is organiz
 
 - **L3 — `accent-export` & `accent-mermaid` (Renderers & Exporters):**
   - **Zero External Runtime Dependencies:** Everything is compiled into the single Rust binary (no Pandoc, no WebView).
-  - Pure Rust Mermaid-to-SVG/Pixmap renderer (`resvg`) with content-hash caching.
-  - Pure Rust exporters for PDF (`krilla`/`typst`), DOCX (`docx-rs`), and EPUB (`epub-builder`) consuming the L1 AST.
+  - **Pure Rust exporters** for PDF (krilla/typst), DOCX (docx-rs), ODT (ODF 1.2 XML packaged via the zip crate with uncompressed mimetype header), LaTeX (.tex AST serializer with strict special-character escaping), and EPUB (epub-builder) consuming the L1 AST.
 
 - **L4 — `accent-session` (Commands, Config, & i18n):**
   - Holds `Session` state, user preferences, undo/redo history, i18n localization (`en`, `it`, `es`), and the central `Action` / `Command` dispatcher (`session.apply(Action)`).

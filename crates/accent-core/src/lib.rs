@@ -570,7 +570,10 @@ impl DocumentBuffer {
         }
         let start = self.line_col_1based_to_byte(sp.start);
         let end_inclusive = self.line_col_1based_to_byte(sp.end);
-        let end = (end_inclusive + 1).min(self.rope.len_bytes());
+        let mut end = (end_inclusive + 1).min(self.rope.len_bytes());
+        while end < self.rope.len_bytes() && !self.as_str().is_char_boundary(end) {
+            end += 1;
+        }
         if start <= end {
             start..end
         } else {
@@ -2431,6 +2434,64 @@ let x = 42;
                 2,
                 "First table must have exactly 2 data rows (#101 and #102), not absorb trailing paragraphs"
             );
+        }
+    }
+
+    #[test]
+    fn test_utf8_multibyte_char_to_byte_caret_expansion_inclusive_boundaries() {
+        let doc = "Città perché — **parola** fine";
+        let mut buf = DocumentBuffer::from_str_content(doc);
+
+        // Locate the `Strong` span for `**parola**`
+        let spans = buf.extract_ast_spans(MarkdownDialect::Gfm);
+        let strong_span = spans
+            .iter()
+            .find(|s| matches!(s.kind, AstSpanKind::Strong))
+            .expect("Strong span for **parola** should exist");
+
+        assert_eq!(&doc[strong_span.byte_range.clone()], "**parola**");
+        let start_char = strong_span.char_range.start;
+        let end_char = strong_span.char_range.end;
+        // Verify that multi-byte UTF-8 chars ('à', 'é', '—') before `**parola**` cause byte_range != char_range
+        assert!(
+            strong_span.byte_range.start > start_char,
+            "Multi-byte UTF-8 characters before **parola** must make byte_range.start > char_range.start"
+        );
+
+        // Every single char position from the first `*` (start_char) through the position immediately
+        // after the last `*` (end_char) INCLUSIVE must expand `**parola**` when converted via char_to_byte!
+        for char_pos in 0..=buf.len_chars() {
+            buf.set_cursor(char_pos);
+            let caret_bytes = buf.selection_byte_range();
+            let live = buf.compute_live_spans(MarkdownDialect::Gfm, true, caret_bytes.clone());
+            let strong_live = live
+                .iter()
+                .find(|ls| matches!(ls.span.kind, AstSpanKind::Strong))
+                .expect("LiveSpan for Strong should exist");
+            let segs = buf.build_editor_segments(MarkdownDialect::Gfm, true, caret_bytes);
+            let any_collapsed = segs.iter().any(|s| s.collapsed_delimiter);
+
+            if (start_char..=end_char).contains(&char_pos) {
+                assert_eq!(
+                    strong_live.visibility,
+                    DelimiterVisibility::Expanded,
+                    "Expected Expanded at char_pos={char_pos} (within {start_char}..={end_char})"
+                );
+                assert!(
+                    !any_collapsed,
+                    "Expected no collapsed delimiters in segments at char_pos={char_pos}"
+                );
+            } else {
+                assert_eq!(
+                    strong_live.visibility,
+                    DelimiterVisibility::Collapsed,
+                    "Expected Collapsed at char_pos={char_pos} (outside {start_char}..={end_char})"
+                );
+                assert!(
+                    any_collapsed,
+                    "Expected collapsed `**` delimiters in segments at char_pos={char_pos}"
+                );
+            }
         }
     }
 }

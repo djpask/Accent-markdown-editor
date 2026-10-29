@@ -27,7 +27,7 @@ Given that Apostrophe is a Markdown editor for GNOME that allows users to previe
 
 6. **Integrated Mermaid Support (Zero-WebView)**: Native support for authoring and rendering flowcharts and diagrams directly within the document. `mermaid` code blocks are converted to SVG in pure Rust and rasterized onto GPU textures via **`resvg`**, ensuring crisp rendering on HiDPI displays without relying on external browsers or WebView components.
 
-7. **100% Embedded Rust Export Pipeline (Zero External Dependencies)**: Accent exports documents directly to **PDF**, **Word (`.docx`)**, and **EPUB** without requiring any external software installed on the user's system. The entire document generation pipeline is statically compiled into the executable using dedicated Rust crates (`krilla` / `typst` for PDF, `docx-rs` for Word, `epub-builder` for EPUB).
+7. **100% Embedded Rust Export Pipeline (Zero External Dependencies)**: Accent exports documents directly to **PDF**, **Word (`.docx`)**, **OpenDocument Text (`.odt`)**, **LaTeX (`.tex`)**, and **EPUB** without requiring any external software (such as Pandoc or a TeX distribution) installed on the user's system. The entire document generation pipeline is statically compiled into the executable using dedicated pure-Rust crates and serializers (`krilla` / `typst` for PDF, `docx-rs` for Word, ODF 1.2 XML packaged via `zip` with an uncompressed `mimetype` header for ODT, a direct AST-to-LaTeX serializer with strict special-character escaping for `.tex`, and `epub-builder` for EPUB).
 
 8. **Uncompromising Reliability & Crash Recovery**: Accent is engineered around a strict *zero data loss* principle: under no circumstances is data loss or user file corruption acceptable, even during a sudden power outage or system crash. The application implements:
    - ***Save-while-typing* Journaling**: on every edit (debounced under 300ms), the editor state is saved to a local recovery journal, allowing the application on next launch to resume work from the exact last word typed without ever leaving the original file half-written.
@@ -68,5 +68,4 @@ Keep these checkboxes updated as phases complete (`[ ]` Pending, `[~]` In Progre
 
 - [ ] **Phase 5: Native Mermaid GPU Rendering & 100% Rust Export Pipeline**
   - [ ] Integrate pure-Rust Mermaid SVG generation + `resvg` texture rasterization with hash caching.
-  - [ ] Implement embedded PDF (`krilla`/`typst`), Word (`docx-rs`), and EPUB (`epub-builder`) exporters.
-  - [ ] Final end-to-end visual comparison against `img/Apostrophe_screenshots/`.
+  - [ ] Implement embedded PDF (`krilla`/`typst`), Word (`docx-rs`), OpenDocument Text (`.odt` via ODF 1.2 XML + `zip`), LaTeX (`.tex` AST serializer), and EPUB (`epub-builder`) exporters.
