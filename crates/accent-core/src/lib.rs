@@ -2,7 +2,9 @@ use comrak::nodes::{AstNode, LineColumn, ListType, NodeValue, Sourcepos};
 use comrak::{Arena, Options};
 use ropey::Rope;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::ops::Range;
+use std::sync::Arc;
 
 /// Default sample document showcasing Accent's multi-dialect Markdown capabilities.
 pub const DEFAULT_SAMPLE_MARKDOWN: &str = "\
@@ -216,7 +218,11 @@ pub enum AstSpanKind {
     Heading { level: u8 },
     CodeBlock { fenced: bool, info: String },
     BlockQuote,
-    ListItem { task: Option<bool> },
+    ListItem {
+        ordered: bool,
+        task: Option<bool>,
+        content_char_start: usize,
+    },
     Table {
         headers: Vec<String>,
         rows: Vec<Vec<String>>,
@@ -393,11 +399,27 @@ pub enum LineKind {
     },
 }
 
+#[derive(Debug, Clone, Default)]
+struct DocumentAstCache {
+    ast_key: Option<(u64, MarkdownDialect)>,
+    ast_spans: Arc<Vec<AstSpan>>,
+    live_key: Option<(u64, MarkdownDialect, bool, Range<usize>)>,
+    live_spans: Arc<Vec<LiveSpan>>,
+    segments_key: Option<(u64, MarkdownDialect, bool, Range<usize>)>,
+    editor_segments: Arc<Vec<EditorTextSegment>>,
+    preview_key: Option<(u64, MarkdownDialect)>,
+    preview_blocks: Arc<Vec<PreviewBlock>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct DocumentBuffer {
     rope: Rope,
+    revision: u64,
+    cached_text: String,
+    cached_stats: DocumentStats,
     cursor_char_offset: usize,
     selection_end_char_offset: usize,
+    cache: RefCell<DocumentAstCache>,
 }
 
 impl Default for DocumentBuffer {
@@ -413,19 +435,40 @@ impl DocumentBuffer {
             .find("Accent è un editor")
             .map(|b| rope.byte_to_char(b))
             .unwrap_or(0);
+        let cached_text = text.to_string();
+        let cached_stats = DocumentStats::compute(&cached_text);
         Self {
             rope,
+            revision: 1,
+            cached_text,
+            cached_stats,
             cursor_char_offset: default_caret,
             selection_end_char_offset: default_caret,
+            cache: RefCell::new(DocumentAstCache::default()),
         }
+    }
+
+    fn sync_after_mutation(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+        self.cached_text = self.rope.to_string();
+        self.cached_stats = DocumentStats::compute(&self.cached_text);
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn rope(&self) -> &Rope {
         &self.rope
     }
 
+    /// Zero-allocation slice of the current document text.
+    pub fn as_str(&self) -> &str {
+        &self.cached_text
+    }
+
     pub fn text(&self) -> String {
-        self.rope.to_string()
+        self.cached_text.clone()
     }
 
     pub fn len_bytes(&self) -> usize {
@@ -485,7 +528,7 @@ impl DocumentBuffer {
     }
 
     pub fn render_html(&self, dialect: MarkdownDialect) -> String {
-        comrak::markdown_to_html(&self.text(), &dialect.to_comrak_options())
+        comrak::markdown_to_html(self.as_str(), &dialect.to_comrak_options())
     }
 
     /// Converts a byte offset to a character offset in $O(\log N)$ via `ropey::Rope`.
@@ -545,6 +588,7 @@ impl DocumentBuffer {
         let new_cursor = idx + text.chars().count();
         self.cursor_char_offset = new_cursor;
         self.selection_end_char_offset = new_cursor;
+        self.sync_after_mutation();
     }
 
     /// Wraps the current selection with `prefix` and `suffix` (or inserts `prefix + placeholder + suffix` if empty).
@@ -568,17 +612,23 @@ impl DocumentBuffer {
             self.cursor_char_offset = new_end;
             self.selection_end_char_offset = new_start;
         }
+        self.sync_after_mutation();
     }
 
     pub fn set_text(&mut self, text: &str) {
+        if self.cached_text == text {
+            return;
+        }
         self.rope = Rope::from_str(text);
         let len = self.rope.len_chars();
         self.cursor_char_offset = self.cursor_char_offset.min(len);
         self.selection_end_char_offset = self.selection_end_char_offset.min(len);
+        self.sync_after_mutation();
     }
 
+    /// Returns cached `DocumentStats` in $O(1)$ without re-scanning the document.
     pub fn stats(&self) -> DocumentStats {
-        DocumentStats::compute(&self.text())
+        self.cached_stats.clone()
     }
 
     /// Returns the half-open byte range of `line_idx` excluding any trailing `\r` or `\n`.
@@ -600,38 +650,71 @@ impl DocumentBuffer {
         line_start..(line_start + content_len)
     }
 
-    /// Parses the document using `comrak` with the requested `MarkdownDialect` and returns all AST `Sourcepos` spans.
-    pub fn extract_ast_spans(&self, dialect: MarkdownDialect) -> Vec<AstSpan> {
-        let text = self.text();
+    /// Returns cached `Arc<Vec<AstSpan>>` for `(self.revision, dialect)`, parsing via `comrak` only on revision/dialect change.
+    pub fn extract_ast_spans_arc(&self, dialect: MarkdownDialect) -> Arc<Vec<AstSpan>> {
+        let key = (self.revision, dialect);
+        if let Some(cached) = {
+            let c = self.cache.borrow();
+            if c.ast_key == Some(key) {
+                Some(Arc::clone(&c.ast_spans))
+            } else {
+                None
+            }
+        } {
+            return cached;
+        }
+
+        let text = self.as_str();
         let arena = Arena::new();
         let opts = dialect.to_comrak_options();
-        let root = comrak::parse_document(&arena, &text, &opts);
+        let root = comrak::parse_document(&arena, text, &opts);
 
         let mut spans = Vec::new();
         self.collect_node_spans(root, &mut spans);
-        spans
+        let arc = Arc::new(spans);
+
+        let mut c = self.cache.borrow_mut();
+        c.ast_key = Some(key);
+        c.ast_spans = Arc::clone(&arc);
+        arc
     }
 
-    /// Computes Caret-Aware `LiveSpan`s given the active dialect, whether `view_while_typing` is enabled,
-    /// and the current cursor/selection byte range (`caret_byte_range`).
-    ///
-    /// When `view_while_typing` is true and `caret_byte_range` is strictly outside a span (`caret.end < span.start || caret.start > span.end`),
-    /// its syntax delimiters are marked `DelimiterVisibility::Collapsed`; when the caret enters or touches the span,
-    /// they immediately become `DelimiterVisibility::Expanded`.
-    pub fn compute_live_spans(
+    /// Parses the document using `comrak` with the requested `MarkdownDialect` and returns all AST `Sourcepos` spans.
+    pub fn extract_ast_spans(&self, dialect: MarkdownDialect) -> Vec<AstSpan> {
+        (*self.extract_ast_spans_arc(dialect)).clone()
+    }
+
+    /// Returns cached `Arc<Vec<LiveSpan>>` for `(self.revision, dialect, view_while_typing, caret_byte_range)`.
+    pub fn compute_live_spans_arc(
         &self,
         dialect: MarkdownDialect,
         view_while_typing: bool,
         caret_byte_range: Range<usize>,
-    ) -> Vec<LiveSpan> {
-        let text = self.text();
-        let spans = self.extract_ast_spans(dialect);
+    ) -> Arc<Vec<LiveSpan>> {
+        let eff_caret = if view_while_typing {
+            caret_byte_range
+        } else {
+            0..0
+        };
+        let key = (self.revision, dialect, view_while_typing, eff_caret.clone());
+        if let Some(cached) = {
+            let c = self.cache.borrow();
+            if c.live_key == Some(key.clone()) {
+                Some(Arc::clone(&c.live_spans))
+            } else {
+                None
+            }
+        } {
+            return cached;
+        }
+
+        let text = self.as_str();
+        let spans = self.extract_ast_spans_arc(dialect);
         let mut out = Vec::with_capacity(spans.len());
 
-        for span in spans {
+        for span in spans.iter() {
             let sr = &span.byte_range;
-            let caret_touches =
-                caret_byte_range.start <= sr.end && caret_byte_range.end >= sr.start;
+            let caret_touches = eff_caret.start <= sr.end && eff_caret.end >= sr.start;
             let visibility = if view_while_typing && !caret_touches {
                 DelimiterVisibility::Collapsed
             } else {
@@ -655,6 +738,19 @@ impl DocumentBuffer {
                                 delimiter_byte_ranges.push(lr.start..prefix_end);
                             }
                         }
+                        // If Setext heading (`===` or `---` on span.end_line), collapse the underline line too
+                        if span.end_line > span.start_line {
+                            let end_lr = self.line_content_byte_range(span.end_line);
+                            if !end_lr.is_empty() && end_lr.end <= text.len() {
+                                let end_trimmed = text[end_lr.clone()].trim();
+                                if !end_trimmed.is_empty()
+                                    && (end_trimmed.chars().all(|c| c == '-')
+                                        || end_trimmed.chars().all(|c| c == '='))
+                                {
+                                    delimiter_byte_ranges.push(end_lr);
+                                }
+                            }
+                        }
                     }
                     AstSpanKind::CodeBlock { fenced: true, .. } => {
                         let start_lr = self.line_content_byte_range(span.start_line);
@@ -674,7 +770,7 @@ impl DocumentBuffer {
                             }
                         }
                     }
-                    AstSpanKind::BlockQuote => {
+                    AstSpanKind::BlockQuote | AstSpanKind::Alert { .. } => {
                         for l_idx in span.start_line..=span.end_line {
                             let lr = self.line_content_byte_range(l_idx);
                             if !lr.is_empty() && lr.end <= text.len() {
@@ -683,43 +779,56 @@ impl DocumentBuffer {
                                 if let Some(after_gt) = trimmed.strip_prefix('>') {
                                     let leading_ws = raw_l.len() - trimmed.len();
                                     let space_len = usize::from(after_gt.starts_with(' '));
-                                    let prefix_end = lr.start + leading_ws + 1 + space_len;
+                                    let mut prefix_end = lr.start + leading_ws + 1 + space_len;
+                                    // For GFM Alerts (`> [!NOTE]`), also collapse the `[!TYPE]` marker on the first line
+                                    if matches!(span.kind, AstSpanKind::Alert { .. })
+                                        && l_idx == span.start_line
+                                    {
+                                        let rest = &text[prefix_end..lr.end];
+                                        if rest.starts_with("[!") {
+                                            if let Some(close_br) = rest.find(']') {
+                                                prefix_end += close_br + 1;
+                                            }
+                                        }
+                                    }
                                     delimiter_byte_ranges.push(lr.start..prefix_end);
                                 }
                             }
                         }
                     }
-                    AstSpanKind::ListItem { task } => {
-                        let lr = self.line_content_byte_range(span.start_line);
-                        if !lr.is_empty() && lr.end <= text.len() {
-                            let raw_l = &text[lr.clone()];
-                            let trimmed = raw_l.trim_start_matches([' ', '\t']);
-                            let leading_ws = raw_l.len() - trimmed.len();
-                            let is_task_prefix = task.is_some()
-                                && trimmed.len() >= 5
-                                && matches!(
-                                    &trimmed[..5],
-                                    "- [ ]"
-                                        | "- [x]"
-                                        | "- [X]"
-                                        | "* [ ]"
-                                        | "* [x]"
-                                        | "* [X]"
-                                        | "+ [ ]"
-                                        | "+ [x]"
-                                        | "+ [X]"
-                                );
-                            if is_task_prefix {
-                                let after_box = &trimmed[5..];
-                                let space_len = usize::from(after_box.starts_with(' '));
-                                let prefix_end = lr.start + leading_ws + 5 + space_len;
-                                delimiter_byte_ranges.push(lr.start..prefix_end);
-                            } else if trimmed.starts_with("- ")
-                                || trimmed.starts_with("* ")
-                                || trimmed.starts_with("+ ")
-                            {
-                                let prefix_end = lr.start + leading_ws + 2;
-                                delimiter_byte_ranges.push(lr.start..prefix_end);
+                    AstSpanKind::ListItem { ordered, task, .. } => {
+                        if !*ordered {
+                            let lr = self.line_content_byte_range(span.start_line);
+                            if !lr.is_empty() && lr.end <= text.len() {
+                                let raw_l = &text[lr.clone()];
+                                let trimmed = raw_l.trim_start_matches([' ', '\t']);
+                                let leading_ws = raw_l.len() - trimmed.len();
+                                let is_task_prefix = task.is_some()
+                                    && trimmed.len() >= 5
+                                    && matches!(
+                                        &trimmed[..5],
+                                        "- [ ]"
+                                            | "- [x]"
+                                            | "- [X]"
+                                            | "* [ ]"
+                                            | "* [x]"
+                                            | "* [X]"
+                                            | "+ [ ]"
+                                            | "+ [x]"
+                                            | "+ [X]"
+                                    );
+                                if is_task_prefix {
+                                    let after_box = &trimmed[5..];
+                                    let space_len = usize::from(after_box.starts_with(' '));
+                                    let prefix_end = lr.start + leading_ws + 5 + space_len;
+                                    delimiter_byte_ranges.push(lr.start..prefix_end);
+                                } else if trimmed.starts_with("- ")
+                                    || trimmed.starts_with("* ")
+                                    || trimmed.starts_with("+ ")
+                                {
+                                    let prefix_end = lr.start + leading_ws + 2;
+                                    delimiter_byte_ranges.push(lr.start..prefix_end);
+                                }
                             }
                         }
                     }
@@ -788,18 +897,36 @@ impl DocumentBuffer {
             }
 
             out.push(LiveSpan {
-                span,
+                span: span.clone(),
                 visibility,
                 delimiter_byte_ranges,
             });
         }
 
-        out
+        let arc = Arc::new(out);
+        let mut c = self.cache.borrow_mut();
+        c.live_key = Some(key);
+        c.live_spans = Arc::clone(&arc);
+        arc
+    }
+
+    /// Computes Caret-Aware `LiveSpan`s given the active dialect, whether `view_while_typing` is enabled,
+    /// and the current cursor/selection byte range (`caret_byte_range`).
+    pub fn compute_live_spans(
+        &self,
+        dialect: MarkdownDialect,
+        view_while_typing: bool,
+        caret_byte_range: Range<usize>,
+    ) -> Vec<LiveSpan> {
+        (*self.compute_live_spans_arc(dialect, view_while_typing, caret_byte_range)).clone()
     }
 
     fn collect_node_spans<'a>(&self, node: &'a AstNode<'a>, out: &mut Vec<AstSpan>) {
+        let text = self.as_str();
         let data = node.data.borrow();
         let sp = data.sourcepos;
+        let mut start_line = sp.start.line.saturating_sub(1);
+        let mut end_line = sp.end.line.saturating_sub(1);
 
         let maybe_kind = match &data.value {
             NodeValue::Heading(h) => Some(AstSpanKind::Heading { level: h.level }),
@@ -808,16 +935,82 @@ impl DocumentBuffer {
                 info: cb.info.clone(),
             }),
             NodeValue::BlockQuote | NodeValue::MultilineBlockQuote(_) => {
+                // Clamp end_line to lines that actually start with `>` (excluding lazy continuation lines)
+                let mut valid_end = start_line;
+                for l_idx in start_line..=end_line {
+                    let lr = self.line_content_byte_range(l_idx);
+                    if !lr.is_empty()
+                        && lr.end <= text.len()
+                        && text[lr].trim_start().starts_with('>')
+                    {
+                        valid_end = l_idx;
+                    }
+                }
+                end_line = valid_end;
                 Some(AstSpanKind::BlockQuote)
             }
-            NodeValue::Item(_) => Some(AstSpanKind::ListItem { task: None }),
-            NodeValue::TaskItem(symbol) => Some(AstSpanKind::ListItem {
-                task: Some(symbol.is_some()),
-            }),
+            NodeValue::Item(ni) => {
+                let ordered = ni.list_type == ListType::Ordered;
+                end_line = start_line;
+                let lr = self.line_content_byte_range(start_line);
+                let mut content_byte_start = lr.start;
+                if !lr.is_empty() && lr.end <= text.len() {
+                    let raw_l = &text[lr.clone()];
+                    let trimmed = raw_l.trim_start_matches([' ', '\t']);
+                    let leading_ws = raw_l.len() - trimmed.len();
+                    if !ordered
+                        && (trimmed.starts_with("- ")
+                            || trimmed.starts_with("* ")
+                            || trimmed.starts_with("+ "))
+                    {
+                        content_byte_start = lr.start + leading_ws + 2;
+                    } else {
+                        content_byte_start = lr.start + leading_ws;
+                    }
+                }
+                let content_char_start = self.byte_to_char(content_byte_start);
+                Some(AstSpanKind::ListItem {
+                    ordered,
+                    task: None,
+                    content_char_start,
+                })
+            }
+            NodeValue::TaskItem(symbol) => {
+                end_line = start_line;
+                let lr = self.line_content_byte_range(start_line);
+                let mut content_byte_start = lr.start;
+                if !lr.is_empty() && lr.end <= text.len() {
+                    let raw_l = &text[lr.clone()];
+                    let trimmed = raw_l.trim_start_matches([' ', '\t']);
+                    let leading_ws = raw_l.len() - trimmed.len();
+                    if trimmed.len() >= 5 {
+                        let after_box = &trimmed[5..];
+                        let space_len = usize::from(after_box.starts_with(' '));
+                        content_byte_start = lr.start + leading_ws + 5 + space_len;
+                    }
+                }
+                let content_char_start = self.byte_to_char(content_byte_start);
+                Some(AstSpanKind::ListItem {
+                    ordered: false,
+                    task: Some(symbol.is_some()),
+                    content_char_start,
+                })
+            }
             NodeValue::Table(_) => {
                 let mut headers = Vec::new();
                 let mut rows = Vec::new();
+                // Clamp table rows to lines that actually contain `|` so trailing paragraphs without blank lines are not absorbed
+                let mut valid_end_line = start_line.saturating_add(1).min(end_line);
                 for row_node in node.children() {
+                    let row_sp = row_node.data.borrow().sourcepos;
+                    let row_line = row_sp.start.line.saturating_sub(1);
+                    let lr = self.line_content_byte_range(row_line);
+                    let has_pipe =
+                        !lr.is_empty() && lr.end <= text.len() && text[lr].contains('|');
+                    if !has_pipe && row_line > start_line + 1 {
+                        break;
+                    }
+                    valid_end_line = valid_end_line.max(row_line);
                     let is_header =
                         matches!(row_node.data.borrow().value, NodeValue::TableRow(true));
                     let mut cells = Vec::new();
@@ -843,12 +1036,26 @@ impl DocumentBuffer {
                         rows.push(cells);
                     }
                 }
+                end_line = valid_end_line;
                 Some(AstSpanKind::Table { headers, rows })
             }
             NodeValue::ThematicBreak => Some(AstSpanKind::ThematicBreak),
-            NodeValue::Alert(alert) => Some(AstSpanKind::Alert {
-                alert_type: format!("{:?}", alert.alert_type),
-            }),
+            NodeValue::Alert(alert) => {
+                let mut valid_end = start_line;
+                for l_idx in start_line..=end_line {
+                    let lr = self.line_content_byte_range(l_idx);
+                    if !lr.is_empty()
+                        && lr.end <= text.len()
+                        && text[lr].trim_start().starts_with('>')
+                    {
+                        valid_end = l_idx;
+                    }
+                }
+                end_line = valid_end;
+                Some(AstSpanKind::Alert {
+                    alert_type: format!("{:?}", alert.alert_type),
+                })
+            }
             NodeValue::FrontMatter(_) => Some(AstSpanKind::FrontMatter),
             NodeValue::FootnoteDefinition(def) => Some(AstSpanKind::FootnoteDefinition {
                 name: def.name.clone(),
@@ -884,7 +1091,20 @@ impl DocumentBuffer {
 
         if let Some(kind) = maybe_kind {
             let mut byte_range = self.sourcepos_to_byte_range(sp);
-            if matches!(kind, AstSpanKind::CodeInline | AstSpanKind::MathInline)
+            if matches!(
+                kind,
+                AstSpanKind::CodeBlock { .. }
+                    | AstSpanKind::BlockQuote
+                    | AstSpanKind::Alert { .. }
+                    | AstSpanKind::ListItem { .. }
+                    | AstSpanKind::Table { .. }
+            ) {
+                let start_lr = self.line_content_byte_range(start_line);
+                let end_lr = self.line_content_byte_range(end_line);
+                if start_lr.start <= end_lr.end {
+                    byte_range = start_lr.start..end_lr.end;
+                }
+            } else if matches!(kind, AstSpanKind::CodeInline | AstSpanKind::MathInline)
                 && !byte_range.is_empty()
             {
                 let delim_b = if matches!(kind, AstSpanKind::CodeInline) {
@@ -904,8 +1124,7 @@ impl DocumentBuffer {
             if !byte_range.is_empty() {
                 let char_range =
                     self.byte_to_char(byte_range.start)..self.byte_to_char(byte_range.end);
-                let start_line = sp.start.line.saturating_sub(1);
-                let end_line = sp.end.line.saturating_sub(1);
+                start_line = start_line.min(end_line);
                 out.push(AstSpan {
                     kind,
                     byte_range,
@@ -938,23 +1157,50 @@ impl DocumentBuffer {
         }
     }
 
-    /// Builds a 1:1 full-document stream of `EditorTextSegment`s for `egui::TextEdit`'s custom `layouter`.
-    /// Every character (including `\n`) is preserved in order so `TextEdit` cursor offsets never drift.
-    pub fn build_editor_segments(
+    /// Returns cached `Arc<Vec<EditorTextSegment>>` in $O(1)$ on cache hit, or computes it in $O(L + S)$ linear time.
+    pub fn build_editor_segments_arc(
         &self,
         dialect: MarkdownDialect,
         view_while_typing: bool,
         caret_byte_range: Range<usize>,
-    ) -> Vec<EditorTextSegment> {
-        let text = self.text();
-        if text.is_empty() {
-            return Vec::new();
+    ) -> Arc<Vec<EditorTextSegment>> {
+        let eff_caret = if view_while_typing {
+            caret_byte_range
+        } else {
+            0..0
+        };
+        let key = (self.revision, dialect, view_while_typing, eff_caret.clone());
+        if let Some(cached) = {
+            let c = self.cache.borrow();
+            if c.segments_key == Some(key.clone()) {
+                Some(Arc::clone(&c.editor_segments))
+            } else {
+                None
+            }
+        } {
+            return cached;
         }
-        let live_spans = self.compute_live_spans(dialect, view_while_typing, caret_byte_range);
-        let total_lines = self.rope.len_lines();
-        let mut out = Vec::new();
 
-        for line_idx in 0..total_lines {
+        let text = self.as_str();
+        if text.is_empty() {
+            return Arc::new(Vec::new());
+        }
+        let live_spans = self.compute_live_spans_arc(dialect, view_while_typing, eff_caret);
+        let total_lines = self.rope.len_lines();
+
+        // Pre-index live_spans by line in O(S) so each line only inspects its 0..4 overlapping spans!
+        let mut spans_by_line: Vec<Vec<usize>> = vec![Vec::new(); total_lines];
+        for (s_idx, ls) in live_spans.iter().enumerate() {
+            let sl = ls.span.start_line.min(total_lines.saturating_sub(1));
+            let el = ls.span.end_line.min(total_lines.saturating_sub(1));
+            for line_vec in &mut spans_by_line[sl..=el] {
+                line_vec.push(s_idx);
+            }
+        }
+
+        let mut out = Vec::with_capacity(total_lines * 2);
+
+        for (line_idx, line_span_indices) in spans_by_line.iter().enumerate() {
             let line_start = self.rope.line_to_byte(line_idx);
             let slice = self.rope.line(line_idx);
             let full_line_bytes = slice.len_bytes();
@@ -976,35 +1222,36 @@ impl DocumentBuffer {
             let content_end = line_start + content_len;
             let raw_line = &text[line_start..content_end];
 
-            let heading_span = live_spans.iter().find_map(|ls| match &ls.span.kind {
-                AstSpanKind::Heading { level }
-                    if ls.span.start_line <= line_idx && line_idx <= ls.span.end_line =>
-                {
-                    Some((*level, ls.visibility == DelimiterVisibility::Collapsed))
-                }
-                _ => None,
-            });
-            let heading_level = heading_span.map(|(lvl, _)| lvl);
+            let mut heading_span: Option<(u8, bool)> = None;
+            let mut code_block_span: Option<&LiveSpan> = None;
+            let mut in_blockquote = false;
+            let mut is_list_item_start = false;
 
-            let code_block_span = live_spans.iter().find(|ls| {
-                matches!(ls.span.kind, AstSpanKind::CodeBlock { .. })
-                    && ls.span.start_line <= line_idx
-                    && line_idx <= ls.span.end_line
-            });
+            for &s_idx in line_span_indices {
+                let ls = &live_spans[s_idx];
+                match &ls.span.kind {
+                    AstSpanKind::Heading { level } => {
+                        heading_span =
+                            Some((*level, ls.visibility == DelimiterVisibility::Collapsed));
+                    }
+                    AstSpanKind::CodeBlock { .. } => {
+                        code_block_span = Some(ls);
+                    }
+                    AstSpanKind::BlockQuote | AstSpanKind::Alert { .. } => {
+                        in_blockquote = true;
+                    }
+                    AstSpanKind::ListItem { ordered, .. } => {
+                        if !*ordered && ls.span.start_line == line_idx {
+                            is_list_item_start = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let heading_level = heading_span.map(|(lvl, _)| lvl);
             let in_code_block = code_block_span.is_some();
 
-            let in_blockquote = live_spans.iter().any(|ls| {
-                matches!(ls.span.kind, AstSpanKind::BlockQuote)
-                    && ls.span.start_line <= line_idx
-                    && line_idx <= ls.span.end_line
-            });
-            let is_list_item_start = live_spans.iter().any(|ls| {
-                matches!(ls.span.kind, AstSpanKind::ListItem { .. })
-                    && ls.span.start_line == line_idx
-            });
-
             if content_len == 0 {
-                // Empty line with only newline
                 out.push(EditorTextSegment {
                     text: text[line_start..full_line_end].to_string(),
                     byte_range: line_start..full_line_end,
@@ -1042,6 +1289,7 @@ impl DocumentBuffer {
                         is_line_start: false,
                         line_index: line_idx,
                         code_block: true,
+                        collapsed_delimiter: fence_collapsed,
                         ..Default::default()
                     });
                 }
@@ -1059,7 +1307,7 @@ impl DocumentBuffer {
                 let space_len = usize::from(after_hashes.starts_with(' '));
                 let prefix_end = line_start + leading_ws + hash_count + space_len;
 
-                if prefix_end > line_start {
+                if hash_count > 0 && prefix_end > line_start {
                     out.push(EditorTextSegment {
                         text: text[line_start..prefix_end].to_string(),
                         byte_range: line_start..prefix_end,
@@ -1077,11 +1325,12 @@ impl DocumentBuffer {
                 }
             }
 
-            // Slice inline segments across content_start..content_end
-            let inline_segs = self.slice_editor_inline_segments(
-                &text,
+            // Slice inline segments across content_start..content_end using only line_span_indices
+            let inline_segs = self.slice_editor_inline_segments_indexed(
+                text,
                 content_start..content_end,
                 &live_spans,
+                line_span_indices,
                 line_idx,
                 heading_level,
                 in_blockquote,
@@ -1090,7 +1339,6 @@ impl DocumentBuffer {
             );
             out.extend(inline_segs);
 
-            // Append trailing newline bytes if present
             if content_end < full_line_end {
                 out.push(EditorTextSegment {
                     text: text[content_end..full_line_end].to_string(),
@@ -1105,15 +1353,31 @@ impl DocumentBuffer {
             }
         }
 
-        out
+        let arc = Arc::new(out);
+        let mut c = self.cache.borrow_mut();
+        c.segments_key = Some(key);
+        c.editor_segments = Arc::clone(&arc);
+        arc
+    }
+
+    /// Builds a 1:1 full-document stream of `EditorTextSegment`s for `egui::TextEdit`'s custom `layouter`.
+    /// Every character (including `\n`) is preserved in order so `TextEdit` cursor offsets never drift.
+    pub fn build_editor_segments(
+        &self,
+        dialect: MarkdownDialect,
+        view_while_typing: bool,
+        caret_byte_range: Range<usize>,
+    ) -> Vec<EditorTextSegment> {
+        (*self.build_editor_segments_arc(dialect, view_while_typing, caret_byte_range)).clone()
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn slice_editor_inline_segments(
+    fn slice_editor_inline_segments_indexed(
         &self,
         text: &str,
         range: Range<usize>,
         live_spans: &[LiveSpan],
+        line_span_indices: &[usize],
         line_idx: usize,
         heading_level: Option<u8>,
         in_blockquote: bool,
@@ -1126,7 +1390,8 @@ impl DocumentBuffer {
         let base_bold = heading_level.is_some();
 
         let mut boundaries = vec![range.start, range.end];
-        for ls in live_spans {
+        for &s_idx in line_span_indices {
+            let ls = &live_spans[s_idx];
             let sr = &ls.span.byte_range;
             if sr.end <= range.start || sr.start >= range.end {
                 continue;
@@ -1187,7 +1452,7 @@ impl DocumentBuffer {
         boundaries.dedup();
         boundaries.retain(|&b| text.is_char_boundary(b));
 
-        let mut segments = Vec::new();
+        let mut segments = Vec::with_capacity(boundaries.len());
         for (i, pair) in boundaries.windows(2).enumerate() {
             let (seg_start, seg_end) = (pair[0], pair[1]);
             if seg_start >= seg_end {
@@ -1205,7 +1470,8 @@ impl DocumentBuffer {
                 ..Default::default()
             };
 
-            for ls in live_spans {
+            for &s_idx in line_span_indices {
+                let ls = &live_spans[s_idx];
                 let sr = &ls.span.byte_range;
                 if seg_start < sr.start || seg_end > sr.end {
                     continue;
@@ -1576,18 +1842,39 @@ impl DocumentBuffer {
         segments
     }
 
-    /// Parses the document into structured `PreviewBlock`s for Split/Full/Windowed Preview rendering.
-    pub fn parse_preview_blocks(&self, dialect: MarkdownDialect) -> Vec<PreviewBlock> {
-        let text = self.text();
+    /// Parses the document into structured `PreviewBlock`s for Split/Full/Windowed Preview rendering, cached by `(revision, dialect)`.
+    pub fn parse_preview_blocks_arc(&self, dialect: MarkdownDialect) -> Arc<Vec<PreviewBlock>> {
+        let key = (self.revision, dialect);
+        if let Some(cached) = {
+            let c = self.cache.borrow();
+            if c.preview_key == Some(key) {
+                Some(Arc::clone(&c.preview_blocks))
+            } else {
+                None
+            }
+        } {
+            return cached;
+        }
+
+        let text = self.as_str();
         let arena = Arena::new();
         let opts = dialect.to_comrak_options();
-        let root = comrak::parse_document(&arena, &text, &opts);
+        let root = comrak::parse_document(&arena, text, &opts);
 
         let mut blocks = Vec::new();
         for child in root.children() {
             self.collect_preview_block(child, &mut blocks);
         }
-        blocks
+        let arc = Arc::new(blocks);
+        let mut c = self.cache.borrow_mut();
+        c.preview_key = Some(key);
+        c.preview_blocks = Arc::clone(&arc);
+        arc
+    }
+
+    /// Parses the document into structured `PreviewBlock`s for Split/Full/Windowed Preview rendering.
+    pub fn parse_preview_blocks(&self, dialect: MarkdownDialect) -> Vec<PreviewBlock> {
+        (*self.parse_preview_blocks_arc(dialect)).clone()
     }
 
     fn collect_preview_block<'a>(&self, node: &'a AstNode<'a>, out: &mut Vec<PreviewBlock>) {
@@ -2064,5 +2351,86 @@ let x = 42;
         assert!(lines
             .iter()
             .any(|l| matches!(l, LineKind::BlockQuote { .. })));
+    }
+
+    #[test]
+    fn test_gfm_reference_example_performance_and_ordered_vs_bullet_lists() {
+        let gfm_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/GFM_reference_example.md");
+        let content = std::fs::read_to_string(&gfm_path)
+            .expect("docs/GFM_reference_example.md should exist in workspace");
+        let buf = DocumentBuffer::from_str_content(&content);
+
+        let t0 = std::time::Instant::now();
+        let segs_1 = buf.build_editor_segments_arc(MarkdownDialect::Gfm, true, 0..0);
+        let cold_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        assert!(
+            !segs_1.is_empty(),
+            "Segments should be non-empty for GFM_reference_example.md"
+        );
+        // Verify 1:1 text preservation across all 5,050 lines
+        let reconstructed: String = segs_1.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(reconstructed, content);
+
+        // Second call with identical state must hit cache in < 0.5 ms
+        let t1 = std::time::Instant::now();
+        let segs_2 = buf.build_editor_segments_arc(MarkdownDialect::Gfm, true, 0..0);
+        let warm_ms = t1.elapsed().as_secs_f64() * 1000.0;
+        assert!(Arc::ptr_eq(&segs_1, &segs_2));
+        assert!(
+            warm_ms < 0.5,
+            "Warm cached call took {warm_ms:.3} ms (expected < 0.5 ms)"
+        );
+        // Even cold unoptimized debug build over 5,050 lines should complete quickly with O(L+S) indexing
+        assert!(
+            cold_ms < 450.0,
+            "Cold O(L+S) build took {cold_ms:.1} ms (expected < 450 ms in debug)"
+        );
+
+        // Verify ordered lists (`1. Primo elemento...`) have `ordered: true` and NO collapsed delimiter ranges,
+        // while bullet lists (`* Elemento puntato generico`) have `ordered: false` and collapsed `* ` delimiter!
+        let live_spans = buf.compute_live_spans_arc(MarkdownDialect::Gfm, true, 0..0);
+        let has_ordered = live_spans.iter().any(|ls| {
+            matches!(
+                ls.span.kind,
+                AstSpanKind::ListItem {
+                    ordered: true,
+                    task: None,
+                    ..
+                }
+            ) && ls.delimiter_byte_ranges.is_empty()
+        });
+        assert!(
+            has_ordered,
+            "Ordered list items must have ordered=true and no collapsed bullet delimiter"
+        );
+
+        let has_bullet = live_spans.iter().any(|ls| {
+            matches!(
+                ls.span.kind,
+                AstSpanKind::ListItem {
+                    ordered: false,
+                    task: None,
+                    ..
+                }
+            ) && !ls.delimiter_byte_ranges.is_empty()
+        });
+        assert!(
+            has_bullet,
+            "Bullet list items must have ordered=false and collapsed `* `/` - ` delimiter"
+        );
+
+        // Verify table on lines 8-11 does NOT absorb line 12 (`Testo in **grassetto** per dare enfasi.`)
+        let first_table = live_spans
+            .iter()
+            .find(|ls| matches!(ls.span.kind, AstSpanKind::Table { .. }))
+            .expect("First GFM table should exist");
+        if let AstSpanKind::Table { rows, .. } = &first_table.span.kind {
+            assert_eq!(
+                rows.len(),
+                2,
+                "First table must have exactly 2 data rows (#101 and #102), not absorb trailing paragraphs"
+            );
+        }
     }
 }

@@ -24,6 +24,7 @@ pub struct LaunchOptions {
     pub insert_text: Option<String>,
     pub focus_mode: bool,
     pub hemingway_mode: bool,
+    pub file_path: Option<PathBuf>,
     pub shot_path: Option<PathBuf>,
 }
 
@@ -40,6 +41,9 @@ impl AccentApp {
         ui::theme::configure_fonts(&cc.egui_ctx);
 
         let mut session = Session::default();
+        if let Some(fp) = opts.file_path {
+            session.apply(Action::OpenFile(fp));
+        }
         if let Some(t) = opts.theme {
             session.apply(Action::SetTheme(t));
         }
@@ -239,6 +243,14 @@ pub fn parse_cli_args(args: &[String]) -> LaunchOptions {
             }
             "--hemingway" => {
                 opts.hemingway_mode = true;
+                i += 1;
+            }
+            "--file" if i + 1 < args.len() => {
+                opts.file_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            arg if !arg.starts_with('-') && opts.file_path.is_none() => {
+                opts.file_path = Some(PathBuf::from(arg));
                 i += 1;
             }
             _ => {

@@ -30,7 +30,7 @@ Given that Apostrophe is a Markdown editor for GNOME that allows users to previe
 7. **100% Embedded Rust Export Pipeline (Zero External Dependencies)**: Accent exports documents directly to **PDF**, **Word (`.docx`)**, and **EPUB** without requiring any external software installed on the user's system. The entire document generation pipeline is statically compiled into the executable using dedicated Rust crates (`krilla` / `typst` for PDF, `docx-rs` for Word, `epub-builder` for EPUB).
 
 8. **Uncompromising Reliability & Crash Recovery**: Accent is engineered around a strict *zero data loss* principle: under no circumstances is data loss or user file corruption acceptable, even during a sudden power outage or system crash. The application implements:
-   - ***Save-while-typing* Journaling**: on every edit (debounced under 300ms), the editor state is saved to a dedicated local recovery journal, allowing the application on next launch to resume work from the exact last word typed without ever leaving the original file half-written.
+   - ***Save-while-typing* Journaling**: on every edit (debounced under 300ms), the editor state is saved to a local recovery journal, allowing the application on next launch to resume work from the exact last word typed without ever leaving the original file half-written.
    - **Atomic Saving (*Write-Temp $\rightarrow$ Fsync $\rightarrow$ Atomic Rename*)**: every save to the target `.md` file writes first to a temporary sibling file on the same partition, forces a physical hardware buffer flush (`sync_all`), and performs an atomic filesystem-level rename.
 
 9. **Internationalization (i18n)**: Accent is built with a native Rust localization system (`fluent` / `rust-i18n`) to make adding translations effortless. From the very first release, three languages are fully supported: **English**, **Italian**, and **Spanish**.
@@ -46,9 +46,9 @@ Keep these checkboxes updated as phases complete (`[ ]` Pending, `[~]` In Progre
   - [x] Capture reference screenshots into `img/Apostrophe_screenshots/` (Light, Sepia, Dark themes, Headerbar popovers, Hemingway/Focus mode, Split Preview, Preferences, Export dialog).
   - [x] Extract exact hex palettes, typography proportions, and layout metrics from captured PNGs.
 
-- [x] **Phase 1: Workspace Skeleton, Theme Engine & Screenshot Harness (`ui_shot`)**
+- [x] **Phase 1: Workspace Skeleton, Theme Engine & Shell Chrome**
   - [x] Initialize Cargo workspace (`accent-core`, `accent-storage`, `accent-mermaid`, `accent-export`, `accent-session`, `accent-ui`).
-  - [x] Implement `--shot <path>` / `ui_shot` harness in `accent-ui` and verify `img/Accent_screenshots/accent_shot.png` generation.
+  - [x] Verify live window rendering and external screenshot capture via `Xvfb :99` + `xdotool` + `maim` into `img/Accent_screenshots/`.
   - [x] Implement `ui/theme.rs` with Apostrophe *Light*, *Sepia*, and *Dark* palettes, custom headerbar, and i18n scaffolding (`en`, `it`, `es`).
 
 - [x] **Phase 2: Core Buffer, Multi-Dialect AST & Configurable Typography/Margins**

@@ -833,23 +833,12 @@ fn render_editor_pane(
 
     let font_size = session.typography.font_size;
     let line_step = (font_size * session.typography.line_height).max(18.0);
-    let prose_reg_font = resolve_prose_font(
-        &session.typography.prose_font_family,
-        font_size,
-        false,
-        false,
-    );
-    let char_w = painter
-        .layout_no_wrap("MMMMMMMMMM".to_string(), prose_reg_font, Color32::WHITE)
-        .rect
-        .width()
-        / 10.0;
 
-    // Reserve horizontal space to the left of `x_body` inside the TextEdit so outdented `#` hashes
-    // (`#### `, `### `, `# `) are laid out natively inside the editable `TextEdit` widget!
-    let max_outdent = (5.0 * char_w).min(x_body_rel - 8.0).max(0.0);
-    let te_left = x_body - max_outdent;
-    let base_indent = x_body - te_left;
+    // Align `TextEdit` left edge directly at `x_body` (`base_indent = 0.0`) so soft-wrapped
+    // continuation lines in paragraphs, list items, and blockquotes ALWAYS align at `x_body`
+    // without jumping left into the gutter.
+    let te_left = x_body;
+    let base_indent = 0.0_f32;
 
     // Genuine interactive vertical `egui::ScrollArea` spanning the full editor pane!
     let mut pane_ui = ui.new_child(
@@ -858,13 +847,22 @@ fn render_editor_pane(
             .layout(egui::Layout::top_down(egui::Align::Min)),
     );
 
-    let mut editable_text = session.buffer.text();
+    let mut editable_text = session.buffer.as_str().to_owned();
+    let buf_rev = session.buffer.revision();
     let dialect = session.dialect;
     let view_while_typing = session.view_while_typing;
     let focus_mode = session.focus_mode;
+    let theme_variant = session.theme;
     let prose_family = session.typography.prose_font_family.clone();
     let code_family = session.typography.code_font_family.clone();
     let selection_bytes = session.buffer.selection_byte_range();
+    let eff_caret_key = if !view_while_typing {
+        None
+    } else if selection_bytes.start != selection_bytes.end {
+        Some(selection_bytes.clone())
+    } else {
+        Some(session.buffer.line_content_byte_range(session.buffer.cursor_line()))
+    };
     let active_cursor_line = if focus_mode {
         session.buffer.cursor_line()
     } else {
@@ -872,38 +870,68 @@ fn render_editor_pane(
     };
     let pal_copy = *pal;
 
+    #[derive(Clone, PartialEq, Eq)]
+    struct EditorGalleyCacheKey {
+        buf_rev: u64,
+        dialect: accent_core::MarkdownDialect,
+        view_while_typing: bool,
+        eff_caret_key: Option<std::ops::Range<usize>>,
+        focus_mode: bool,
+        active_cursor_line: usize,
+        theme_variant: ThemeMode,
+        wrap_w_bits: u32,
+        font_size_bits: u32,
+        line_step_bits: u32,
+        prose_family: String,
+        code_family: String,
+    }
+
     let mut layouter = move |ui: &Ui, text_str: &str, wrap_width: f32| -> Arc<egui::Galley> {
-        let temp_buf;
-        let buf_ref = if text_str == session.buffer.text() {
-            &session.buffer
-        } else {
-            temp_buf = accent_core::DocumentBuffer::from_str_content(text_str);
-            &temp_buf
+        let eff_wrap_w = wrap_width.max(col_width + base_indent + 16.0);
+        let is_session_buf = text_str == session.buffer.as_str();
+        let cache_id = Id::new("accent_editor_galley_cache");
+        let key = EditorGalleyCacheKey {
+            buf_rev: if is_session_buf { buf_rev } else { 0 },
+            dialect,
+            view_while_typing,
+            eff_caret_key: eff_caret_key.clone(),
+            focus_mode,
+            active_cursor_line,
+            theme_variant,
+            wrap_w_bits: eff_wrap_w.to_bits(),
+            font_size_bits: font_size.to_bits(),
+            line_step_bits: line_step.to_bits(),
+            prose_family: prose_family.clone(),
+            code_family: code_family.clone(),
         };
 
-        let segments =
-            buf_ref.build_editor_segments(dialect, view_while_typing, selection_bytes.clone());
-        let mut job = LayoutJob::default();
-        job.wrap.max_width = wrap_width.max(col_width + base_indent + 16.0);
-
-        for seg in &segments {
-            let leading_space = if seg.is_line_start {
-                if seg.is_heading_hashes {
-                    if seg.collapsed_delimiter {
-                        base_indent
-                    } else {
-                        let lvl = seg.heading_level.unwrap_or(1);
-                        (base_indent - (f32::from(lvl) + 1.0) * char_w).max(0.0)
-                    }
-                } else if seg.blockquote {
-                    base_indent + 2.0 * char_w
-                } else if seg.list_item && seg.collapsed_delimiter {
-                    base_indent + 24.0
-                } else if seg.code_block {
-                    base_indent + 5.0
-                } else {
-                    base_indent
+        if is_session_buf {
+            if let Some((cached_key, cached_galley)) = ui.ctx().data_mut(|d| {
+                d.get_temp::<(EditorGalleyCacheKey, Arc<egui::Galley>)>(cache_id)
+            }) {
+                if cached_key == key {
+                    return cached_galley;
                 }
+            }
+        }
+
+        let temp_buf;
+        let segments = if is_session_buf {
+            session.buffer.build_editor_segments_arc(
+                dialect,
+                view_while_typing,
+                selection_bytes.clone(),
+            )
+        } else {
+            temp_buf = accent_core::DocumentBuffer::from_str_content(text_str);
+            temp_buf.build_editor_segments_arc(dialect, view_while_typing, selection_bytes.clone())
+        };
+        let mut job = LayoutJob::default();
+        job.wrap.max_width = eff_wrap_w;
+
+        for seg in segments.iter() {
+            let leading_space = if seg.is_line_start && seg.code_block {
+                8.0
             } else {
                 0.0
             };
@@ -917,13 +945,18 @@ fn render_editor_pane(
             if seg.collapsed_delimiter {
                 // Zero-Cursor-Drift collapsed syntax delimiter:
                 // Keeps 1:1 char/byte indices in LayoutJob while shrinking delimiter to 0.01pt transparent.
+                let collapsed_lh = if seg.code_block {
+                    6.0
+                } else {
+                    seg_line_step
+                };
                 job.append(
                     &seg.text,
                     leading_space,
                     TextFormat {
                         font_id: FontId::new(0.01, egui::FontFamily::Monospace),
                         color: Color32::TRANSPARENT,
-                        line_height: Some(seg_line_step),
+                        line_height: Some(collapsed_lh),
                         ..Default::default()
                     },
                 );
@@ -994,7 +1027,12 @@ fn render_editor_pane(
             );
         }
 
-        ui.fonts(|f| f.layout_job(job))
+        let galley = ui.fonts(|f| f.layout_job(job));
+        if is_session_buf {
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(cache_id, (key, Arc::clone(&galley))));
+        }
+        galley
     };
 
     ScrollArea::vertical()
@@ -1019,14 +1057,35 @@ fn render_editor_pane(
                     .layouter(&mut layouter)
                     .show(ui);
 
-                // Populate block/inline visual overlays on `scroll_painter`
-                let live_spans = session.buffer.compute_live_spans(
+                // Populate block/inline visual overlays on `scroll_painter` with O(1) viewport culling
+                let live_spans = session.buffer.compute_live_spans_arc(
                     session.dialect,
                     session.view_while_typing,
                     session.buffer.selection_byte_range(),
                 );
+                let vis_min_y = (pane_rect.top() - output.galley_pos.y - 400.0).max(0.0);
+                let vis_max_y = (pane_rect.bottom() - output.galley_pos.y + 400.0).max(0.0);
+                let min_vis_char = output
+                    .galley
+                    .cursor_from_pos(Vec2::new(0.0, vis_min_y))
+                    .ccursor
+                    .index;
+                let max_vis_char = output
+                    .galley
+                    .cursor_from_pos(Vec2::new(col_width + 64.0, vis_max_y))
+                    .ccursor
+                    .index;
+
+                let row_top = |r: Rect| -> f32 { r.min.y.min(r.max.y - font_size * 1.18) };
+                let row_center_y = |r: Rect| -> f32 { (row_top(r) + r.max.y) * 0.5 };
+
                 let mut bg_shapes = Vec::new();
-                for ls in &live_spans {
+                for ls in live_spans.iter() {
+                    if ls.span.char_range.end < min_vis_char
+                        || ls.span.char_range.start > max_vis_char
+                    {
+                        continue;
+                    }
                     let is_collapsed =
                         ls.visibility == accent_core::DelimiterVisibility::Collapsed;
                     match &ls.span.kind {
@@ -1047,8 +1106,12 @@ fn render_editor_pane(
                             let r_bot = output.galley.pos_from_ccursor(egui::text::CCursor::new(
                                 ls.span.char_range.end.saturating_sub(1),
                             ));
-                            let sy = output.galley_pos.y + r_top.min.y - 4.0;
-                            let ey = output.galley_pos.y + r_bot.max.y + 4.0;
+                            let sy = output.galley_pos.y + r_top.min.y - 2.0;
+                            let ey = if is_collapsed {
+                                (output.galley_pos.y + r_bot.min.y + 2.0).max(sy + 26.0)
+                            } else {
+                                output.galley_pos.y + r_bot.max.y + 2.0
+                            };
                             if ey > sy {
                                 bg_shapes.push(egui::Shape::rect_filled(
                                     Rect::from_min_max(
@@ -1070,82 +1133,134 @@ fn render_editor_pane(
                             }
                         }
                         accent_core::AstSpanKind::BlockQuote if is_collapsed => {
+                            let probe_top = (ls.span.char_range.start + 3)
+                                .min(ls.span.char_range.end);
                             let r_top = output.galley.pos_from_ccursor(egui::text::CCursor::new(
-                                ls.span.char_range.start,
+                                probe_top,
                             ));
                             let r_bot = output.galley.pos_from_ccursor(egui::text::CCursor::new(
                                 ls.span.char_range.end.saturating_sub(1),
                             ));
-                            let sy = output.galley_pos.y + r_top.min.y + 2.0;
-                            let ey = output.galley_pos.y + r_bot.max.y - 2.0;
+                            let sy = output.galley_pos.y + r_top.min.y - 3.5;
+                            let ey = output.galley_pos.y + r_bot.max.y - 6.0;
                             if ey > sy {
                                 scroll_painter.rect_filled(
                                     Rect::from_min_max(
-                                        Pos2::new(x_body + 4.0, sy),
-                                        Pos2::new(x_body + 8.0, ey),
+                                        Pos2::new(x_body - 12.0, sy),
+                                        Pos2::new(x_body - 8.5, ey),
                                     ),
                                     CornerRadius::same(2),
                                     pal.border_headerbar,
                                 );
                             }
                         }
-                        accent_core::AstSpanKind::ListItem { task } if is_collapsed => {
+                        accent_core::AstSpanKind::Alert { alert_type } if is_collapsed => {
                             let r_top = output.galley.pos_from_ccursor(egui::text::CCursor::new(
                                 ls.span.char_range.start,
                             ));
-                            let cy = output.galley_pos.y + r_top.min.y + 10.5;
-                            if let Some(checked) = task {
-                                let cb_rect = Rect::from_center_size(
-                                    Pos2::new(x_body + 10.0, cy),
-                                    Vec2::new(14.0, 14.0),
+                            let r_bot = output.galley.pos_from_ccursor(egui::text::CCursor::new(
+                                ls.span.char_range.end.saturating_sub(1),
+                            ));
+                            let sy = output.galley_pos.y + row_top(r_top) - 3.5;
+                            let ey = output.galley_pos.y + r_bot.max.y - 6.0;
+                            let (bar_color, label) = match alert_type.to_ascii_lowercase().as_str() {
+                                "tip" => (Color32::from_rgb(0x2E, 0xA0, 0x43), "💡  TIP"),
+                                "important" => {
+                                    (Color32::from_rgb(0x89, 0x57, 0xE5), "❗  IMPORTANT")
+                                }
+                                "warning" => (pal.accent_orange, "⚠  WARNING"),
+                                "caution" => {
+                                    (Color32::from_rgb(0xDA, 0x36, 0x33), "🛑  CAUTION")
+                                }
+                                _ => (pal.accent_link, "ℹ  NOTE"),
+                            };
+                            if ey > sy {
+                                scroll_painter.rect_filled(
+                                    Rect::from_min_max(
+                                        Pos2::new(x_body - 12.0, sy),
+                                        Pos2::new(x_body - 8.0, ey),
+                                    ),
+                                    CornerRadius::same(2),
+                                    bar_color,
                                 );
-                                if *checked {
-                                    scroll_painter.rect_filled(
-                                        cb_rect,
-                                        CornerRadius::same(3),
-                                        pal.accent_orange,
+                                scroll_painter.text(
+                                    Pos2::new(x_body, sy + 9.5),
+                                    Align2::LEFT_CENTER,
+                                    label,
+                                    font_ui_bold(12.5),
+                                    bar_color,
+                                );
+                            }
+                        }
+                        accent_core::AstSpanKind::ListItem {
+                            ordered,
+                            task,
+                            content_char_start,
+                        } if is_collapsed => {
+                            if !*ordered || task.is_some() {
+                                let probe_char = (*content_char_start + 1)
+                                    .min(ls.span.char_range.end)
+                                    .max(ls.span.char_range.start);
+                                let r_content = output
+                                    .galley
+                                    .pos_from_ccursor(egui::text::CCursor::new(probe_char));
+                                let cy = output.galley_pos.y + r_content.min.y + font_size * 0.22;
+                                if let Some(checked) = task {
+                                    let cb_rect = Rect::from_center_size(
+                                        Pos2::new(x_body - 13.0, cy),
+                                        Vec2::new(13.5, 13.5),
                                     );
-                                    scroll_painter.line_segment(
-                                        [
-                                            Pos2::new(cb_rect.left() + 3.0, cb_rect.center().y),
-                                            Pos2::new(
-                                                cb_rect.center().x - 0.5,
-                                                cb_rect.bottom() - 3.5,
-                                            ),
-                                        ],
-                                        Stroke::new(1.6, Color32::WHITE),
-                                    );
-                                    scroll_painter.line_segment(
-                                        [
-                                            Pos2::new(
-                                                cb_rect.center().x - 0.5,
-                                                cb_rect.bottom() - 3.5,
-                                            ),
-                                            Pos2::new(cb_rect.right() - 2.8, cb_rect.top() + 3.2),
-                                        ],
-                                        Stroke::new(1.6, Color32::WHITE),
-                                    );
+                                    if *checked {
+                                        scroll_painter.rect_filled(
+                                            cb_rect,
+                                            CornerRadius::same(3),
+                                            pal.accent_orange,
+                                        );
+                                        scroll_painter.line_segment(
+                                            [
+                                                Pos2::new(cb_rect.left() + 3.0, cb_rect.center().y),
+                                                Pos2::new(
+                                                    cb_rect.center().x - 0.5,
+                                                    cb_rect.bottom() - 3.5,
+                                                ),
+                                            ],
+                                            Stroke::new(1.6, Color32::WHITE),
+                                        );
+                                        scroll_painter.line_segment(
+                                            [
+                                                Pos2::new(
+                                                    cb_rect.center().x - 0.5,
+                                                    cb_rect.bottom() - 3.5,
+                                                ),
+                                                Pos2::new(
+                                                    cb_rect.right() - 2.8,
+                                                    cb_rect.top() + 3.2,
+                                                ),
+                                            ],
+                                            Stroke::new(1.6, Color32::WHITE),
+                                        );
+                                    } else {
+                                        scroll_painter.rect_stroke(
+                                            cb_rect,
+                                            CornerRadius::same(3),
+                                            Stroke::new(1.3, pal.fg_muted),
+                                            StrokeKind::Middle,
+                                        );
+                                    }
                                 } else {
-                                    scroll_painter.rect_stroke(
-                                        cb_rect,
-                                        CornerRadius::same(3),
-                                        Stroke::new(1.3, pal.fg_muted),
-                                        StrokeKind::Middle,
+                                    scroll_painter.circle_filled(
+                                        Pos2::new(x_body - 12.0, cy),
+                                        3.2,
+                                        pal.fg_primary,
                                     );
                                 }
-                            } else {
-                                scroll_painter.circle_filled(
-                                    Pos2::new(x_body + 10.0, cy),
-                                    3.2,
-                                    pal.fg_primary,
-                                );
                             }
                         }
                         accent_core::AstSpanKind::ThematicBreak if is_collapsed => {
                             let r_top = output.galley.pos_from_ccursor(egui::text::CCursor::new(
                                 ls.span.char_range.start,
                             ));
-                            let cy = output.galley_pos.y + r_top.min.y + 10.5;
+                            let cy = output.galley_pos.y + row_center_y(r_top);
                             scroll_painter.line_segment(
                                 [Pos2::new(x_body, cy), Pos2::new(x_right, cy)],
                                 Stroke::new(1.5, pal.border_headerbar),
@@ -1158,7 +1273,7 @@ fn render_editor_pane(
                             let r_bot = output.galley.pos_from_ccursor(egui::text::CCursor::new(
                                 ls.span.char_range.end.saturating_sub(1),
                             ));
-                            let sy = output.galley_pos.y + r_top.min.y + 2.0;
+                            let sy = output.galley_pos.y + row_top(r_top) + 2.0;
                             let ey = (output.galley_pos.y + r_bot.max.y - 2.0).max(sy + 32.0);
                             let total_rows = (1 + rows.len()).max(1);
                             let row_h = (ey - sy) / (total_rows as f32);
@@ -1265,7 +1380,7 @@ fn render_editor_pane(
                     actions.push(Action::SetOverlay(ActiveOverlay::None));
                 }
 
-                if output.response.changed() && editable_text != session.buffer.text() {
+                if output.response.changed() && editable_text != session.buffer.as_str() {
                     let is_deletion = editable_text.len() < session.buffer.len_bytes();
                     if !(session.hemingway_mode && is_deletion) {
                         actions.push(Action::UpdateBufferText(editable_text));
@@ -1342,7 +1457,7 @@ fn render_preview_pane(
 ) {
     painter.rect_filled(pane_rect, CornerRadius::ZERO, pal.bg_preview);
 
-    let blocks = session.buffer.parse_preview_blocks(session.dialect);
+    let blocks = session.buffer.parse_preview_blocks_arc(session.dialect);
     let inner_rect = Rect::from_min_max(
         Pos2::new(pane_rect.left() + 18.0, pane_rect.top() + 16.0),
         Pos2::new(pane_rect.right() - 18.0, pane_rect.bottom() - 8.0),
@@ -1359,7 +1474,7 @@ fn render_preview_pane(
         .auto_shrink([false, false])
         .show(&mut preview_ui, |ui| {
             let avail_w = ui.available_width();
-            for block in &blocks {
+            for block in blocks.iter() {
                 match block {
                     PreviewBlock::Heading {
                         level,

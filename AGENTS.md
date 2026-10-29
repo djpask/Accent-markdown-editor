@@ -9,10 +9,10 @@ This document defines the **technical architecture, operational rules, clean-roo
 
 At the beginning of **every** coding session, before writing or modifying any Rust code, follow this exact checklist:
 
-1. **Read Functional Specs & Roadmap:** Open and read **`SPECS.md`** to identify the active Milestone (`[ ]` or `[~]`) and functional requirements. Never jump ahead to later phases before the current phase compiles, passes `cargo test`, and passes visual screenshot verification.
+1. **Read Functional Specs & Roadmap:** Open and read **`SPECS.md`** to identify the active Milestone (`[ ]` or `[~]`) and functional requirements. Never jump ahead to later phases before the current phase compiles, passes `cargo test`, and passes live interactive GUI verification.
 2. **Inspect Reference Screenshots:** Check `img/Apostrophe_screenshots/`. If the directory is empty or missing reference views for the current task, attach to the running **Apostrophe** instance and capture them first (see Section 1.3).
 3. **Verify Baseline Health:** If the Cargo workspace already exists, run `cargo test --workspace` to ensure you are starting from a green state.
-4. **Work Incrementally & Look at the App:** Implement one sub-feature at a time, generate `img/Accent_screenshots/accent_shot.png` via the screenshot harness (Section 2), visually inspect the PNG against `img/Apostrophe_screenshots/`, and update the checkboxes in **`SPECS.md`** as milestones are completed.
+4. **Work Incrementally & Test Interactively:** Implement one sub-feature at a time, launch Accent inside `Xvfb :99`, interact with it as a real human user via `xdotool` (mouse clicks, window dragging, keyboard typing), capture external screenshots via `maim` into `img/Accent_screenshots/` (Section 2), visually inspect them against `img/Apostrophe_screenshots/`, and update the checkboxes in **`SPECS.md`** as milestones are completed.
 
 ---
 
@@ -48,29 +48,21 @@ Accent is a **clean-room implementation**. You (the AI Agent) must replicate the
 
 ---
 
-## 2. Running and Looking at the App (Accent Self-Inspection Loop)
+## 2. Unified Live GUI Verification Protocol (`Xvfb :99` + `xdotool` + `maim`)
 
-Never guess whether your `egui` UI code looks right. Compilation (`cargo check`) only proves syntax and types—it does NOT prove visual correctness. **For all UI work, you must run Accent, capture a screenshot of its rendered frame, and visually inspect the PNG.**
+Never guess whether your `egui` UI code looks right or responds to user input. Compilation (`cargo check`) only proves syntax and types—it does NOT prove visual correctness or real interactivity. **For all UI work, you must run Accent as a live desktop app inside `Xvfb :99`, drive it with `xdotool`, capture external screenshots with `maim`, and visually inspect the PNGs.**
 
-### 2.1 Built-in Headless / Automated Screenshot Harness (`ui_shot`)
-Accent must maintain a deterministic screenshot and automation mechanism (via CLI flags `--shot <path>` / `--script <jsonl>` or `cargo run --example ui_shot`) that:
-1. Initializes the `AccentApp` state and `AccentTheme` (fonts, visuals, spacing).
-2. Executes an optional sequence of commands or loads a sample Markdown document.
-3. Renders the `egui` frame (via `egui::ViewportCommand::Screenshot` or offscreen `wgpu` texture) and writes it to `img/Accent_screenshots/accent_shot.png`.
+### 2.1 Strictly No CLI State-Shortcut or Screenshot Flags
+- **CRITICAL BAN:** Building or maintaining CLI state-shortcut or one-frame screenshot flags (such as `--shot`, `--overlay`, `--theme`, `--width`, `--dialect`, `--script`, or `--control`) inside `accent-ui` is **strictly prohibited**, as they encourage static visual mockups ("Potëmkin UI") disconnected from real mouse and keyboard events.
+- **Clean Production CLI Surface:** `accent-ui` must ONLY accept an optional file path argument (`accent-ui [path/to/file.md]`). All UI states (themes, line widths, popovers, Preferences modal, preview modes) must be reached exclusively through real user interaction or persisted user preferences.
 
-### 2.2 Live Control & State Inspection (`--control <port>`)
-Accent exposes a local JSON control channel (or CLI batch runner) allowing the agent to drive a running Accent instance:
-- **`command.dispatch`**: Execute any application action (e.g., `SetTheme(Sepia)`, `SetLineWidth(Medium)`, `InsertText("**parola**")`, `MoveCursor(offset)`, `ToggleSplitPreview`).
-- **`session.inspect`**: Dump the current document AST, cursor byte/char offset, active formatting spans, and recovery journal state as structured JSON for deterministic verification.
-- **`ui.screenshot`**: Save the current rendered viewport to `img/Accent_screenshots/accent_shot.png`.
-
-### 2.3 The Mandatory Agent UI Workflow
+### 2.2 The Mandatory External Black-Box UI Workflow
 Whenever you implement or modify a UI feature in Accent:
 1. Look at the corresponding reference screenshot in `img/Apostrophe_screenshots/` (or capture a new one from the running Apostrophe instance if missing).
-2. Implement the feature in Rust (`accent-ui` / `accent-core`).
-3. Run Accent to produce `img/Accent_screenshots/accent_shot.png`.
-4. **View `img/Accent_screenshots/accent_shot.png` and compare it side-by-side with `img/Apostrophe_screenshots/*.png`.**
-5. Iterate on the Rust code until Accent matches or exceeds the reference quality.
+2. Implement the feature in Rust (`accent-ui` / `accent-core`) with full mouse `.clicked()` and keyboard handlers.
+3. Launch Accent normally inside `Xvfb :99` (`DISPLAY=:99 cargo run -p accent-ui -- <sample.md> &`), interact with it using `DISPLAY=:99 xdotool` (clicking buttons, opening popovers, typing text), and capture the live window using `DISPLAY=:99 maim --window "$ACCENT_WIN" --hidecursor "$PWD/img/Accent_screenshots/<descriptive_name>.png"`.
+4. **View the captured PNGs in `img/Accent_screenshots/` and compare them side-by-side with `img/Apostrophe_screenshots/*.png`.**
+5. Iterate on the Rust code until Accent matches or exceeds the reference quality and responds to every mouse/keyboard action.
 
 ---
 
@@ -100,11 +92,9 @@ To prevent spaghetti code and `egui` borrow-checker conflicts, Accent is organiz
 
 ---
 
----
-
 ## 4. No "Potëmkin UI" Rule & Mandatory Human-Simulation Testing (CRITICAL)
 
-Never build static, non-interactive visual mockups just to pass `--shot` CLI screenshot comparisons. CLI flags (`--overlay`, `--width`, `--theme`, `--shot`) must ONLY act as helpers; the application MUST be fully operable by a human using mouse and keyboard.
+Never build static, non-interactive visual mockups. The application MUST be 100% operable by a human using mouse and keyboard, with zero reliance on CLI flags to open menus or change views.
 
 ### 4.1 Architectural Interactivity Requirements
 1. **Real Editable Text Widget:** The editor canvas must always be a genuinely interactive `egui::TextEdit` (with custom AST `layouter`) supporting mouse click cursor placement, text selection, keyboard typing, copy/paste, and scrolling—never static `ui.label()` rows.
@@ -112,7 +102,7 @@ Never build static, non-interactive visual mockups just to pass `--shot` CLI scr
 3. **Every Button Must Work on Click:** Every button, pill (`80ch`/`110ch`/`140ch`/`Fluid`), and counter in the headerbar, bottom toolbar, and modals must have a working `.clicked()` handler that toggles its popover, dialog, or formatting action interactively with the mouse.
 
 ### 4.2 Mandatory Live Human-Simulation Verification (`xdotool` + `maim` on Accent)
-Before marking any UI milestone as `[x]`, you MUST launch Accent as a normal interactive desktop app inside `Xvfb :99` (**without** `--shot` or `--overlay` flags) and simulate a real human user interacting with it via `DISPLAY=:99 xdotool`:
+Before marking any UI milestone as `[x]`, you MUST launch Accent as a normal interactive desktop app inside `Xvfb :99` (`DISPLAY=:99 cargo run -p accent-ui -- <sample.md> &`) and simulate a real human user interacting with it via `DISPLAY=:99 xdotool`:
 1. **Launch Live Accent on `:99`:**
    `DISPLAY=:99 cargo run -p accent-ui &` and locate its X11 window via `ACCENT_WIN=$(DISPLAY=:99 xdotool search --onlyvisible --name ".*" | tail -n 1)`.
 2. **Simulate Human Window Dragging:**
