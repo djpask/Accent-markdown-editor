@@ -297,6 +297,8 @@ pub struct EditorTextSegment {
     pub link: bool,
     /// True when Caret-Aware *View-while-typing* collapses this syntax delimiter (`font_size = 0.01`, transparent).
     pub collapsed_delimiter: bool,
+    /// True when this segment is a body line inside a collapsed `mermaid` code block in *View-while-typing* mode.
+    pub mermaid_collapsed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1272,8 +1274,14 @@ impl DocumentBuffer {
                     .delimiter_byte_ranges
                     .iter()
                     .any(|dr| dr.start == line_start && dr.end == content_end);
-                let fence_collapsed =
-                    is_fence_delim && cb_ls.visibility == DelimiterVisibility::Collapsed;
+                let is_mermaid_block = matches!(
+                    &cb_ls.span.kind,
+                    AstSpanKind::CodeBlock { info, .. }
+                        if info.trim().to_ascii_lowercase().starts_with("mermaid")
+                );
+                let is_cb_collapsed = cb_ls.visibility == DelimiterVisibility::Collapsed;
+                let fence_collapsed = is_fence_delim && is_cb_collapsed;
+                let mermaid_body_collapsed = !is_fence_delim && is_mermaid_block && is_cb_collapsed;
                 out.push(EditorTextSegment {
                     text: text[line_start..content_end].to_string(),
                     byte_range: line_start..content_end,
@@ -1282,7 +1290,8 @@ impl DocumentBuffer {
                     code_block: true,
                     code_inline: true,
                     muted: is_fence_delim,
-                    collapsed_delimiter: fence_collapsed,
+                    collapsed_delimiter: fence_collapsed || mermaid_body_collapsed,
+                    mermaid_collapsed: mermaid_body_collapsed,
                     ..Default::default()
                 });
                 if content_end < full_line_end {
@@ -1292,7 +1301,8 @@ impl DocumentBuffer {
                         is_line_start: false,
                         line_index: line_idx,
                         code_block: true,
-                        collapsed_delimiter: fence_collapsed,
+                        collapsed_delimiter: fence_collapsed || mermaid_body_collapsed,
+                        mermaid_collapsed: mermaid_body_collapsed,
                         ..Default::default()
                     });
                 }
@@ -2030,6 +2040,21 @@ impl DocumentBuffer {
                     text: c.literal.clone(),
                     bold,
                     italic,
+                    strikethrough,
+                    code: true,
+                    link_url,
+                });
+            }
+            NodeValue::Math(m) => {
+                let formatted = if m.display_math {
+                    format!("$${}$$", m.literal)
+                } else {
+                    format!("${}$", m.literal)
+                };
+                out.push(PreviewInline {
+                    text: formatted,
+                    bold,
+                    italic: true,
                     strikethrough,
                     code: true,
                     link_url,

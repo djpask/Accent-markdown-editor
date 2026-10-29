@@ -66,6 +66,6 @@ Keep these checkboxes updated as phases complete (`[ ]` Pending, `[~]` In Progre
   - [x] Implement automatic dirty-session restoration on startup after simulated crash.
   - [x] Implement `write-temp -> fsync -> atomic rename` file saving with comprehensive unit tests.
 
-- [ ] **Phase 5: Native Mermaid GPU Rendering & 100% Rust Export Pipeline**
-  - [ ] Integrate pure-Rust Mermaid SVG generation + `resvg` texture rasterization with hash caching.
-  - [ ] Implement embedded PDF (`krilla`/`typst`), Word (`docx-rs`), OpenDocument Text (`.odt` via ODF 1.2 XML + `zip`), LaTeX (`.tex` AST serializer), and EPUB (`epub-builder`) exporters.
+- [x] **Phase 5: Native Mermaid GPU Rendering & 100% Rust Export Pipeline**
+  - [x] Integrate pure-Rust Mermaid SVG generation + `resvg` texture rasterization with hash caching.
+  - [x] Implement embedded PDF (`krilla`/`typst`), Word (`docx-rs`), OpenDocument Text (`.odt` via ODF 1.2 XML + `zip`), LaTeX (`.tex` AST serializer), and EPUB (`epub-builder`) exporters.

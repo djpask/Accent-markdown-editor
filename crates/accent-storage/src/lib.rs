@@ -129,6 +129,11 @@ pub fn journal_file_path(recovery_dir: &Path, target_path: Option<&Path>) -> Pat
 /// Atomically writes `content` to `path` via `write-temp -> fsync (sync_all) -> atomic rename -> parent dir sync`.
 /// Guarantees zero file corruption and zero orphan `.accent-tmp-*` files on success.
 pub fn atomic_save(path: &Path, content: &str) -> io::Result<()> {
+    atomic_save_bytes(path, content.as_bytes())
+}
+
+/// Atomically writes arbitrary `bytes` to `path` via `write-temp -> fsync (sync_all) -> atomic rename -> parent dir sync`.
+pub fn atomic_save_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
@@ -146,7 +151,7 @@ pub fn atomic_save(path: &Path, content: &str) -> io::Result<()> {
 
     let write_res = (|| -> io::Result<()> {
         let mut tmp_file = File::create(&tmp_path)?;
-        tmp_file.write_all(content.as_bytes())?;
+        tmp_file.write_all(bytes)?;
         tmp_file.sync_all()?;
         Ok(())
     })();

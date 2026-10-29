@@ -2,8 +2,8 @@ pub mod theme;
 
 use accent_core::{MarkdownDialect, PreviewBlock, PreviewInline};
 use accent_session::{
-    Action, ActiveOverlay, FormatCommand, I18n, LineWidthMode, Locale, PreviewLayout, Session,
-    StatMetric, ThemeMode,
+    Action, ActiveOverlay, ExportFormat, FormatCommand, I18n, LineWidthMode, Locale,
+    PreviewLayout, Session, StatMetric, ThemeMode,
 };
 use egui::{
     epaint::StrokeKind, text::LayoutJob, Align2, Color32, Context, CornerRadius, CursorIcon, FontId,
@@ -61,6 +61,10 @@ pub fn render_ui(
         if i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt && i.key_pressed(egui::Key::L)
         {
             actions.push(Action::ToggleViewWhileTyping);
+        }
+        if i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt && i.key_pressed(egui::Key::E)
+        {
+            actions.push(Action::SetOverlay(ActiveOverlay::ExportDialog));
         }
         if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::E) {
             actions.push(Action::SetEditorOnlyRaw);
@@ -242,7 +246,7 @@ fn overlay_bounds(win_rect: Rect, session: &Session) -> Rect {
         ),
         ActiveOverlay::MainMenu => Rect::from_min_max(
             Pos2::new(win_rect.right() - 302.0, 44.0),
-            Pos2::new(win_rect.right() - 6.0, 412.0),
+            Pos2::new(win_rect.right() - 6.0, 444.0),
         ),
         ActiveOverlay::LineWidthMenu => Rect::from_min_max(
             Pos2::new(win_rect.right() - 390.0, 44.0),
@@ -1068,7 +1072,9 @@ fn render_editor_pane(
             if seg.collapsed_delimiter {
                 // Zero-Cursor-Drift collapsed syntax delimiter:
                 // Keeps 1:1 char/byte indices in LayoutJob while shrinking delimiter to 0.01pt transparent.
-                let collapsed_lh = if seg.code_block {
+                let collapsed_lh = if seg.mermaid_collapsed {
+                    44.0
+                } else if seg.code_block {
                     6.0
                 } else {
                     seg_line_step
@@ -1336,6 +1342,10 @@ fn render_editor_pane(
                                 output.galley_pos.y + r_bot.max.y + 2.0
                             };
                             if ey > sy {
+                                let is_mermaid = info
+                                    .trim()
+                                    .to_ascii_lowercase()
+                                    .starts_with("mermaid");
                                 bg_shapes.push(egui::Shape::rect_filled(
                                     Rect::from_min_max(
                                         Pos2::new(x_body, sy),
@@ -1344,6 +1354,54 @@ fn render_editor_pane(
                                     CornerRadius::same(4),
                                     pal.bg_code_block,
                                 ));
+                                if is_collapsed && is_mermaid {
+                                    let full_slice =
+                                        &session.buffer.as_str()[ls.span.byte_range.clone()];
+                                    let mut inner_lines: Vec<&str> = full_slice.lines().collect();
+                                    if !inner_lines.is_empty()
+                                        && (inner_lines[0].trim_start().starts_with("```")
+                                            || inner_lines[0].trim_start().starts_with("~~~"))
+                                    {
+                                        inner_lines.remove(0);
+                                    }
+                                    if !inner_lines.is_empty()
+                                        && (inner_lines.last().unwrap().trim_start().starts_with("```")
+                                            || inner_lines
+                                                .last()
+                                                .unwrap()
+                                                .trim_start()
+                                                .starts_with("~~~"))
+                                    {
+                                        inner_lines.pop();
+                                    }
+                                    let mermaid_code = inner_lines.join("\n");
+                                    let (tex, mw, mh) = get_or_load_mermaid_texture(
+                                        ui.ctx(),
+                                        session,
+                                        &mermaid_code,
+                                    );
+                                    let avail_box = Rect::from_min_max(
+                                        Pos2::new(x_body + 8.0, sy + 6.0),
+                                        Pos2::new(x_right - 8.0, ey - 6.0),
+                                    );
+                                    let aspect = (mw.max(1) as f32) / (mh.max(1) as f32);
+                                    let mut draw_w = avail_box.width().min((mw as f32) * 0.55);
+                                    let mut draw_h = draw_w / aspect;
+                                    if draw_h > avail_box.height().max(40.0) {
+                                        draw_h = avail_box.height().max(40.0);
+                                        draw_w = draw_h * aspect;
+                                    }
+                                    let img_rect = Rect::from_center_size(
+                                        avail_box.center(),
+                                        Vec2::new(draw_w, draw_h),
+                                    );
+                                    scroll_painter.image(
+                                        tex.id(),
+                                        img_rect,
+                                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                        Color32::WHITE,
+                                    );
+                                }
                                 if is_collapsed && !info.trim().is_empty() {
                                     scroll_painter.text(
                                         Pos2::new(x_right - 10.0, sy + 14.0),
@@ -1912,30 +1970,76 @@ fn render_preview_pane(
                         });
                         ui.add_space(10.0);
                     }
-                    PreviewBlock::CodeBlock { code, .. } => {
-                        let lines_count = code.lines().count().max(1);
-                        let box_h = (lines_count as f32) * 20.0 + 22.0;
-                        let (cb_rect, _) =
-                            ui.allocate_exact_size(Vec2::new(avail_w, box_h), Sense::hover());
-                        ui.painter()
-                            .rect_filled(cb_rect, CornerRadius::same(4), pal.bg_code_block);
-                        ui.painter().text(
-                            Pos2::new(cb_rect.left() + 12.0, cb_rect.top() + 10.0),
-                            Align2::LEFT_TOP,
-                            code,
-                            font_editor_regular(13.0),
-                            pal.fg_primary,
-                        );
-                        ui.add_space(10.0);
+                    PreviewBlock::CodeBlock { info, code } => {
+                        if info.trim().to_ascii_lowercase().starts_with("mermaid") {
+                            let (tex, mw, mh) = get_or_load_mermaid_texture(ui.ctx(), session, code);
+                            let aspect = (mw.max(1) as f32) / (mh.max(1) as f32);
+                            let max_w = avail_w.min((mw as f32) * 0.55).max(180.0);
+                            let draw_h = (max_w / aspect).clamp(90.0, 340.0);
+                            let draw_w = (draw_h * aspect).min(avail_w);
+                            let box_h = draw_h + 18.0;
+                            let (cb_rect, _) =
+                                ui.allocate_exact_size(Vec2::new(avail_w, box_h), Sense::hover());
+                            ui.painter()
+                                .rect_filled(cb_rect, CornerRadius::same(6), pal.bg_code_block);
+                            let img_rect =
+                                Rect::from_center_size(cb_rect.center(), Vec2::new(draw_w, draw_h));
+                            ui.painter().image(
+                                tex.id(),
+                                img_rect,
+                                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                            ui.add_space(10.0);
+                        } else {
+                            let lines_count = code.lines().count().max(1);
+                            let box_h = (lines_count as f32) * 20.0 + 22.0;
+                            let (cb_rect, _) =
+                                ui.allocate_exact_size(Vec2::new(avail_w, box_h), Sense::hover());
+                            ui.painter()
+                                .rect_filled(cb_rect, CornerRadius::same(4), pal.bg_code_block);
+                            ui.painter().text(
+                                Pos2::new(cb_rect.left() + 12.0, cb_rect.top() + 10.0),
+                                Align2::LEFT_TOP,
+                                code,
+                                font_editor_regular(13.0),
+                                pal.fg_primary,
+                            );
+                            ui.add_space(10.0);
+                        }
                     }
                     PreviewBlock::Table { headers, rows } => {
                         ui.add_space(4.0);
                         let cols = headers.len().max(1);
-                        let col_w = 96.0_f32;
                         let row_h = 30.0_f32;
                         let total_rows = 1 + rows.len();
-                        let table_w = (cols as f32) * col_w + 24.0;
+                        let table_w = avail_w.max(200.0);
                         let table_h = (total_rows as f32) * row_h;
+
+                        let mut col_weights: Vec<f32> = headers
+                            .iter()
+                            .map(|h| (h.chars().count().max(6) + 4) as f32)
+                            .collect();
+                        for row in rows {
+                            for (c_idx, cell) in row.iter().enumerate() {
+                                if c_idx < col_weights.len() {
+                                    let w = (cell.chars().count().max(6) + 4) as f32;
+                                    if w > col_weights[c_idx] {
+                                        col_weights[c_idx] = w;
+                                    }
+                                }
+                            }
+                        }
+                        let weight_sum: f32 = col_weights.iter().sum::<f32>().max(1.0);
+                        let col_widths: Vec<f32> = if col_weights.is_empty() {
+                            vec![table_w / (cols as f32); cols]
+                        } else {
+                            col_weights
+                                .iter()
+                                .map(|w| table_w * (*w / weight_sum))
+                                .collect()
+                        };
+
                         let (t_rect, _) =
                             ui.allocate_exact_size(Vec2::new(table_w, table_h), Sense::hover());
                         let tp = ui.painter();
@@ -1947,7 +2051,9 @@ fn render_preview_pane(
                                 Pos2::new(t_rect.left(), ry),
                                 Pos2::new(t_rect.right(), ry + row_h),
                             );
-                            if r_idx % 2 == 1 {
+                            if r_idx == 0 {
+                                tp.rect_filled(r_rect, CornerRadius::ZERO, pal.bg_code_block);
+                            } else if r_idx % 2 == 1 {
                                 tp.rect_filled(
                                     r_rect,
                                     CornerRadius::ZERO,
@@ -1961,11 +2067,10 @@ fn render_preview_pane(
                             };
                             let mut cx = t_rect.left();
                             for (c_idx, cell_text) in cells.iter().enumerate() {
-                                let cw = if c_idx + 1 == cols {
-                                    t_rect.right() - cx
-                                } else {
-                                    88.0
-                                };
+                                let cw = col_widths
+                                    .get(c_idx)
+                                    .copied()
+                                    .unwrap_or(table_w / (cols as f32));
                                 let cell_r = Rect::from_min_max(
                                     Pos2::new(cx, ry),
                                     Pos2::new(cx + cw, ry + row_h),
@@ -1976,7 +2081,7 @@ fn render_preview_pane(
                                     Stroke::new(1.0, pal.border_headerbar),
                                     StrokeKind::Middle,
                                 );
-                                tp.text(
+                                tp.with_clip_rect(cell_r.shrink(2.0)).text(
                                     Pos2::new(cell_r.left() + 8.0, cell_r.center().y),
                                     Align2::LEFT_CENTER,
                                     cell_text,
@@ -2555,7 +2660,7 @@ fn render_popovers(
         ActiveOverlay::MainMenu => {
             let pop_rect = Rect::from_min_max(
                 Pos2::new(win_rect.right() - 302.0, 44.0),
-                Pos2::new(win_rect.right() - 6.0, 412.0),
+                Pos2::new(win_rect.right() - 6.0, 444.0),
             );
             painter.rect_filled(pop_rect, CornerRadius::same(12), pal.bg_popover);
             painter.rect_stroke(
@@ -2654,14 +2759,20 @@ fn render_popovers(
                     222.0,
                     false,
                 ),
-                (I18n::tr(session.locale, "open_tutorial"), "", 260.0, false),
+                (
+                    I18n::tr(session.locale, "advanced_export"),
+                    "Ctrl+E",
+                    256.0,
+                    false,
+                ),
+                (I18n::tr(session.locale, "open_tutorial"), "", 290.0, false),
                 (
                     I18n::tr(session.locale, "keyboard_shortcuts"),
                     "Ctrl+?",
-                    292.0,
+                    322.0,
                     false,
                 ),
-                (I18n::tr(session.locale, "about"), "", 324.0, false),
+                (I18n::tr(session.locale, "about"), "", 354.0, false),
             ];
             for (idx, (label, shortcut, dy, active)) in items.into_iter().enumerate() {
                 let y = pop_rect.top() + dy;
@@ -2702,9 +2813,10 @@ fn render_popovers(
                             actions.push(Action::SetOverlay(ActiveOverlay::None));
                         }
                         3 => actions.push(Action::SetOverlay(ActiveOverlay::PreferencesDialog)),
-                        4 => actions.push(Action::OpenTutorial),
-                        5 => actions.push(Action::SetOverlay(ActiveOverlay::ShortcutsDialog)),
-                        6 => actions.push(Action::SetOverlay(ActiveOverlay::AboutDialog)),
+                        4 => actions.push(Action::SetOverlay(ActiveOverlay::ExportDialog)),
+                        5 => actions.push(Action::OpenTutorial),
+                        6 => actions.push(Action::SetOverlay(ActiveOverlay::ShortcutsDialog)),
+                        7 => actions.push(Action::SetOverlay(ActiveOverlay::AboutDialog)),
                         _ => actions.push(Action::SetOverlay(ActiveOverlay::None)),
                     }
                 }
@@ -3210,6 +3322,47 @@ fn render_file_browser_dialog(
     }
 }
 
+fn get_or_load_mermaid_texture(
+    ctx: &Context,
+    session: &Session,
+    code: &str,
+) -> (egui::TextureHandle, u32, u32) {
+    let diagram = session.render_mermaid(code);
+    let cache_id = Id::new("accent_mermaid_gpu_textures");
+    let key = (diagram.content_hash, diagram.theme);
+    if let Some(cached) = ctx.data_mut(|d| {
+        d.get_temp::<std::collections::HashMap<
+            (u64, accent_session::MermaidTheme),
+            (egui::TextureHandle, u32, u32),
+        >>(cache_id)
+        .and_then(|m| m.get(&key).cloned())
+    }) {
+        return cached;
+    }
+
+    let color_image = egui::ColorImage::from_rgba_unmultiplied(
+        [diagram.width as usize, diagram.height as usize],
+        &diagram.rgba_pixels,
+    );
+    let tex = ctx.load_texture(
+        format!("mermaid_{:016x}_{:?}", diagram.content_hash, diagram.theme),
+        color_image,
+        egui::TextureOptions::LINEAR,
+    );
+    let entry = (tex, diagram.width, diagram.height);
+    ctx.data_mut(|d| {
+        let mut map = d
+            .get_temp::<std::collections::HashMap<
+                (u64, accent_session::MermaidTheme),
+                (egui::TextureHandle, u32, u32),
+            >>(cache_id)
+            .unwrap_or_default();
+        map.insert(key, entry.clone());
+        d.insert_temp(cache_id, map);
+    });
+    entry
+}
+
 fn render_export_dialog(
     ui: &mut Ui,
     painter: &Painter,
@@ -3221,9 +3374,9 @@ fn render_export_dialog(
     painter.rect_filled(
         win_rect,
         CornerRadius::ZERO,
-        Color32::from_rgba_unmultiplied(0, 0, 0, 48),
+        Color32::from_rgba_unmultiplied(0, 0, 0, 56),
     );
-    let dlg_rect = Rect::from_center_size(win_rect.center(), Vec2::new(480.0, 290.0));
+    let dlg_rect = Rect::from_center_size(win_rect.center(), Vec2::new(666.0, 468.0));
     painter.rect_filled(dlg_rect, CornerRadius::same(14), pal.bg_popover);
     painter.rect_stroke(
         dlg_rect,
@@ -3232,14 +3385,47 @@ fn render_export_dialog(
         StrokeKind::Middle,
     );
 
+    let sidebar_w = 212.0;
+    let split_x = dlg_rect.left() + sidebar_w;
+    let sidebar_rect = Rect::from_min_max(dlg_rect.left_top(), Pos2::new(split_x, dlg_rect.bottom()));
+    let right_rect = Rect::from_min_max(Pos2::new(split_x, dlg_rect.top()), dlg_rect.right_bottom());
+
+    // Vertical separator between Formati sidebar and options pane
+    painter.line_segment(
+        [
+            Pos2::new(split_x, dlg_rect.top() + 1.0),
+            Pos2::new(split_x, dlg_rect.bottom() - 1.0),
+        ],
+        Stroke::new(1.0, pal.border_headerbar),
+    );
+
     let hdr_y = dlg_rect.top() + 26.0;
+    let formats_title = match session.locale {
+        Locale::It => "Formati",
+        Locale::Es => "Formatos",
+        Locale::En => "Formats",
+    };
     painter.text(
-        Pos2::new(dlg_rect.center().x, hdr_y),
+        Pos2::new(sidebar_rect.center().x, hdr_y),
         Align2::CENTER_CENTER,
-        I18n::tr(session.locale, "advanced_export"),
+        formats_title,
+        font_ui_bold(14.5),
+        pal.fg_primary,
+    );
+
+    let export_header = match session.locale {
+        Locale::It => format!("Esporta in {}", session.selected_export_format.sidebar_label()),
+        Locale::Es => format!("Exportar a {}", session.selected_export_format.sidebar_label()),
+        Locale::En => format!("Export to {}", session.selected_export_format.sidebar_label()),
+    };
+    painter.text(
+        Pos2::new(right_rect.center().x - 10.0, hdr_y),
+        Align2::CENTER_CENTER,
+        export_header,
         font_ui_bold(15.0),
         pal.fg_primary,
     );
+
     let close_pos = Pos2::new(dlg_rect.right() - 26.0, hdr_y);
     draw_window_button(painter, close_pos, pal.bg_pill_button, pal.fg_primary, 'x');
     if ui
@@ -3253,44 +3439,238 @@ fn render_export_dialog(
         actions.push(Action::SetOverlay(ActiveOverlay::None));
     }
 
-    for (idx, (fmt_code, desc)) in [
-        ("html", "HTML5 Standalone (.html)"),
-        ("pdf", "Documento PDF (.pdf)"),
-        ("docx", "Microsoft Word (.docx)"),
-        ("epub", "E-Book EPUB (.epub)"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let ry = dlg_rect.top() + 78.0 + (idx as f32) * 46.0;
+    // Left Sidebar: Format list (matching Apostrophe's Export Dialog)
+    let formats = [
+        ExportFormat::Pdf,
+        ExportFormat::Odt,
+        ExportFormat::Docx,
+        ExportFormat::Epub,
+        ExportFormat::Latex,
+        ExportFormat::Html,
+    ];
+    for (idx, fmt) in formats.into_iter().enumerate() {
+        let ry = dlg_rect.top() + 74.0 + (idx as f32) * 44.0;
         let row_r = Rect::from_min_max(
-            Pos2::new(dlg_rect.left() + 24.0, ry - 18.0),
-            Pos2::new(dlg_rect.right() - 24.0, ry + 18.0),
+            Pos2::new(sidebar_rect.left() + 8.0, ry - 18.0),
+            Pos2::new(sidebar_rect.right() - 8.0, ry + 18.0),
         );
-        let hit = ui.interact(row_r, ui.id().with(("exp_fmt_btn", idx)), Sense::click());
-        painter.rect_filled(
-            row_r,
-            CornerRadius::same(8),
-            if hit.hovered() {
-                pal.accent_orange
-            } else {
-                pal.bg_pill_button
-            },
-        );
+        let hit = ui.interact(row_r, ui.id().with(("exp_fmt_row", idx)), Sense::click());
+        let is_selected = session.selected_export_format == fmt;
+        if is_selected {
+            painter.rect_filled(
+                row_r,
+                CornerRadius::same(8),
+                pal.accent_orange.gamma_multiply(0.16),
+            );
+            painter.rect_stroke(
+                row_r,
+                CornerRadius::same(8),
+                Stroke::new(1.2, pal.accent_orange),
+                StrokeKind::Middle,
+            );
+        } else if hit.hovered() {
+            painter.rect_filled(row_r, CornerRadius::same(8), pal.bg_pill_button);
+        }
         painter.text(
-            row_r.center(),
-            Align2::CENTER_CENTER,
-            desc,
-            font_ui_bold(13.5),
-            if hit.hovered() {
-                Color32::WHITE
+            Pos2::new(row_r.left() + 14.0, row_r.center().y),
+            Align2::LEFT_CENTER,
+            fmt.sidebar_label(),
+            if is_selected {
+                font_ui_bold(13.5)
+            } else {
+                font_ui_regular(13.5)
+            },
+            if is_selected {
+                pal.accent_orange
             } else {
                 pal.fg_primary
             },
         );
         if hit.clicked() {
-            actions.push(Action::ExportDocument(fmt_code.to_string()));
+            actions.push(Action::SelectExportFormat(fmt));
         }
+    }
+
+    // Right Pane Option Cards
+    let card_left = right_rect.left() + 26.0;
+    let card_right = right_rect.right() - 26.0;
+
+    // Card 1: Destination File Path
+    let dest_label = match session.locale {
+        Locale::It => "Percorso file di destinazione",
+        Locale::Es => "Ruta del archivo de destino",
+        Locale::En => "Destination file path",
+    };
+    painter.text(
+        Pos2::new(card_left + 4.0, dlg_rect.top() + 68.0),
+        Align2::LEFT_CENTER,
+        dest_label,
+        font_ui_bold(13.0),
+        pal.fg_muted,
+    );
+    let path_card = Rect::from_min_max(
+        Pos2::new(card_left, dlg_rect.top() + 84.0),
+        Pos2::new(card_right, dlg_rect.top() + 132.0),
+    );
+    painter.rect_filled(path_card, CornerRadius::same(10), pal.bg_canvas);
+    painter.rect_stroke(
+        path_card,
+        CornerRadius::same(10),
+        Stroke::new(1.0, pal.border_headerbar),
+        StrokeKind::Middle,
+    );
+
+    let mut out_path_str = session.export_output_path.clone();
+    let mut path_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(path_card.shrink2(Vec2::new(12.0, 12.0)))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    let path_resp = path_ui.add(
+        TextEdit::singleline(&mut out_path_str)
+            .id(Id::new("accent_export_output_path_input"))
+            .frame(false)
+            .desired_width(path_card.width() - 28.0)
+            .font(font_editor_regular(13.5))
+            .text_color(pal.fg_primary),
+    );
+    if path_resp.changed() {
+        actions.push(Action::SetExportOutputPath(out_path_str));
+    }
+
+    // Card 2: Page Size & Options (inspired by Apostrophe's Export options card)
+    let opts_card = Rect::from_min_max(
+        Pos2::new(card_left, dlg_rect.top() + 154.0),
+        Pos2::new(card_right, dlg_rect.top() + 266.0),
+    );
+    painter.rect_filled(opts_card, CornerRadius::same(10), pal.bg_canvas);
+    painter.rect_stroke(
+        opts_card,
+        CornerRadius::same(10),
+        Stroke::new(1.0, pal.border_headerbar),
+        StrokeKind::Middle,
+    );
+    painter.line_segment(
+        [
+            Pos2::new(opts_card.left() + 12.0, opts_card.center().y),
+            Pos2::new(opts_card.right() - 12.0, opts_card.center().y),
+        ],
+        Stroke::new(1.0, pal.border_headerbar),
+    );
+
+    let row1_y = (opts_card.top() + opts_card.center().y) * 0.5;
+    let page_size_label = match session.locale {
+        Locale::It => "Formato pagina",
+        Locale::Es => "Tamaño de página",
+        Locale::En => "Page Size",
+    };
+    painter.text(
+        Pos2::new(opts_card.left() + 16.0, row1_y),
+        Align2::LEFT_CENTER,
+        page_size_label,
+        font_ui_regular(14.0),
+        pal.fg_primary,
+    );
+    let a4_badge = Rect::from_center_size(
+        Pos2::new(opts_card.right() - 48.0, row1_y),
+        Vec2::new(56.0, 26.0),
+    );
+    painter.rect_filled(a4_badge, CornerRadius::same(6), pal.bg_pill_button);
+    painter.text(
+        a4_badge.center(),
+        Align2::CENTER_CENTER,
+        "A4",
+        font_ui_bold(13.0),
+        pal.fg_primary,
+    );
+
+    let row2_y = (opts_card.center().y + opts_card.bottom()) * 0.5;
+    let mermaid_opt_label = match session.locale {
+        Locale::It => "Diagrammi Mermaid & stili codice",
+        Locale::Es => "Diagramas Mermaid y estilos de código",
+        Locale::En => "Mermaid diagrams & code styles",
+    };
+    painter.text(
+        Pos2::new(opts_card.left() + 16.0, row2_y),
+        Align2::LEFT_CENTER,
+        mermaid_opt_label,
+        font_ui_regular(14.0),
+        pal.fg_primary,
+    );
+    let sw_rect = Rect::from_center_size(
+        Pos2::new(opts_card.right() - 38.0, row2_y),
+        Vec2::new(42.0, 22.0),
+    );
+    let sw_hit = ui.interact(sw_rect, ui.id().with("export_mermaid_toggle"), Sense::click());
+    painter.rect_filled(
+        sw_rect,
+        CornerRadius::same(11),
+        if session.export_syntax_highlight {
+            pal.accent_orange
+        } else {
+            pal.bg_pill_button
+        },
+    );
+    let knob_x = if session.export_syntax_highlight {
+        sw_rect.right() - 11.0
+    } else {
+        sw_rect.left() + 11.0
+    };
+    painter.circle_filled(Pos2::new(knob_x, row2_y), 8.5, Color32::WHITE);
+    if sw_hit.clicked() {
+        actions.push(Action::ToggleExportSyntaxHighlight);
+    }
+
+    // Format description badge
+    let engine_desc = match session.selected_export_format {
+        ExportFormat::Pdf => "Motore Rust nativo (PDF 1.4 paginato + XObject PNG Mermaid)",
+        ExportFormat::Docx => "Motore Rust nativo (docx-rs OpenXML + relazioni immagini)",
+        ExportFormat::Odt => "Motore Rust nativo (ODF 1.2 ZIP + Pictures/mermaid_*.png)",
+        ExportFormat::Latex => "Serializzatore AST LaTeX (.tex con escaping rigoroso)",
+        ExportFormat::Epub => "Motore Rust nativo (EPUB v3 XHTML + OPF + foglio stile)",
+        ExportFormat::Html => "Generatore HTML5 autonomo con CSS tipografico integrato",
+    };
+    painter.text(
+        Pos2::new(right_rect.center().x, dlg_rect.top() + 305.0),
+        Align2::CENTER_CENTER,
+        engine_desc,
+        font_ui_regular(12.5),
+        pal.fg_muted,
+    );
+
+    // Bottom-centered Orange "Esporta" Button (matching Apostrophe's Export button)
+    let exp_btn_rect = Rect::from_center_size(
+        Pos2::new(right_rect.center().x, dlg_rect.bottom() - 46.0),
+        Vec2::new(136.0, 40.0),
+    );
+    let exp_hit = ui.interact(
+        exp_btn_rect,
+        ui.id().with("export_dlg_execute_btn"),
+        Sense::click(),
+    );
+    painter.rect_filled(
+        exp_btn_rect,
+        CornerRadius::same(20),
+        if exp_hit.hovered() {
+            pal.accent_orange.gamma_multiply(1.08)
+        } else {
+            pal.accent_orange
+        },
+    );
+    let export_btn_label = match session.locale {
+        Locale::It => "Esporta",
+        Locale::Es => "Exportar",
+        Locale::En => "Export",
+    };
+    painter.text(
+        exp_btn_rect.center(),
+        Align2::CENTER_CENTER,
+        export_btn_label,
+        font_ui_bold(14.5),
+        Color32::WHITE,
+    );
+    if exp_hit.clicked() || ui.ctx().input(|i| i.key_pressed(egui::Key::Enter)) {
+        actions.push(Action::ExecuteExport);
     }
 }
 

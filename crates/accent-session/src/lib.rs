@@ -1,8 +1,12 @@
 pub use accent_core::MarkdownDialect;
 use accent_core::{DocumentBuffer, DocumentStats, DEFAULT_SAMPLE_MARKDOWN, TUTORIAL_MARKDOWN};
+pub use accent_export::ExportFormat;
+pub use accent_mermaid::{MermaidCache, MermaidTheme, RenderedMermaidDiagram};
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThemeMode {
@@ -373,6 +377,31 @@ impl I18n {
             (Locale::En, "recovery_discard") => "Discard Recovery",
             (Locale::Es, "recovery_discard") => "Descartar recuperación",
 
+            // Phase 5: Interactive Export Dialog (it, en, es)
+            (Locale::It, "export_formats_hdr") => "Formati",
+            (Locale::En, "export_formats_hdr") => "Formats",
+            (Locale::Es, "export_formats_hdr") => "Formatos",
+
+            (Locale::It, "export_dest_path") => "Percorso di destinazione",
+            (Locale::En, "export_dest_path") => "Destination Path",
+            (Locale::Es, "export_dest_path") => "Ruta de destino",
+
+            (Locale::It, "export_page_size") => "Dimensione pagina",
+            (Locale::En, "export_page_size") => "Page Size",
+            (Locale::Es, "export_page_size") => "Tamaño de página",
+
+            (Locale::It, "export_syntax_hl") => "Colorazione della sintassi e Mermaid",
+            (Locale::En, "export_syntax_hl") => "Syntax Highlighting & Mermaid",
+            (Locale::Es, "export_syntax_hl") => "Resaltado de sintaxis y Mermaid",
+
+            (Locale::It, "export_syntax_hl_sub") => "Usa la colorazione della sintassi e incorpora i diagrammi",
+            (Locale::En, "export_syntax_hl_sub") => "Use syntax highlighting and embed diagrams",
+            (Locale::Es, "export_syntax_hl_sub") => "Usar resaltado de sintaxis e incrustar diagramas",
+
+            (Locale::It, "export_btn") => "Esporta",
+            (Locale::En, "export_btn") => "Export",
+            (Locale::Es, "export_btn") => "Exportar",
+
             _ => "",
         }
     }
@@ -656,6 +685,10 @@ pub enum Action {
     DiscardRecovery,
     SetFileDialogDir(PathBuf),
     SetFileDialogInput(String),
+    SelectExportFormat(ExportFormat),
+    SetExportOutputPath(String),
+    ToggleExportSyntaxHighlight,
+    ExecuteExport,
     ExportDocument(String),
     InsertText(String),
     MoveCursor(usize),
@@ -679,6 +712,10 @@ pub struct Session {
     pub recent_files: Vec<PathBuf>,
     pub file_dialog_dir: PathBuf,
     pub file_dialog_input: String,
+    pub selected_export_format: ExportFormat,
+    pub export_output_path: String,
+    pub export_syntax_highlight: bool,
+    pub mermaid_cache: RefCell<MermaidCache>,
     pub status_message: Option<String>,
     pub buffer: DocumentBuffer,
     pub theme: ThemeMode,
@@ -742,6 +779,10 @@ impl Session {
             recent_files,
             file_dialog_dir: cwd,
             file_dialog_input: "documento.md".to_string(),
+            selected_export_format: ExportFormat::Pdf,
+            export_output_path: "/tmp/esempio_accent.pdf".to_string(),
+            export_syntax_highlight: true,
+            mermaid_cache: RefCell::new(MermaidCache::new()),
             status_message: None,
             buffer: default_buf,
             theme: ThemeMode::Sepia,
@@ -766,6 +807,34 @@ impl Session {
         };
         session.check_startup_crash_recovery();
         session
+    }
+
+    pub fn render_mermaid(&self, source: &str) -> Arc<RenderedMermaidDiagram> {
+        let m_theme = match self.theme {
+            ThemeMode::Light => MermaidTheme::Light,
+            ThemeMode::Sepia => MermaidTheme::Sepia,
+            ThemeMode::Dark => MermaidTheme::Dark,
+        };
+        self.mermaid_cache
+            .borrow_mut()
+            .get_or_render_themed(source, m_theme)
+    }
+
+    fn update_default_export_path(&mut self) {
+        let stem = self
+            .document_title
+            .trim_end_matches(".md")
+            .trim_end_matches(".markdown");
+        let base_dir = self
+            .current_file_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .unwrap_or_else(|| std::path::Path::new("/tmp"));
+        let candidate = base_dir.join(format!(
+            "{stem}.{}",
+            self.selected_export_format.extension()
+        ));
+        self.export_output_path = candidate.to_string_lossy().to_string();
     }
 
     fn mark_dirty_edit(&mut self) {
@@ -986,6 +1055,9 @@ impl Session {
                 if self.overlay == overlay {
                     self.overlay = ActiveOverlay::None;
                 } else {
+                    if overlay == ActiveOverlay::ExportDialog {
+                        self.update_default_export_path();
+                    }
                     self.overlay = overlay;
                 }
             }
@@ -1084,6 +1156,7 @@ impl Session {
                         self.file_dialog_dir = parent.to_path_buf();
                     }
                     self.current_file_path = Some(path.clone());
+                    self.update_default_export_path();
                     self.original_file_hash = disk_hash;
                     self.is_dirty = false;
                     self.journal_pending_flush = false;
@@ -1211,15 +1284,69 @@ impl Session {
             Action::SetFileDialogInput(input) => {
                 self.file_dialog_input = input;
             }
-            Action::ExportDocument(fmt) => {
-                let html = self.buffer.render_html(self.dialect);
-                let out_path = PathBuf::from(format!(
-                    "/tmp/{}.{}",
-                    self.document_title.trim_end_matches(".md"),
-                    fmt.to_ascii_lowercase()
-                ));
-                let _ = accent_storage::atomic_save(&out_path, &html);
-                self.status_message = Some(format!("Esportato in {}", out_path.display()));
+            Action::SelectExportFormat(fmt) => {
+                self.selected_export_format = fmt;
+                let cur_path = PathBuf::from(&self.export_output_path);
+                let parent = cur_path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or_else(|| std::path::Path::new("/tmp"));
+                let stem = cur_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| self.document_title.trim_end_matches(".md"));
+                self.export_output_path = parent
+                    .join(format!("{stem}.{}", fmt.extension()))
+                    .to_string_lossy()
+                    .to_string();
+            }
+            Action::SetExportOutputPath(path_str) => {
+                self.export_output_path = path_str;
+            }
+            Action::ToggleExportSyntaxHighlight => {
+                self.export_syntax_highlight = !self.export_syntax_highlight;
+            }
+            Action::ExecuteExport => {
+                let fmt = self.selected_export_format;
+                let out_path = PathBuf::from(self.export_output_path.trim());
+                match accent_export::export_document_bytes(
+                    &self.buffer,
+                    self.dialect,
+                    &self.document_title,
+                    fmt,
+                ) {
+                    Ok(bytes) => {
+                        if accent_storage::atomic_save_bytes(&out_path, &bytes).is_ok() {
+                            self.status_message =
+                                Some(format!("Esportato in {}", out_path.display()));
+                            self.overlay = ActiveOverlay::None;
+                        } else {
+                            self.status_message = Some(format!(
+                                "Errore scrittura in {}",
+                                out_path.display()
+                            ));
+                        }
+                    }
+                    Err(err) => {
+                        self.status_message = Some(format!("Errore esportazione: {err}"));
+                    }
+                }
+            }
+            Action::ExportDocument(fmt_str) => {
+                let fmt = ExportFormat::from_code(&fmt_str);
+                self.selected_export_format = fmt;
+                self.update_default_export_path();
+                let out_path = PathBuf::from(&self.export_output_path);
+                if let Ok(bytes) = accent_export::export_document_bytes(
+                    &self.buffer,
+                    self.dialect,
+                    &self.document_title,
+                    fmt,
+                ) {
+                    let _ = accent_storage::atomic_save_bytes(&out_path, &bytes);
+                    self.status_message = Some(format!("Esportato in {}", out_path.display()));
+                }
                 self.overlay = ActiveOverlay::None;
             }
             Action::InsertText(text) => {
