@@ -1,0 +1,50 @@
+# Maintainer: Accent Developers
+pkgname=accent-markdown-editor
+pkgver=0.7.0
+pkgrel=1
+pkgdesc="Multiplatform distraction-free Markdown editor and viewer written in 100% pure Rust"
+arch=('x86_64')
+url="https://github.com/accent-editor/accent"
+license=('MIT' 'Apache-2.0')
+depends=('gcc-libs' 'glibc' 'gtk3' 'libxkbcommon-x11' 'wayland')
+makedepends=('cargo')
+provides=('accent')
+conflicts=('accent')
+options=('!lto' '!debug')
+source=("accent.desktop")
+sha256sums=('SKIP')
+
+_project_root="$(cd "${startdir}/../.." && pwd)"
+
+build() {
+    cd "${_project_root}"
+    export CARGO_TARGET_DIR="${_project_root}/target"
+    cargo build --release --locked -p accent-ui
+}
+
+check() {
+    cd "${_project_root}"
+    export CARGO_TARGET_DIR="${_project_root}/target"
+    cargo test --release --locked -p accent-core
+}
+
+package() {
+    # Install main binary as /usr/bin/accent and compatibility symlink /usr/bin/accent-ui
+    install -Dm755 "${_project_root}/target/release/accent-ui" "${pkgdir}/usr/bin/accent"
+    ln -sf /usr/bin/accent "${pkgdir}/usr/bin/accent-ui"
+
+    # Install FreeDesktop entry
+    install -Dm644 "${srcdir}/accent.desktop" "${pkgdir}/usr/share/applications/accent.desktop"
+
+    # Install scalable SVG and 512x512 PNG icons
+    install -Dm644 "${_project_root}/img/brand/accent_logo.svg" \
+        "${pkgdir}/usr/share/icons/hicolor/scalable/apps/accent.svg"
+    install -Dm644 "${_project_root}/img/brand/accent_logo.png" \
+        "${pkgdir}/usr/share/icons/hicolor/512x512/apps/accent.png"
+
+    # Install documentation
+    install -Dm644 "${_project_root}/README.md" \
+        "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+    install -Dm644 "${_project_root}/SPECS.md" \
+        "${pkgdir}/usr/share/doc/${pkgname}/SPECS.md"
+}

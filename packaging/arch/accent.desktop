@@ -1,0 +1,18 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Accent
+GenericName=Markdown Editor
+GenericName[it]=Editor Markdown
+GenericName[es]=Editor de Markdown
+Comment=Clean, distraction-free multiplatform Markdown editor and viewer in pure Rust
+Comment[it]=Editor e visualizzatore Markdown multipiattaforma veloce e privo di distrazioni
+Comment[es]=Editor y visor de Markdown multiplataforma rápido y sin distracciones
+Exec=accent %f
+Icon=accent
+Terminal=false
+Categories=Office;TextEditor;Utility;
+MimeType=text/markdown;text/x-markdown;text/plain;
+Keywords=markdown;editor;writer;preview;mermaid;pdf;docx;odt;epub;
+StartupNotify=true
+StartupWMClass=accent-ui
