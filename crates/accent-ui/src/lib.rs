@@ -85,6 +85,10 @@ impl eframe::App for AccentApp {
         }
     }
 
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 0.0]
+    }
+
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.session.on_clean_exit();
     }
@@ -128,7 +132,8 @@ pub fn run_app(opts: LaunchOptions) -> eframe::Result {
         .with_title("Accent")
         .with_inner_size([1200.0, 1100.0])
         .with_min_inner_size([600.0, 400.0])
-        .with_decorations(true);
+        .with_decorations(false)
+        .with_transparent(true);
     if let Some(icon) = load_app_icon() {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
     }

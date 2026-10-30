@@ -75,18 +75,16 @@ pub fn render_ui(
 ) {
     let pal = apply_theme(ctx, session.theme);
 
-    // Wake up auto-hidden top/bottom bars when the mouse pointer approaches the top or bottom window edge
+    // Wake up auto-hidden top/bottom bars when the mouse moves or a command key is pressed
     if session.chrome_autohidden {
-        let win_rect = ctx.screen_rect();
         let wake_up = ctx.input(|i| {
-            let moved = i.pointer.delta().length_sq() > 0.25;
-            if let Some(pos) = i.pointer.hover_pos().or_else(|| i.pointer.latest_pos()) {
-                let near_top = pos.y <= win_rect.top() + 54.0;
-                let near_bottom = pos.y >= win_rect.bottom() - 54.0;
-                near_top || near_bottom || (moved && (pos.y <= 72.0 || pos.y >= win_rect.bottom() - 72.0))
-            } else {
-                false
-            }
+            let mouse_moved = i.pointer.delta().length_sq() > 0.25;
+            let cmd_key = i.modifiers.ctrl
+                || i.modifiers.alt
+                || i.key_pressed(egui::Key::F10)
+                || i.key_pressed(egui::Key::Escape)
+                || i.key_pressed(egui::Key::F1);
+            mouse_moved || cmd_key
         });
         if wake_up {
             actions.push(Action::SetChromeAutohidden(false));
@@ -197,15 +195,26 @@ pub fn render_ui(
         && !session.search_bar_open
         && !session.recovery_banner_active;
     let chrome_alpha =
-        ctx.animate_bool_with_time(Id::new("accent_zen_chrome_alpha"), !chrome_hidden, 0.16);
+        ctx.animate_bool_with_time(Id::new("accent_zen_chrome_alpha"), !chrome_hidden, 0.20);
+    let is_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+    let win_corner_radius = if is_maximized {
+        CornerRadius::ZERO
+    } else {
+        CornerRadius::same(12)
+    };
+
+    handle_window_edge_resize(ctx, ctx.screen_rect(), is_maximized);
 
     egui::CentralPanel::default()
-        .frame(egui::Frame::NONE.fill(pal.bg_canvas))
+        .frame(egui::Frame::NONE.fill(Color32::TRANSPARENT))
         .show(ctx, |ui| {
             let rect = ui.max_rect();
             let painter = ui.painter_at(rect);
 
-            // 1. Render Main Content Area (Editor Canvas, Split Preview, or Full Preview)
+            // Draw main frameless window container with rounded corners (12px normal, 0px maximized)
+            painter.rect_filled(rect, win_corner_radius, pal.bg_canvas);
+
+            // 1. Render Main Content Area (100% full-height paper sheet from top to bottom)
             render_workspace_area(
                 ui,
                 &painter,
@@ -216,41 +225,92 @@ pub fn render_ui(
                 sync_cursor_to_widget,
             );
 
-            // 2. Render Unified Slim Top Bar (fades to 0% opacity in Zen Mode while typing)
-            if chrome_alpha > 0.01 {
-                let mut faded_pal = pal;
-                if chrome_alpha < 0.99 {
-                    faded_pal.bg_headerbar = pal.bg_headerbar.gamma_multiply(chrome_alpha);
-                    faded_pal.border_headerbar = pal.border_headerbar.gamma_multiply(chrome_alpha);
-                    faded_pal.fg_primary = pal.fg_primary.gamma_multiply(chrome_alpha);
-                    faded_pal.fg_muted = pal.fg_muted.gamma_multiply(chrome_alpha);
-                    faded_pal.bg_pill_button = pal.bg_pill_button.gamma_multiply(chrome_alpha);
-                    faded_pal.accent_orange = pal.accent_orange.gamma_multiply(chrome_alpha);
-                }
-                render_headerbar(ctx, ui, &painter, rect, session, &faded_pal, actions);
-            }
-
-            // 3. Render Crash Recovery Notification Banner if restored from dirty WAL journal
+            // 2. Render Crash Recovery Notification Banner if restored from dirty WAL journal
             if session.recovery_banner_active {
                 render_recovery_banner(ui, &painter, rect, session, &pal, actions);
             }
 
-            // 4. Render Floating Bottom Bar (fades to 0% opacity in Zen Mode while typing)
-            if chrome_alpha > 0.01 {
-                let mut faded_pal = pal;
-                if chrome_alpha < 0.99 {
-                    faded_pal.bg_headerbar = pal.bg_headerbar.gamma_multiply(chrome_alpha);
-                    faded_pal.bg_popover = pal.bg_popover.gamma_multiply(chrome_alpha);
-                    faded_pal.bg_canvas = pal.bg_canvas.gamma_multiply(chrome_alpha);
-                    faded_pal.border_headerbar = pal.border_headerbar.gamma_multiply(chrome_alpha);
-                    faded_pal.fg_primary = pal.fg_primary.gamma_multiply(chrome_alpha);
-                    faded_pal.fg_muted = pal.fg_muted.gamma_multiply(chrome_alpha);
-                    faded_pal.bg_pill_button = pal.bg_pill_button.gamma_multiply(chrome_alpha);
-                    faded_pal.accent_orange = pal.accent_orange.gamma_multiply(chrome_alpha);
-                }
-                render_bottom_bar(ui, &painter, rect, session, &faded_pal, actions);
+            if !is_maximized {
+                painter.rect_stroke(
+                    rect,
+                    win_corner_radius,
+                    Stroke::new(1.0, pal.border_headerbar.gamma_multiply(0.55)),
+                    StrokeKind::Inside,
+                );
             }
         });
+
+    // 3. Render Top Bar as a floating overlay (`egui::Area`) that fades completely to 0.0 while typing
+    if chrome_alpha > 0.01 {
+        let win_rect = ctx.screen_rect();
+        let hb_bounds = Rect::from_min_max(
+            win_rect.left_top(),
+            Pos2::new(win_rect.right(), win_rect.top() + 38.0),
+        );
+        let mut faded_pal = pal;
+        if chrome_alpha < 0.99 {
+            faded_pal.bg_headerbar = pal.bg_headerbar.gamma_multiply(chrome_alpha);
+            faded_pal.border_headerbar = pal.border_headerbar.gamma_multiply(chrome_alpha);
+            faded_pal.fg_primary = pal.fg_primary.gamma_multiply(chrome_alpha);
+            faded_pal.fg_muted = pal.fg_muted.gamma_multiply(chrome_alpha);
+            faded_pal.bg_pill_button = pal.bg_pill_button.gamma_multiply(chrome_alpha);
+            faded_pal.accent_orange = pal.accent_orange.gamma_multiply(chrome_alpha);
+        }
+        egui::Area::new(Id::new("accent_floating_topbar_overlay"))
+            .order(Order::Foreground)
+            .fixed_pos(hb_bounds.left_top())
+            .show(ctx, |ui| {
+                ui.set_min_size(hb_bounds.size());
+                let painter = ui.painter().clone();
+                render_headerbar(
+                    ctx,
+                    ui,
+                    &painter,
+                    win_rect,
+                    session,
+                    &faded_pal,
+                    chrome_alpha,
+                    is_maximized,
+                    actions,
+                );
+            });
+    }
+
+    // 4. Render Bottom Bar as a floating overlay (`egui::Area`) that fades completely to 0.0 while typing
+    if chrome_alpha > 0.01 {
+        let win_rect = ctx.screen_rect();
+        let bot_bounds = Rect::from_min_max(
+            Pos2::new(win_rect.left(), win_rect.bottom() - 54.0),
+            win_rect.right_bottom(),
+        );
+        let mut faded_pal = pal;
+        if chrome_alpha < 0.99 {
+            faded_pal.bg_headerbar = pal.bg_headerbar.gamma_multiply(chrome_alpha);
+            faded_pal.bg_popover = pal.bg_popover.gamma_multiply(chrome_alpha);
+            faded_pal.bg_canvas = pal.bg_canvas.gamma_multiply(chrome_alpha);
+            faded_pal.border_headerbar = pal.border_headerbar.gamma_multiply(chrome_alpha);
+            faded_pal.fg_primary = pal.fg_primary.gamma_multiply(chrome_alpha);
+            faded_pal.fg_muted = pal.fg_muted.gamma_multiply(chrome_alpha);
+            faded_pal.bg_pill_button = pal.bg_pill_button.gamma_multiply(chrome_alpha);
+            faded_pal.accent_orange = pal.accent_orange.gamma_multiply(chrome_alpha);
+        }
+        egui::Area::new(Id::new("accent_floating_bottombar_overlay"))
+            .order(Order::Foreground)
+            .fixed_pos(bot_bounds.left_top())
+            .show(ctx, |ui| {
+                ui.set_min_size(bot_bounds.size());
+                let painter = ui.painter().clone();
+                render_bottom_bar(
+                    ui,
+                    &painter,
+                    win_rect,
+                    session,
+                    &faded_pal,
+                    chrome_alpha,
+                    actions,
+                );
+            });
+    }
 
     // 5. Render Slim Floating Search & Replace Panel in Foreground Layer when open
     if session.search_bar_open {
@@ -311,28 +371,94 @@ pub fn render_ui(
     }
 }
 
+fn handle_window_edge_resize(ctx: &Context, win_rect: Rect, is_maximized: bool) {
+    if is_maximized {
+        return;
+    }
+    let edge = 5.0;
+    let corner = 12.0;
+    let (hover_pos, primary_pressed) = ctx.input(|i| {
+        (
+            i.pointer.hover_pos().or_else(|| i.pointer.latest_pos()),
+            i.pointer.button_pressed(egui::PointerButton::Primary),
+        )
+    });
+    let Some(pos) = hover_pos else {
+        return;
+    };
+
+    let near_left = (pos.x - win_rect.left()).abs() <= edge;
+    let near_right = (win_rect.right() - pos.x).abs() <= edge;
+    let near_top = (pos.y - win_rect.top()).abs() <= edge;
+    let near_bottom = (win_rect.bottom() - pos.y).abs() <= edge;
+
+    let in_left_corner = (pos.x - win_rect.left()).abs() <= corner;
+    let in_right_corner = (win_rect.right() - pos.x).abs() <= corner;
+    let in_top_corner = (pos.y - win_rect.top()).abs() <= corner;
+    let in_bottom_corner = (win_rect.bottom() - pos.y).abs() <= corner;
+
+    let dir = if (near_left && in_top_corner) || (near_top && in_left_corner) {
+        Some((
+            egui::ResizeDirection::NorthWest,
+            egui::CursorIcon::ResizeNorthWest,
+        ))
+    } else if (near_right && in_top_corner) || (near_top && in_right_corner) {
+        Some((
+            egui::ResizeDirection::NorthEast,
+            egui::CursorIcon::ResizeNorthEast,
+        ))
+    } else if (near_left && in_bottom_corner) || (near_bottom && in_left_corner) {
+        Some((
+            egui::ResizeDirection::SouthWest,
+            egui::CursorIcon::ResizeSouthWest,
+        ))
+    } else if (near_right && in_bottom_corner) || (near_bottom && in_right_corner) {
+        Some((
+            egui::ResizeDirection::SouthEast,
+            egui::CursorIcon::ResizeSouthEast,
+        ))
+    } else if near_left {
+        Some((egui::ResizeDirection::West, egui::CursorIcon::ResizeWest))
+    } else if near_right {
+        Some((egui::ResizeDirection::East, egui::CursorIcon::ResizeEast))
+    } else if near_top {
+        Some((egui::ResizeDirection::North, egui::CursorIcon::ResizeNorth))
+    } else if near_bottom {
+        Some((egui::ResizeDirection::South, egui::CursorIcon::ResizeSouth))
+    } else {
+        None
+    };
+
+    if let Some((resize_dir, cursor_icon)) = dir {
+        ctx.set_cursor_icon(cursor_icon);
+        if primary_pressed {
+            ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(resize_dir));
+        }
+    }
+}
+
 fn overlay_bounds(win_rect: Rect, session: &Session) -> Rect {
     match session.overlay {
         ActiveOverlay::None => Rect::NOTHING,
         ActiveOverlay::OpenMenu => {
             let n_recent = session.recent_files.len().max(1);
             let h = 136.0 + (n_recent as f32) * 38.0;
-            Rect::from_min_max(Pos2::new(18.0, 44.0), Pos2::new(316.0, 44.0 + h))
+            Rect::from_min_max(Pos2::new(46.0, 40.0), Pos2::new(344.0, 40.0 + h))
         }
         ActiveOverlay::SaveMenu => {
-            Rect::from_min_max(Pos2::new(124.0, 44.0), Pos2::new(374.0, 326.0))
+            Rect::from_min_max(Pos2::new(114.0, 40.0), Pos2::new(364.0, 322.0))
         }
         ActiveOverlay::PreviewMenu => Rect::from_min_max(
-            Pos2::new(win_rect.right() - 352.0, 44.0),
-            Pos2::new(win_rect.right() - 36.0, 240.0),
+            Pos2::new(win_rect.right() - 376.0, 40.0),
+            Pos2::new(win_rect.right() - 60.0, 236.0),
         ),
         ActiveOverlay::MainMenu => Rect::from_min_max(
-            Pos2::new(win_rect.right() - 302.0, 44.0),
-            Pos2::new(win_rect.right() - 6.0, 444.0),
+            Pos2::new(win_rect.right() - 332.0, 40.0),
+            Pos2::new(win_rect.right() - 36.0, 440.0),
         ),
         ActiveOverlay::LineWidthMenu => Rect::from_min_max(
-            Pos2::new(win_rect.right() - 310.0, 44.0),
-            Pos2::new(win_rect.right() - 70.0, 232.0),
+            Pos2::new(win_rect.right() - 330.0, 40.0),
+            Pos2::new(win_rect.right() - 90.0, 228.0),
         ),
         ActiveOverlay::StatsMenu => Rect::from_min_max(
             Pos2::new(win_rect.right() - 266.0, win_rect.bottom() - 232.0),
@@ -344,66 +470,107 @@ fn overlay_bounds(win_rect: Rect, session: &Session) -> Rect {
         | ActiveOverlay::SaveFileDialog
         | ActiveOverlay::ShortcutsDialog
         | ActiveOverlay::AboutDialog => {
-            Rect::from_min_max(Pos2::new(win_rect.left(), 44.0), win_rect.right_bottom())
+            Rect::from_min_max(Pos2::new(win_rect.left(), 38.0), win_rect.right_bottom())
         }
     }
 }
 
 fn render_headerbar(
-    _ctx: &Context,
+    ctx: &Context,
     ui: &mut Ui,
     painter: &Painter,
     win_rect: Rect,
     session: &Session,
     pal: &AccentPalette,
+    chrome_alpha: f32,
+    is_maximized: bool,
     actions: &mut Vec<Action>,
 ) {
-    let hb_height = 44.0;
+    let hb_height = 38.0;
     let hb_rect = Rect::from_min_max(
         win_rect.left_top(),
         Pos2::new(win_rect.right(), win_rect.top() + hb_height),
     );
-    painter.rect_filled(hb_rect, CornerRadius::ZERO, pal.bg_headerbar);
+    let top_corners = if is_maximized {
+        CornerRadius::ZERO
+    } else {
+        CornerRadius {
+            nw: 12,
+            ne: 12,
+            sw: 0,
+            se: 0,
+        }
+    };
+    painter.rect_filled(hb_rect, top_corners, pal.bg_headerbar);
+
+    // Ultra-soft bottom transition (< 10% opacity) that disappears completely while typing
     painter.line_segment(
         [
-            Pos2::new(win_rect.left(), win_rect.top() + hb_height + 0.5),
-            Pos2::new(win_rect.right(), win_rect.top() + hb_height + 0.5),
+            Pos2::new(win_rect.left() + 1.0, win_rect.top() + hb_height),
+            Pos2::new(win_rect.right() - 1.0, win_rect.top() + hb_height),
         ],
-        Stroke::new(1.0, pal.border_headerbar),
+        Stroke::new(
+            1.0,
+            pal.fg_primary.gamma_multiply(0.06 * chrome_alpha),
+        ),
     );
 
-    let y_mid = win_rect.top() + 22.0;
-    let fg = pal.fg_primary;
+    // `:backdrop` effect: reduce Top Bar foreground opacity to 55% when window loses focus
+    let is_focused = ctx.input(|i| i.focused);
+    let backdrop = if is_focused { 1.0_f32 } else { 0.55_f32 };
+
+    let y_mid = win_rect.top() + 19.0;
+    let fg = pal.fg_primary.gamma_multiply(backdrop);
     let w = win_rect.right();
 
-    // Left controls: New Doc (`+`), Open (`Apri ▾`), Split Save (`Salva • | ▾`)
-    let new_doc_rect = Rect::from_center_size(Pos2::new(26.0, y_mid), Vec2::new(32.0, 32.0));
-    let open_rect = Rect::from_min_max(Pos2::new(50.0, 6.0), Pos2::new(112.0, 38.0));
-    let save_btn_rect = Rect::from_min_max(Pos2::new(124.0, 6.0), Pos2::new(186.0, 38.0));
-    let save_menu_rect = Rect::from_min_max(Pos2::new(186.0, 6.0), Pos2::new(214.0, 38.0));
+    // Left controls: New Doc (`+`), Open (`Apri ▾`), Split Save (`Salva | ▾`)
+    let new_doc_rect = Rect::from_center_size(Pos2::new(24.0, y_mid), Vec2::new(28.0, 28.0));
+    let open_rect = Rect::from_min_max(Pos2::new(46.0, 5.0), Pos2::new(106.0, 33.0));
+    let save_btn_rect = Rect::from_min_max(Pos2::new(114.0, 5.0), Pos2::new(168.0, 33.0));
+    let save_menu_rect = Rect::from_min_max(Pos2::new(168.0, 5.0), Pos2::new(192.0, 33.0));
+    let save_combined = Rect::from_min_max(Pos2::new(114.0, 5.0), Pos2::new(192.0, 33.0));
 
-    // Right controls (OS handles window buttons natively via `with_decorations(true)`):
-    // Line-Width Pill (`w - 166.0`), Search (`w - 116.0`), Compact Editing Mode Pill (`w - 70.0`), Main Menu `☰` (`w - 26.0`)
-    let menu_center = Pos2::new(w - 26.0, y_mid);
-    let menu_rect = Rect::from_center_size(menu_center, Vec2::new(32.0, 32.0));
+    // Right controls:
+    // Line-Width (`w - 184.0`), Search (`w - 138.0`), Compact Editing Mode (`w - 98.0`),
+    // Main Menu `☰` (`w - 56.0`), and ONLY the single Close button `×` in a soft circle (`w - 22.0`)
+    let close_center = Pos2::new(w - 22.0, y_mid);
+    let close_rect = Rect::from_center_size(close_center, Vec2::new(24.0, 24.0));
+    let menu_center = Pos2::new(w - 56.0, y_mid);
+    let menu_rect = Rect::from_center_size(menu_center, Vec2::new(28.0, 28.0));
     let preview_pill_rect =
-        Rect::from_center_size(Pos2::new(w - 70.0, y_mid), Vec2::new(44.0, 30.0));
-    let search_rect = Rect::from_center_size(Pos2::new(w - 114.0, y_mid), Vec2::new(32.0, 32.0));
-    let lw_rect = Rect::from_center_size(Pos2::new(w - 164.0, y_mid), Vec2::new(52.0, 28.0));
+        Rect::from_center_size(Pos2::new(w - 98.0, y_mid), Vec2::new(42.0, 28.0));
+    let search_rect = Rect::from_center_size(Pos2::new(w - 138.0, y_mid), Vec2::new(28.0, 28.0));
+    let lw_rect = Rect::from_center_size(Pos2::new(w - 184.0, y_mid), Vec2::new(48.0, 26.0));
 
-    // 1. Left: New doc icon (x=26)
+    // Empty Top Bar space drag (`StartDrag`) and double-click (`Maximized`)
+    let drag_rect = Rect::from_min_max(
+        Pos2::new(save_combined.right() + 6.0, win_rect.top() + 4.0),
+        Pos2::new(lw_rect.left() - 6.0, win_rect.top() + hb_height),
+    );
+    let drag_hit = ui.interact(
+        drag_rect,
+        ui.id().with("topbar_drag_zone"),
+        Sense::click_and_drag(),
+    );
+    if drag_hit.double_clicked() {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
+    } else if drag_hit.drag_started() {
+        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
+
+    // 1. Left: New doc icon (Ghost button)
     let new_hit = ui
         .interact(new_doc_rect, ui.id().with("new_doc_btn"), Sense::click())
         .on_hover_text(I18n::tr(session.locale, "tooltip_new_doc"));
     if new_hit.hovered() {
         painter.rect_filled(new_doc_rect, CornerRadius::same(6), pal.bg_pill_button);
     }
-    draw_new_doc_icon(painter, Pos2::new(26.0, y_mid), fg);
+    draw_new_doc_icon(painter, Pos2::new(24.0, y_mid), fg);
     if new_hit.clicked() {
         actions.push(Action::NewDocument);
     }
 
-    // 2. Left: "Apri ▾" (x=50..112)
+    // 2. Left: "Apri ▾" (Ghost button)
     let open_hit = ui
         .interact(open_rect, ui.id().with("open_menu_btn"), Sense::click())
         .on_hover_text(I18n::tr(session.locale, "tooltip_open"));
@@ -412,18 +579,18 @@ fn render_headerbar(
     }
     let open_label = I18n::tr(session.locale, "open");
     painter.text(
-        Pos2::new(58.0, y_mid),
+        Pos2::new(54.0, y_mid),
         Align2::LEFT_CENTER,
         open_label,
-        font_ui_bold(14.0),
+        font_ui_bold(13.5),
         fg,
     );
-    draw_chevron_down(painter, Pos2::new(99.0, y_mid + 0.5), fg);
+    draw_chevron_down(painter, Pos2::new(94.0, y_mid + 0.5), fg);
     if open_hit.clicked() {
         actions.push(Action::SetOverlay(ActiveOverlay::OpenMenu));
     }
 
-    // 3. Left: Split-button "Salva • | ▾" (x=124..214)
+    // 3. Left: Split-button "Salva | ▾" (Ghost button at rest: NO background box unless hovered/open!)
     let save_hit = ui
         .interact(save_btn_rect, ui.id().with("save_main_btn"), Sense::click())
         .on_hover_text(I18n::tr(session.locale, "tooltip_save"));
@@ -434,35 +601,25 @@ fn render_headerbar(
             Sense::click(),
         )
         .on_hover_text(I18n::tr(session.locale, "tooltip_save_menu"));
-    let save_combined = Rect::from_min_max(Pos2::new(124.0, 6.0), Pos2::new(214.0, 38.0));
-    painter.rect_filled(
-        save_combined,
-        CornerRadius::same(6),
-        if session.overlay == ActiveOverlay::SaveMenu
-            || save_hit.hovered()
-            || save_menu_hit.hovered()
-        {
-            pal.bg_pill_button
-        } else {
-            pal.bg_pill_button.gamma_multiply(0.55)
-        },
-    );
+    if session.overlay == ActiveOverlay::SaveMenu
+        || save_hit.hovered()
+        || save_menu_hit.hovered()
+    {
+        painter.rect_filled(save_combined, CornerRadius::same(6), pal.bg_pill_button);
+    }
     let save_label = I18n::tr(session.locale, "save");
     painter.text(
-        Pos2::new(134.0, y_mid),
+        Pos2::new(122.0, y_mid),
         Align2::LEFT_CENTER,
         save_label,
-        font_ui_bold(14.0),
+        font_ui_bold(13.5),
         fg,
     );
-    if session.is_dirty {
-        painter.circle_filled(Pos2::new(178.0, y_mid), 3.4, pal.accent_orange);
-    }
     painter.line_segment(
-        [Pos2::new(186.0, 11.0), Pos2::new(186.0, 33.0)],
-        Stroke::new(1.0, pal.border_headerbar),
+        [Pos2::new(168.0, 11.0), Pos2::new(168.0, 27.0)],
+        Stroke::new(1.0, fg.gamma_multiply(0.28)),
     );
-    draw_chevron_down(painter, Pos2::new(199.0, y_mid + 0.5), fg);
+    draw_chevron_down(painter, Pos2::new(180.0, y_mid + 0.5), fg);
     if save_hit.clicked() {
         actions.push(Action::SaveDocument);
     }
@@ -470,25 +627,31 @@ fn render_headerbar(
         actions.push(Action::SetOverlay(ActiveOverlay::SaveMenu));
     }
 
-    // 4. Center: Discreet document filename keeping the 3-column balance
+    // 4. Center: Document filename (`• untitled.md` in bold when dirty, regular when clean)
+    let center_title = if session.is_dirty {
+        format!("• {}", session.document_title)
+    } else {
+        session.document_title.clone()
+    };
     painter.text(
         Pos2::new(win_rect.center().x, y_mid),
         Align2::CENTER_CENTER,
-        &session.document_title,
-        font_ui_regular(13.8),
-        pal.fg_primary.gamma_multiply(0.85),
+        &center_title,
+        if session.is_dirty {
+            font_ui_bold(13.5)
+        } else {
+            font_ui_regular(13.5)
+        },
+        fg.gamma_multiply(if session.is_dirty { 0.95 } else { 0.82 }),
     );
 
-    // 5. Right: Line-Width selector pill (`80ch`, `110ch`, `140ch`, `Fluid`)
+    // 5. Right: Line-Width selector (`80ch`, `110ch`, `140ch`, `Fluid` — Ghost button at rest!)
     let lw_hit = ui
         .interact(lw_rect, ui.id().with("lw_header_btn"), Sense::click())
         .on_hover_text(I18n::tr(session.locale, "tooltip_line_width"));
-    let lw_fill = if session.overlay == ActiveOverlay::LineWidthMenu || lw_hit.hovered() {
-        pal.bg_pill_button
-    } else {
-        pal.bg_pill_button.gamma_multiply(0.65)
-    };
-    painter.rect_filled(lw_rect, CornerRadius::same(6), lw_fill);
+    if session.overlay == ActiveOverlay::LineWidthMenu || lw_hit.hovered() {
+        painter.rect_filled(lw_rect, CornerRadius::same(6), pal.bg_pill_button);
+    }
     painter.text(
         lw_rect.center(),
         Align2::CENTER_CENTER,
@@ -500,7 +663,7 @@ fn render_headerbar(
         actions.push(Action::SetOverlay(ActiveOverlay::LineWidthMenu));
     }
 
-    // 6. Right: Search icon button `🔍`
+    // 6. Right: Search icon button `🔍` (Ghost button)
     let search_hit = ui
         .interact(search_rect, ui.id().with("search_btn"), Sense::click())
         .on_hover_text(I18n::tr(session.locale, "tooltip_search"));
@@ -512,7 +675,7 @@ fn render_headerbar(
         actions.push(Action::ToggleSearchBar);
     }
 
-    // 7. Right: Compact Editing Mode Pill (Icon + `▾` ONLY, no text)
+    // 7. Right: Compact Editing Mode selector (Icon + `▾` ONLY — Ghost button at rest!)
     let prev_hit = ui
         .interact(
             preview_pill_rect,
@@ -520,30 +683,27 @@ fn render_headerbar(
             Sense::click(),
         )
         .on_hover_text(I18n::tr(session.locale, "tooltip_preview"));
-    let prev_fill = if session.overlay == ActiveOverlay::PreviewMenu || prev_hit.hovered() {
-        pal.bg_pill_button
-    } else {
-        pal.bg_pill_button.gamma_multiply(0.65)
-    };
-    painter.rect_filled(preview_pill_rect, CornerRadius::same(6), prev_fill);
+    if session.overlay == ActiveOverlay::PreviewMenu || prev_hit.hovered() {
+        painter.rect_filled(preview_pill_rect, CornerRadius::same(6), pal.bg_pill_button);
+    }
     let mode_idx = active_view_mode_index(session);
     draw_view_mode_icon(
         painter,
-        Pos2::new(preview_pill_rect.left() + 14.5, y_mid),
+        Pos2::new(preview_pill_rect.left() + 13.5, y_mid),
         fg,
-        pal.accent_orange,
+        pal.accent_orange.gamma_multiply(backdrop),
         mode_idx,
     );
     draw_chevron_down(
         painter,
-        Pos2::new(preview_pill_rect.right() - 9.5, y_mid + 0.5),
+        Pos2::new(preview_pill_rect.right() - 9.0, y_mid + 0.5),
         fg,
     );
     if prev_hit.clicked() {
         actions.push(Action::SetOverlay(ActiveOverlay::PreviewMenu));
     }
 
-    // 8. Far Right: Hamburger Main Menu button `☰`
+    // 8. Right: Hamburger Main Menu button `☰` (Ghost button)
     let menu_hit = ui
         .interact(menu_rect, ui.id().with("main_menu_btn"), Sense::click())
         .on_hover_text(I18n::tr(session.locale, "tooltip_main_menu"));
@@ -553,6 +713,38 @@ fn render_headerbar(
     draw_hamburger_icon(painter, menu_center, fg);
     if menu_hit.clicked() {
         actions.push(Action::SetOverlay(ActiveOverlay::MainMenu));
+    }
+
+    // 9. Far Right: Single Close Button `×` in a soft discreet circle (Apostrophe style)
+    let close_hit = ui
+        .interact(close_rect, ui.id().with("window_close_btn"), Sense::click())
+        .on_hover_text(I18n::tr(session.locale, "tooltip_close"));
+    painter.circle_filled(
+        close_center,
+        11.5,
+        if close_hit.hovered() {
+            pal.bg_pill_button
+        } else {
+            pal.bg_pill_button.gamma_multiply(0.62 * backdrop)
+        },
+    );
+    let d = 3.5;
+    painter.line_segment(
+        [
+            Pos2::new(close_center.x - d, close_center.y - d),
+            Pos2::new(close_center.x + d, close_center.y + d),
+        ],
+        Stroke::new(1.5, fg),
+    );
+    painter.line_segment(
+        [
+            Pos2::new(close_center.x + d, close_center.y - d),
+            Pos2::new(close_center.x - d, close_center.y + d),
+        ],
+        Stroke::new(1.5, fg),
+    );
+    if close_hit.clicked() {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 }
 
@@ -807,7 +999,7 @@ fn render_recovery_banner(
     pal: &AccentPalette,
     actions: &mut Vec<Action>,
 ) {
-    let top_offset = 44.0;
+    let top_offset = 38.0;
     let banner_rect = Rect::from_min_max(
         Pos2::new(win_rect.left(), top_offset),
         Pos2::new(win_rect.right(), top_offset + 44.0),
@@ -906,19 +1098,12 @@ fn render_workspace_area(
     actions: &mut Vec<Action>,
     sync_cursor_to_widget: &mut bool,
 ) {
-    let chrome_hidden = session.chrome_autohidden
-        && session.overlay == ActiveOverlay::None
-        && !session.search_bar_open
-        && !session.recovery_banner_active;
-    let mut top_y = if chrome_hidden { 8.0 } else { 44.0 };
-    if session.recovery_banner_active {
-        top_y += 44.0;
-    }
-    let bot_y = if chrome_hidden {
-        win_rect.bottom() - 8.0
+    let top_y = if session.recovery_banner_active {
+        38.0 + 44.0
     } else {
-        win_rect.bottom() - 56.0
+        win_rect.top() + 2.0
     };
+    let bot_y = win_rect.bottom() - 2.0;
     let content_rect = Rect::from_min_max(
         Pos2::new(win_rect.left(), top_y),
         Pos2::new(win_rect.right(), bot_y),
@@ -1302,7 +1487,7 @@ fn render_editor_pane(
         .auto_shrink([false, false])
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
         .show(&mut pane_ui, |ui| {
-            ui.add_space(18.0);
+            ui.add_space(48.0);
             ui.horizontal_top(|ui| {
                 ui.add_space((te_left - pane_rect.left()).max(0.0));
                 let scroll_painter = ui.painter().clone();
@@ -2245,6 +2430,7 @@ fn render_bottom_bar(
     win_rect: Rect,
     session: &Session,
     pal: &AccentPalette,
+    chrome_alpha: f32,
     actions: &mut Vec<Action>,
 ) {
     // Floating rounded pill bottom bar detached from the bottom of the window
@@ -2256,7 +2442,7 @@ fn render_bottom_bar(
     painter.rect_filled(
         shadow_rect,
         CornerRadius::same(22),
-        Color32::from_rgba_unmultiplied(0, 0, 0, 26),
+        Color32::from_rgba_unmultiplied(0, 0, 0, (26.0 * chrome_alpha) as u8),
     );
     painter.rect_filled(bar_rect, CornerRadius::same(21), pal.bg_popover);
     painter.rect_stroke(
@@ -2395,7 +2581,7 @@ fn render_popovers(
         ActiveOverlay::OpenMenu => {
             let n_recent = session.recent_files.len().max(1);
             let h = 136.0 + (n_recent as f32) * 38.0;
-            let pop_rect = Rect::from_min_max(Pos2::new(48.0, 44.0), Pos2::new(346.0, 44.0 + h));
+            let pop_rect = Rect::from_min_max(Pos2::new(46.0, 40.0), Pos2::new(344.0, 40.0 + h));
             painter.rect_filled(pop_rect, CornerRadius::same(12), pal.bg_popover);
             painter.rect_stroke(
                 pop_rect,
@@ -2529,8 +2715,8 @@ fn render_popovers(
             // 3: "Anteprima split sotto"
             // 4: "Solo lettura"
             let pop_rect = Rect::from_min_max(
-                Pos2::new(win_rect.right() - 352.0, 44.0),
-                Pos2::new(win_rect.right() - 36.0, 240.0),
+                Pos2::new(win_rect.right() - 376.0, 40.0),
+                Pos2::new(win_rect.right() - 60.0, 236.0),
             );
             let shadow_rect = pop_rect.translate(Vec2::new(0.0, 3.0)).expand(1.5);
             painter.rect_filled(
@@ -2704,8 +2890,8 @@ fn render_popovers(
         }
         ActiveOverlay::MainMenu => {
             let pop_rect = Rect::from_min_max(
-                Pos2::new(win_rect.right() - 302.0, 44.0),
-                Pos2::new(win_rect.right() - 6.0, 444.0),
+                Pos2::new(win_rect.right() - 332.0, 40.0),
+                Pos2::new(win_rect.right() - 36.0, 440.0),
             );
             painter.rect_filled(pop_rect, CornerRadius::same(12), pal.bg_popover);
             painter.rect_stroke(
@@ -2912,8 +3098,8 @@ fn render_popovers(
         }
         ActiveOverlay::LineWidthMenu => {
             let pop_rect = Rect::from_min_max(
-                Pos2::new(win_rect.right() - 310.0, 44.0),
-                Pos2::new(win_rect.right() - 70.0, 232.0),
+                Pos2::new(win_rect.right() - 330.0, 40.0),
+                Pos2::new(win_rect.right() - 90.0, 228.0),
             );
             painter.rect_filled(pop_rect, CornerRadius::same(12), pal.bg_popover);
             painter.rect_stroke(
@@ -2985,7 +3171,7 @@ fn render_popovers(
             }
         }
         ActiveOverlay::SaveMenu => {
-            let pop_rect = Rect::from_min_max(Pos2::new(124.0, 44.0), Pos2::new(374.0, 326.0));
+            let pop_rect = Rect::from_min_max(Pos2::new(114.0, 40.0), Pos2::new(364.0, 322.0));
             painter.rect_filled(pop_rect, CornerRadius::same(12), pal.bg_popover);
             painter.rect_stroke(
                 pop_rect,
