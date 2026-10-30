@@ -793,7 +793,7 @@ impl Session {
             font_catalog: SystemFontCatalog::discover(),
             preview_active: false,
             preview_layout: PreviewLayout::HalfWidth,
-            view_while_typing: false,
+            view_while_typing: true,
             hemingway_mode: false,
             focus_mode: false,
             toolbar_expanded: true,
@@ -997,6 +997,9 @@ impl Session {
             Action::ToggleToolbar => self.toolbar_expanded = !self.toolbar_expanded,
             Action::ToggleSearchBar => {
                 self.search_bar_open = !self.search_bar_open;
+                if self.search_bar_open {
+                    self.overlay = ActiveOverlay::None;
+                }
                 self.chrome_autohidden = false;
             }
             Action::SetChromeAutohidden(hidden) => {

@@ -27,3 +27,4 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 resvg = { version = "0.45.1", default-features = false, features = ["text", "system-fonts"] }
 zip = { version = "2.2.2", default-features = false, features = ["deflate-flate2", "flate2"] }
 docx-rs = "0.4.17"
+rfd = { version = "0.15", default-features = false, features = ["gtk3"] }

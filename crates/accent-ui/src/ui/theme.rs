@@ -452,7 +452,6 @@ pub fn draw_preview_book_icon(painter: &Painter, center: Pos2, color: Color32) {
         [Pos2::new(center.x, r.top()), Pos2::new(center.x, r.bottom())],
         s,
     );
-    // Tiny horizontal lines inside pages
     for dy in [-2.5_f32, 0.0, 2.5] {
         painter.line_segment(
             [
@@ -468,6 +467,105 @@ pub fn draw_preview_book_icon(painter: &Painter, center: Pos2, color: Color32) {
             ],
             Stroke::new(1.1, color),
         );
+    }
+}
+
+/// Draws the 5 high-legibility editing/preview mode icons:
+/// 0 = Modifica (Raw source editor)
+/// 1 = Anteprima in-line • (Caret-aware live preview)
+/// 2 = Anteprima split a destra (Half-width split)
+/// 3 = Anteprima split sotto (Half-height split)
+/// 4 = Solo lettura (Full-width read-only book/reader)
+pub fn draw_view_mode_icon(
+    painter: &Painter,
+    center: Pos2,
+    color: Color32,
+    accent_orange: Color32,
+    mode_idx: usize,
+) {
+    let s = Stroke::new(1.5, color);
+    let r = Rect::from_center_size(center, Vec2::new(15.0, 12.5));
+    match mode_idx {
+        // 0: Modifica (Raw source editor: page outline with diagonal pen/stylus)
+        0 => {
+            painter.rect_stroke(r, CornerRadius::same(2), s, StrokeKind::Middle);
+            painter.line_segment(
+                [
+                    Pos2::new(r.left() + 3.0, center.y - 2.2),
+                    Pos2::new(r.left() + 7.5, center.y - 2.2),
+                ],
+                Stroke::new(1.3, color),
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(r.left() + 3.0, center.y + 1.8),
+                    Pos2::new(r.left() + 6.5, center.y + 1.8),
+                ],
+                Stroke::new(1.3, color),
+            );
+            // Crisp diagonal stylus
+            painter.line_segment(
+                [
+                    Pos2::new(center.x + 0.5, center.y + 3.0),
+                    Pos2::new(r.right() - 2.2, r.top() + 2.5),
+                ],
+                Stroke::new(1.8, color),
+            );
+        }
+        // 1: Anteprima in-line • (Live preview: typographic lines + orange live dot)
+        1 => {
+            painter.rect_stroke(r, CornerRadius::same(2), s, StrokeKind::Middle);
+            painter.line_segment(
+                [
+                    Pos2::new(r.left() + 2.8, center.y - 2.5),
+                    Pos2::new(r.right() - 5.5, center.y - 2.5),
+                ],
+                Stroke::new(1.6, color),
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(r.left() + 2.8, center.y + 0.5),
+                    Pos2::new(r.right() - 2.8, center.y + 0.5),
+                ],
+                Stroke::new(1.2, color),
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(r.left() + 2.8, center.y + 3.2),
+                    Pos2::new(r.right() - 4.2, center.y + 3.2),
+                ],
+                Stroke::new(1.2, color),
+            );
+            painter.circle_filled(Pos2::new(r.right() - 2.8, r.top() + 2.8), 2.3, accent_orange);
+        }
+        // 2: Anteprima split a destra (Vertical split with shaded right pane)
+        2 => {
+            let right_half = Rect::from_min_max(Pos2::new(center.x, r.top()), r.right_bottom());
+            painter.rect_filled(
+                right_half,
+                CornerRadius::same(2),
+                color.gamma_multiply(0.24),
+            );
+            painter.rect_stroke(r, CornerRadius::same(2), s, StrokeKind::Middle);
+            painter.line_segment(
+                [Pos2::new(center.x, r.top()), Pos2::new(center.x, r.bottom())],
+                s,
+            );
+        }
+        // 3: Anteprima split sotto (Horizontal split with shaded bottom pane)
+        3 => {
+            let bot_half = Rect::from_min_max(Pos2::new(r.left(), center.y), r.right_bottom());
+            painter.rect_filled(bot_half, CornerRadius::same(2), color.gamma_multiply(0.24));
+            painter.rect_stroke(r, CornerRadius::same(2), s, StrokeKind::Middle);
+            painter.line_segment(
+                [Pos2::new(r.left(), center.y), Pos2::new(r.right(), center.y)],
+                s,
+            );
+        }
+        // 4: Solo lettura (Open book reader icon)
+        _ => {
+            draw_preview_book_icon(painter, center, color);
+        }
     }
 }
 
@@ -527,72 +625,156 @@ pub fn draw_window_button(
     }
 }
 
-/// Draws the 12 bottom formatting toolbar icons (`0..12`) matching Apostrophe's bottom-left bar.
+/// Draws the 12 bottom formatting toolbar icons (`0..12`) with crisp custom vector geometry
+/// inspired by Apostrophe's typographic `'a'` series (bold `'a'`, italic `'a'`, strikethrough `'a'`)
+/// and precision vector glyphs.
 pub fn draw_toolbar_icon(painter: &Painter, center: Pos2, fg: Color32, idx: usize) {
-    let s = Stroke::new(1.5, fg);
+    let s = Stroke::new(1.6, fg);
     match idx {
-        // 0: Bold 'a'
+        // 0: Bold typographic 'a' (heavy stem + sculpted double-story arch & bowl)
         0 => {
-            painter.text(
-                center,
-                egui::Align2::CENTER_CENTER,
-                "a",
-                font_ui_bold(16.5),
-                fg,
-            );
-        }
-        // 1: Italic 'a'
-        1 => {
-            painter.text(
-                center,
-                egui::Align2::CENTER_CENTER,
-                "a",
-                font_editor_bold_italic(17.0),
-                fg,
-            );
-        }
-        // 2: Strikethrough 'a' with horizontal bar
-        2 => {
-            painter.text(
-                center,
-                egui::Align2::CENTER_CENTER,
-                "a",
-                font_ui_regular(15.5),
-                fg,
+            let b_stroke = Stroke::new(2.35, fg);
+            painter.line_segment(
+                [
+                    Pos2::new(center.x - 3.8, center.y - 4.2),
+                    Pos2::new(center.x + 1.8, center.y - 4.8),
+                ],
+                b_stroke,
             );
             painter.line_segment(
                 [
-                    Pos2::new(center.x - 6.0, center.y + 0.5),
-                    Pos2::new(center.x + 6.0, center.y + 0.5),
+                    Pos2::new(center.x + 1.8, center.y - 4.8),
+                    Pos2::new(center.x + 3.6, center.y - 2.6),
+                ],
+                b_stroke,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(center.x + 3.6, center.y - 3.0),
+                    Pos2::new(center.x + 3.6, center.y + 4.8),
+                ],
+                Stroke::new(2.6, fg),
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(center.x + 3.6, center.y + 4.6),
+                    Pos2::new(center.x + 5.4, center.y + 4.6),
+                ],
+                Stroke::new(2.1, fg),
+            );
+            let bowl_r = Rect::from_min_max(
+                Pos2::new(center.x - 4.4, center.y - 0.4),
+                Pos2::new(center.x + 3.4, center.y + 4.8),
+            );
+            painter.rect_stroke(bowl_r, CornerRadius::same(3), b_stroke, StrokeKind::Middle);
+        }
+        // 1: Italic typographic 'a' (slanted cursive single-story 'a' with hook)
+        1 => {
+            let i_stroke = Stroke::new(1.75, fg);
+            let bowl = Rect::from_min_max(
+                Pos2::new(center.x - 4.2, center.y - 3.6),
+                Pos2::new(center.x + 2.2, center.y + 4.6),
+            );
+            painter.rect_stroke(bowl, CornerRadius::same(4), i_stroke, StrokeKind::Middle);
+            painter.line_segment(
+                [
+                    Pos2::new(center.x + 3.6, center.y - 4.2),
+                    Pos2::new(center.x + 1.6, center.y + 4.2),
+                ],
+                Stroke::new(1.9, fg),
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(center.x + 1.6, center.y + 4.2),
+                    Pos2::new(center.x + 4.6, center.y + 3.4),
                 ],
                 Stroke::new(1.6, fg),
             );
         }
-        // 3: Heading 'H1'
-        3 => {
-            painter.text(
-                Pos2::new(center.x - 2.0, center.y),
-                egui::Align2::CENTER_CENTER,
-                "H",
-                font_ui_bold(13.5),
-                fg,
+        // 2: Strikethrough typographic 'a' (clean 'a' crossed by crisp horizontal bar)
+        2 => {
+            let r_stroke = Stroke::new(1.65, fg);
+            painter.line_segment(
+                [
+                    Pos2::new(center.x - 3.4, center.y - 4.2),
+                    Pos2::new(center.x + 2.2, center.y - 4.6),
+                ],
+                r_stroke,
             );
-            painter.text(
-                Pos2::new(center.x + 4.5, center.y + 1.5),
-                egui::Align2::CENTER_CENTER,
-                "1",
-                font_ui_bold(9.5),
-                fg,
+            painter.line_segment(
+                [
+                    Pos2::new(center.x + 2.8, center.y - 3.6),
+                    Pos2::new(center.x + 2.8, center.y + 4.8),
+                ],
+                r_stroke,
+            );
+            let bowl_r = Rect::from_min_max(
+                Pos2::new(center.x - 4.0, center.y - 0.2),
+                Pos2::new(center.x + 2.8, center.y + 4.8),
+            );
+            painter.rect_stroke(bowl_r, CornerRadius::same(3), r_stroke, StrokeKind::Middle);
+            painter.line_segment(
+                [
+                    Pos2::new(center.x - 7.0, center.y + 0.2),
+                    Pos2::new(center.x + 7.0, center.y + 0.2),
+                ],
+                Stroke::new(1.85, fg),
+            );
+        }
+        // 3: Heading 'H1' (vector H + subscript 1)
+        3 => {
+            let hs = Stroke::new(1.85, fg);
+            painter.line_segment(
+                [
+                    Pos2::new(center.x - 6.0, center.y - 5.0),
+                    Pos2::new(center.x - 6.0, center.y + 4.8),
+                ],
+                hs,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(center.x + 0.5, center.y - 5.0),
+                    Pos2::new(center.x + 0.5, center.y + 4.8),
+                ],
+                hs,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(center.x - 6.0, center.y - 0.2),
+                    Pos2::new(center.x + 0.5, center.y - 0.2),
+                ],
+                hs,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(center.x + 3.5, center.y - 1.2),
+                    Pos2::new(center.x + 5.5, center.y - 2.6),
+                ],
+                Stroke::new(1.5, fg),
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(center.x + 5.5, center.y - 2.6),
+                    Pos2::new(center.x + 5.5, center.y + 4.8),
+                ],
+                Stroke::new(1.7, fg),
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(center.x + 3.6, center.y + 4.8),
+                    Pos2::new(center.x + 7.2, center.y + 4.8),
+                ],
+                Stroke::new(1.5, fg),
             );
         }
         // 4: Unordered bullet list
         4 => {
             for dy in [-4.5_f32, 0.0, 4.5] {
-                painter.circle_filled(Pos2::new(center.x - 5.5, center.y + dy), 1.3, fg);
+                painter.circle_filled(Pos2::new(center.x - 5.5, center.y + dy), 1.5, fg);
                 painter.line_segment(
                     [
                         Pos2::new(center.x - 2.0, center.y + dy),
-                        Pos2::new(center.x + 6.0, center.y + dy),
+                        Pos2::new(center.x + 6.5, center.y + dy),
                     ],
                     s,
                 );
@@ -605,13 +787,13 @@ pub fn draw_toolbar_icon(painter: &Painter, center: Pos2, fg: Color32, idx: usiz
                     Pos2::new(center.x - 5.5, center.y + dy),
                     egui::Align2::CENTER_CENTER,
                     format!("{}", i + 1),
-                    font_ui_bold(6.5),
+                    font_ui_bold(7.2),
                     fg,
                 );
                 painter.line_segment(
                     [
                         Pos2::new(center.x - 1.5, center.y + dy),
-                        Pos2::new(center.x + 6.0, center.y + dy),
+                        Pos2::new(center.x + 6.5, center.y + dy),
                     ],
                     s,
                 );
@@ -619,90 +801,106 @@ pub fn draw_toolbar_icon(painter: &Painter, center: Pos2, fg: Color32, idx: usiz
         }
         // 6: Task list checkbox [v]
         6 => {
-            let r = Rect::from_center_size(center, Vec2::new(12.5, 12.5));
-            painter.rect_stroke(r, CornerRadius::same(2), s, StrokeKind::Middle);
+            let r = Rect::from_center_size(center, Vec2::new(13.0, 13.0));
+            painter.rect_stroke(r, CornerRadius::same(3), s, StrokeKind::Middle);
             painter.line_segment(
                 [
-                    Pos2::new(center.x - 3.2, center.y + 0.2),
+                    Pos2::new(center.x - 3.4, center.y + 0.2),
                     Pos2::new(center.x - 0.8, center.y + 2.8),
                 ],
-                s,
+                Stroke::new(1.8, fg),
             );
             painter.line_segment(
                 [
                     Pos2::new(center.x - 0.8, center.y + 2.8),
-                    Pos2::new(center.x + 3.6, center.y - 2.4),
+                    Pos2::new(center.x + 3.8, center.y - 2.6),
                 ],
-                s,
+                Stroke::new(1.8, fg),
             );
         }
-        // 7: Blockquote “”
+        // 7: Blockquote (sculptural double curved quotation glyphs)
         7 => {
-            painter.text(
-                Pos2::new(center.x, center.y + 3.0),
-                egui::Align2::CENTER_CENTER,
-                "“”",
-                font_ui_bold(18.0),
-                fg,
-            );
+            for dx in [-3.2_f32, 3.0] {
+                let qc = Pos2::new(center.x + dx, center.y - 1.8);
+                painter.circle_filled(qc, 2.2, fg);
+                painter.line_segment(
+                    [
+                        Pos2::new(qc.x + 1.2, qc.y + 0.5),
+                        Pos2::new(qc.x - 1.2, qc.y + 5.2),
+                    ],
+                    Stroke::new(1.8, fg),
+                );
+            }
         }
-        // 8: Code <>
+        // 8: Code </>
         8 => {
             painter.line_segment(
                 [
-                    Pos2::new(center.x - 2.0, center.y - 4.0),
-                    Pos2::new(center.x - 6.0, center.y),
+                    Pos2::new(center.x - 2.5, center.y - 4.2),
+                    Pos2::new(center.x - 6.5, center.y),
                 ],
                 s,
             );
             painter.line_segment(
                 [
-                    Pos2::new(center.x - 6.0, center.y),
-                    Pos2::new(center.x - 2.0, center.y + 4.0),
+                    Pos2::new(center.x - 6.5, center.y),
+                    Pos2::new(center.x - 2.5, center.y + 4.2),
                 ],
                 s,
             );
             painter.line_segment(
                 [
-                    Pos2::new(center.x + 2.0, center.y - 4.0),
-                    Pos2::new(center.x + 6.0, center.y),
+                    Pos2::new(center.x + 2.5, center.y - 4.2),
+                    Pos2::new(center.x + 6.5, center.y),
                 ],
                 s,
             );
             painter.line_segment(
                 [
-                    Pos2::new(center.x + 6.0, center.y),
-                    Pos2::new(center.x + 2.0, center.y + 4.0),
+                    Pos2::new(center.x + 6.5, center.y),
+                    Pos2::new(center.x + 2.5, center.y + 4.2),
                 ],
                 s,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(center.x + 1.2, center.y - 5.0),
+                    Pos2::new(center.x - 1.2, center.y + 5.0),
+                ],
+                Stroke::new(1.3, fg),
             );
         }
-        // 9: Link icon
+        // 9: Link icon (interlocking chain capsules)
         9 => {
-            painter.circle_stroke(Pos2::new(center.x, center.y), 5.0, s);
+            let l_rect =
+                Rect::from_center_size(Pos2::new(center.x - 2.6, center.y), Vec2::new(7.5, 6.5));
+            let r_rect =
+                Rect::from_center_size(Pos2::new(center.x + 2.6, center.y), Vec2::new(7.5, 6.5));
+            painter.rect_stroke(l_rect, CornerRadius::same(3), s, StrokeKind::Middle);
+            painter.rect_stroke(r_rect, CornerRadius::same(3), s, StrokeKind::Middle);
             painter.line_segment(
                 [
-                    Pos2::new(center.x - 3.5, center.y + 3.5),
-                    Pos2::new(center.x + 3.5, center.y - 3.5),
+                    Pos2::new(center.x - 2.2, center.y),
+                    Pos2::new(center.x + 2.2, center.y),
                 ],
-                s,
+                Stroke::new(1.8, fg),
             );
         }
         // 10: Image frame icon
         10 => {
-            let r = Rect::from_center_size(center, Vec2::new(13.0, 11.0));
+            let r = Rect::from_center_size(center, Vec2::new(13.5, 11.5));
             painter.rect_stroke(r, CornerRadius::same(2), s, StrokeKind::Middle);
-            painter.circle_filled(Pos2::new(r.left() + 3.5, r.top() + 3.5), 1.3, fg);
+            painter.circle_filled(Pos2::new(r.left() + 3.6, r.top() + 3.6), 1.4, fg);
             painter.line_segment(
                 [
                     Pos2::new(r.left() + 2.0, r.bottom() - 2.0),
-                    Pos2::new(center.x, center.y + 0.5),
+                    Pos2::new(center.x + 0.5, center.y + 0.2),
                 ],
                 s,
             );
             painter.line_segment(
                 [
-                    Pos2::new(center.x, center.y + 0.5),
+                    Pos2::new(center.x + 0.5, center.y + 0.2),
                     Pos2::new(r.right() - 2.0, r.bottom() - 2.0),
                 ],
                 s,
@@ -710,25 +908,27 @@ pub fn draw_toolbar_icon(painter: &Painter, center: Pos2, fg: Color32, idx: usiz
         }
         // 11: Table grid icon
         _ => {
-            let r = Rect::from_center_size(center, Vec2::new(12.5, 11.5));
+            let r = Rect::from_center_size(center, Vec2::new(13.0, 12.0));
+            let hdr_r = Rect::from_min_max(r.left_top(), Pos2::new(r.right(), r.top() + 4.0));
+            painter.rect_filled(hdr_r, CornerRadius::same(2), fg.gamma_multiply(0.24));
             painter.rect_stroke(r, CornerRadius::same(2), s, StrokeKind::Middle);
             painter.line_segment(
                 [
-                    Pos2::new(r.left(), r.top() + 4.0),
-                    Pos2::new(r.right(), r.top() + 4.0),
+                    Pos2::new(r.left(), r.top() + 4.2),
+                    Pos2::new(r.right(), r.top() + 4.2),
                 ],
                 s,
             );
             painter.line_segment(
                 [
-                    Pos2::new(r.left(), r.top() + 7.8),
-                    Pos2::new(r.right(), r.top() + 7.8),
+                    Pos2::new(r.left(), r.top() + 8.0),
+                    Pos2::new(r.right(), r.top() + 8.0),
                 ],
                 s,
             );
             painter.line_segment(
                 [
-                    Pos2::new(center.x, r.top() + 4.0),
+                    Pos2::new(center.x, r.top() + 4.2),
                     Pos2::new(center.x, r.bottom()),
                 ],
                 s,

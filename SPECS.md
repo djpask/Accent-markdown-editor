@@ -69,3 +69,9 @@ Keep these checkboxes updated as phases complete (`[ ]` Pending, `[~]` In Progre
 - [x] **Phase 5: Native Mermaid GPU Rendering & 100% Rust Export Pipeline**
   - [x] Integrate pure-Rust Mermaid SVG generation + `resvg` texture rasterization with hash caching.
   - [x] Implement embedded PDF (`krilla`/`typst`), Word (`docx-rs`), OpenDocument Text (`.odt` via ODF 1.2 XML + `zip`), LaTeX (`.tex` AST serializer), and EPUB (`epub-builder`) exporters.
+
+- [x] **Phase 6: The Ultimate Cross-Platform Restyling & Visual Identity**
+  - [x] Enable native OS window decorations (`with_decorations(true)`), unified slim Top Bar, and 5-mode compact editing pill.
+  - [x] Integrate `rfd` native file dialogs with automatic headless fallback.
+  - [x] Implement floating Search & Replace panel and floating Bottom Format Bar with redesigned Apostrophe-inspired `"a"` typography icons.
+  - [x] Design official Accent vector logo (`crates/accent-ui/resources/icon.svg`, `img/brand/accent_logo.svg`, `img/brand/accent_logo.png`) and Zen concentration mode.

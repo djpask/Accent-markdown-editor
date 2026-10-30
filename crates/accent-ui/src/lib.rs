@@ -100,6 +100,17 @@ pub fn parse_cli_args(args: &[String]) -> LaunchOptions {
     opts
 }
 
+pub const OFFICIAL_ICON_SVG: &str = include_str!("../resources/icon.svg");
+
+pub fn load_app_icon() -> Option<egui::IconData> {
+    let (width, height, rgba, _png) = accent_mermaid::rasterize_svg(OFFICIAL_ICON_SVG, 0.25)?;
+    Some(egui::IconData {
+        rgba,
+        width,
+        height,
+    })
+}
+
 pub fn run_app(opts: LaunchOptions) -> eframe::Result {
     // If DISPLAY=:99 is requested or running headless, force X11 on :99 with software GL
     let want_xvfb_99 = std::env::var("DISPLAY").as_deref() == Ok(":99")
@@ -113,12 +124,17 @@ pub fn run_app(opts: LaunchOptions) -> eframe::Result {
         }
     }
 
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Accent")
+        .with_inner_size([1200.0, 1100.0])
+        .with_min_inner_size([600.0, 400.0])
+        .with_decorations(true);
+    if let Some(icon) = load_app_icon() {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon));
+    }
+
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Accent")
-            .with_inner_size([1200.0, 1100.0])
-            .with_min_inner_size([600.0, 400.0])
-            .with_decorations(false),
+        viewport,
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
@@ -155,5 +171,20 @@ mod tests {
         let dark = ui::theme::AccentPalette::for_mode(ThemeMode::Dark);
         assert_eq!(dark.bg_canvas, egui::Color32::from_rgb(0x2b, 0x2b, 0x2f));
         assert_eq!(dark.fg_primary, egui::Color32::from_rgb(0xee, 0xee, 0xee));
+    }
+
+    #[test]
+    fn test_official_accent_logo_svg_and_png_generation() {
+        let (w, h, _rgba, png_bytes) = accent_mermaid::rasterize_svg(OFFICIAL_ICON_SVG, 1.0)
+            .expect("Failed to rasterize official Accent SVG icon");
+        assert_eq!(w, 512);
+        assert_eq!(h, 512);
+        assert!(png_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(png_bytes.len() > 10_000);
+
+        let brand_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../img/brand");
+        let _ = std::fs::create_dir_all(&brand_dir);
+        std::fs::write(brand_dir.join("accent_logo.png"), &png_bytes)
+            .expect("Failed to write img/brand/accent_logo.png");
     }
 }
