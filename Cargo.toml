@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.7.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
@@ -21,10 +21,10 @@ fontdb = "0.23"
 pulldown-cmark = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-eframe = { version = "0.31", default-features = false, features = ["glow", "x11", "wayland", "default_fonts"] }
+eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
 egui = "0.31"
 image = { version = "0.25", default-features = false, features = ["png"] }
 resvg = { version = "0.45.1", default-features = false, features = ["text", "system-fonts"] }
 zip = { version = "2.2.2", default-features = false, features = ["deflate-flate2", "flate2"] }
 docx-rs = "0.4.17"
-rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
+rfd = { version = "0.15", default-features = false }

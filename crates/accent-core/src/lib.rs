@@ -6,6 +6,9 @@ use std::cell::RefCell;
 use std::ops::Range;
 use std::sync::Arc;
 
+/// Canonical version of Accent synchronized across the Cargo workspace.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Default sample document showcasing Accent's multi-dialect Markdown capabilities.
 pub const DEFAULT_SAMPLE_MARKDOWN: &str = "\
 # Guida ed Esempi di Accent

@@ -4051,7 +4051,7 @@ fn render_about_dialog(
     painter.text(
         Pos2::new(dlg_rect.center().x, dlg_rect.top() + 86.0),
         Align2::CENTER_CENTER,
-        "Accent Markdown Editor v0.3.0",
+        concat!("Accent Markdown Editor v", env!("CARGO_PKG_VERSION")),
         font_ui_bold(17.0),
         pal.fg_primary,
     );

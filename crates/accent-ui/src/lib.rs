@@ -104,6 +104,7 @@ pub fn parse_cli_args(args: &[String]) -> LaunchOptions {
     opts
 }
 
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const OFFICIAL_ICON_SVG: &str = include_str!("../resources/icon.svg");
 
 pub fn load_app_icon() -> Option<egui::IconData> {
@@ -113,6 +114,48 @@ pub fn load_app_icon() -> Option<egui::IconData> {
         width,
         height,
     })
+}
+
+/// Generates a multi-resolution Windows `.ico` file (`256x256`, `64x64`, `32x32`, `16x16` PNG frames)
+/// directly from the official Accent SVG logo.
+pub fn generate_windows_ico() -> Option<Vec<u8>> {
+    let scales = [
+        (0u8, 0.5_f32),     // 256x256 (0 in ICONDIRENTRY means 256px)
+        (64u8, 0.125_f32),  // 64x64
+        (32u8, 0.0625_f32), // 32x32
+        (16u8, 0.03125_f32), // 16x16
+    ];
+    let mut png_frames = Vec::with_capacity(scales.len());
+    for (dim_byte, scale) in scales {
+        let (_w, _h, _rgba, png_bytes) = accent_mermaid::rasterize_svg(OFFICIAL_ICON_SVG, scale)?;
+        png_frames.push((dim_byte, png_bytes));
+    }
+
+    let count = png_frames.len() as u16;
+    let mut ico = Vec::new();
+    // ICONDIR header (6 bytes)
+    ico.extend_from_slice(&0u16.to_le_bytes()); // idReserved = 0
+    ico.extend_from_slice(&1u16.to_le_bytes()); // idType = 1 (ICO)
+    ico.extend_from_slice(&count.to_le_bytes()); // idCount
+
+    let mut data_offset: u32 = 6 + (16 * png_frames.len() as u32);
+    for (dim_byte, png_bytes) in &png_frames {
+        let size = png_bytes.len() as u32;
+        ico.push(*dim_byte); // bWidth
+        ico.push(*dim_byte); // bHeight
+        ico.push(0); // bColorCount
+        ico.push(0); // bReserved
+        ico.extend_from_slice(&1u16.to_le_bytes()); // wPlanes = 1
+        ico.extend_from_slice(&32u16.to_le_bytes()); // wBitCount = 32
+        ico.extend_from_slice(&size.to_le_bytes()); // dwBytesInRes
+        ico.extend_from_slice(&data_offset.to_le_bytes()); // dwImageOffset
+        data_offset += size;
+    }
+
+    for (_dim_byte, png_bytes) in png_frames {
+        ico.extend_from_slice(&png_bytes);
+    }
+    Some(ico)
 }
 
 pub fn run_app(opts: LaunchOptions) -> eframe::Result {
@@ -191,5 +234,20 @@ mod tests {
         let _ = std::fs::create_dir_all(&brand_dir);
         std::fs::write(brand_dir.join("accent_logo.png"), &png_bytes)
             .expect("Failed to write img/brand/accent_logo.png");
+
+        let ico_bytes = generate_windows_ico().expect("Failed to generate Windows .ico");
+        assert!(&ico_bytes[0..4] == &[0x00, 0x00, 0x01, 0x00]);
+        std::fs::write(brand_dir.join("accent_logo.ico"), &ico_bytes)
+            .expect("Failed to write img/brand/accent_logo.ico");
+    }
+
+    #[test]
+    fn test_version_system_consistency() {
+        assert_eq!(VERSION, "0.7.0");
+        assert_eq!(accent_core::VERSION, VERSION);
+        let version_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../VERSION");
+        let file_ver = std::fs::read_to_string(version_file)
+            .expect("Failed to read root VERSION file");
+        assert_eq!(file_ver.trim(), VERSION);
     }
 }
