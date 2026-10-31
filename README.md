@@ -120,9 +120,21 @@ Il pacchetto di installazione per **Windows 11** è progettato in modalità **Us
 - Crea i collegamenti nel Menu Start utente (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Accent`).
 - Registra l'associazione per i file `.md` e `.markdown` e il disinstallatore in `HKEY_CURRENT_USER` (*Impostazioni di Windows 11 → App → App installate*).
 
-#### Generazione del pacchetto su Windows 11:
+#### Generazione del pacchetto su Arch Linux:
+```bash
+# Genera il pacchetto .pkg.tar.zst (aggiungi --install per installarlo subito con pacman -U)
+./scripts/build-arch-pkg.sh
+```
+
+#### Generazione dell'Installatore User-Mode con Disinstallatore integrato per Windows 11:
+Da Linux (cross-compilazione nativa `PE32+ x86-64`):
+```bash
+# Genera Accent-Setup-<version>-x86_64.exe, accent.exe e l'archivio ZIP User-Mode
+./scripts/build-windows-installer.sh
+```
+Da Windows 11 (PowerShell):
 ```powershell
-# Compila il binario di rilascio e genera sia l'installer Inno Setup (.exe) sia il pacchetto User Installer (.zip)
+# Compila il binario di rilascio e genera sia Accent-Setup-<version>-x86_64.exe sia l'archivio User Installer (.zip)
 powershell -ExecutionPolicy Bypass -File .\packaging\windows\build-windows-pkg.ps1
 ```
 

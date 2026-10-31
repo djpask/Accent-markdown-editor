@@ -30,7 +30,10 @@ if (Test-Path $StagingDir) { Remove-Item -Recurse -Force $StagingDir }
 New-Item -ItemType Directory -Force -Path $StagingDir | Out-Null
 
 # Copia artefatti nel bundle user-installer
-Copy-Item (Join-Path $RepoRoot "target\release\accent-ui.exe") (Join-Path $StagingDir "accent.exe") -Force
+$BuiltExe = Join-Path $RepoRoot "target\release\accent-ui.exe"
+$LocalExe = Join-Path $ScriptDir "accent.exe"
+Copy-Item $BuiltExe $LocalExe -Force
+Copy-Item $BuiltExe (Join-Path $StagingDir "accent.exe") -Force
 Copy-Item (Join-Path $RepoRoot "img\brand\accent_logo.ico") (Join-Path $StagingDir "accent_logo.ico") -Force
 Copy-Item (Join-Path $RepoRoot "img\brand\accent_logo.png") (Join-Path $StagingDir "accent_logo.png") -Force
 Copy-Item (Join-Path $RepoRoot "README.md") (Join-Path $StagingDir "README.md") -Force
@@ -38,6 +41,14 @@ Copy-Item (Join-Path $RepoRoot "VERSION") (Join-Path $StagingDir "VERSION") -For
 Copy-Item (Join-Path $ScriptDir "install-user.ps1") (Join-Path $StagingDir "install-user.ps1") -Force
 Copy-Item (Join-Path $ScriptDir "uninstall-user.ps1") (Join-Path $StagingDir "uninstall-user.ps1") -Force
 Copy-Item (Join-Path $ScriptDir "install-user.cmd") (Join-Path $StagingDir "install-user.cmd") -Force
+
+# Compila l'installer/disinstallatore nativo in puro Rust (Accent-Setup-<Version>-x86_64.exe)
+$SetupExe = Join-Path $ScriptDir "Accent-Setup-$Version-x86_64.exe"
+$env:ACCENT_VERSION = $Version
+& rustc --edition 2024 -O (Join-Path $ScriptDir "installer.rs") -o $SetupExe
+Copy-Item $SetupExe (Join-Path $StagingDir "Accent-Setup-$Version-x86_64.exe") -Force
+Write-Host "==> Creato Installer/Disinstallatore .exe User-Level in puro Rust:" -ForegroundColor Green
+Write-Host "    $SetupExe"
 
 $ZipPath = Join-Path $DistDir "Accent-$Version-win11-x64-user-installer.zip"
 if (Test-Path $ZipPath) { Remove-Item -Force $ZipPath }

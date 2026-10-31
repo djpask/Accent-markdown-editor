@@ -7,8 +7,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 const APP_VERSION: &str = env!("ACCENT_VERSION");
-const ACCENT_EXE_BYTES: &[u8] =
-    include_bytes!("../../target/x86_64-pc-windows-gnu/release/accent-ui.exe");
+const ACCENT_EXE_BYTES: &[u8] = include_bytes!("accent.exe");
 const ACCENT_ICO_BYTES: &[u8] = include_bytes!("../../img/brand/accent_logo.ico");
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
