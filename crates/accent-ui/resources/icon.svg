@@ -1,142 +1,105 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="512" height="512">
   <defs>
-    <!-- Ambient drop shadow & outer squircle gradients -->
-    <radialGradient id="ambientGlow" cx="50%" cy="54%" r="52%">
-      <stop offset="0%" stop-color="#DB632C" stop-opacity="0.42"/>
-      <stop offset="68%" stop-color="#1A1412" stop-opacity="0.28"/>
-      <stop offset="100%" stop-color="#000000" stop-opacity="0.0"/>
-    </radialGradient>
+    <!-- Filter for GNOME HIG app icon drop shadow -->
+    <filter id="drop-shadow" x="-10%" y="-10%" width="125%" height="125%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#000000" flood-opacity="0.25" />
+    </filter>
+    <filter id="accent-shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="2.5" flood-color="#1c71d8" flood-opacity="0.35" />
+    </filter>
 
-    <linearGradient id="rimBevel" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#6E5239"/>
-      <stop offset="35%" stop-color="#433327"/>
-      <stop offset="70%" stop-color="#2A221E"/>
-      <stop offset="100%" stop-color="#1B1614"/>
+    <!-- Gradients -->
+    <linearGradient id="page-bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#f2f2f5" />
     </linearGradient>
 
-    <linearGradient id="darkBase" x1="15%" y1="5%" x2="85%" y2="95%">
-      <stop offset="0%" stop-color="#362E2B"/>
-      <stop offset="45%" stop-color="#262120"/>
-      <stop offset="100%" stop-color="#191616"/>
+    <linearGradient id="accent-grad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#1c71d8" />
+      <stop offset="60%" stop-color="#3584e4" />
+      <stop offset="100%" stop-color="#62a0ea" />
     </linearGradient>
 
-    <radialGradient id="warmCoreGlow" cx="52%" cy="44%" r="48%">
-      <stop offset="0%" stop-color="#E86F35" stop-opacity="0.26"/>
-      <stop offset="55%" stop-color="#8B451E" stop-opacity="0.10"/>
-      <stop offset="100%" stop-color="#191616" stop-opacity="0.0"/>
-    </radialGradient>
-
-    <!-- Tactile Sepia Parchment Sheet Gradients -->
-    <linearGradient id="paperShadow" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#0D0A09" stop-opacity="0.45"/>
-      <stop offset="100%" stop-color="#050404" stop-opacity="0.72"/>
+    <linearGradient id="coral-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ff7800" />
+      <stop offset="100%" stop-color="#e01b24" />
     </linearGradient>
 
-    <linearGradient id="sepiaSheetBack" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#DFD1BC"/>
-      <stop offset="100%" stop-color="#C4B094"/>
-    </linearGradient>
-
-    <linearGradient id="sepiaSheetFront" x1="10%" y1="0%" x2="90%" y2="100%">
-      <stop offset="0%" stop-color="#FDF9F2"/>
-      <stop offset="52%" stop-color="#F7EFE2"/>
-      <stop offset="100%" stop-color="#E7D8C3"/>
-    </linearGradient>
-
-    <linearGradient id="pageFold" x1="0%" y1="100%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#CBB69A"/>
-      <stop offset="55%" stop-color="#EDE2D1"/>
-      <stop offset="100%" stop-color="#FAF4EA"/>
-    </linearGradient>
-
-    <!-- Sculptural Espresso Ink & Lead Type Gradient for the "a" -->
-    <linearGradient id="inkCharcoal" x1="20%" y1="10%" x2="80%" y2="95%">
-      <stop offset="0%" stop-color="#594020"/>
-      <stop offset="48%" stop-color="#3D2B14"/>
-      <stop offset="100%" stop-color="#22170A"/>
-    </linearGradient>
-
-    <!-- Rust-Orange Dynamic Acute Accent & Fountain Nib Gradient -->
-    <linearGradient id="rustAccent" x1="0%" y1="100%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#B83B0E"/>
-      <stop offset="42%" stop-color="#DB632C"/>
-      <stop offset="78%" stop-color="#F58245"/>
-      <stop offset="100%" stop-color="#FFB067"/>
-    </linearGradient>
-
-    <linearGradient id="accentSpecular" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#FFF3E0" stop-opacity="0.75"/>
-      <stop offset="100%" stop-color="#FF8A47" stop-opacity="0.0"/>
-    </linearGradient>
-
-    <linearGradient id="goldNib" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#FFE0A3"/>
-      <stop offset="50%" stop-color="#E09F47"/>
-      <stop offset="100%" stop-color="#9E5818"/>
+    <linearGradient id="fold-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#deddda" />
+      <stop offset="100%" stop-color="#c0bfbc" />
     </linearGradient>
   </defs>
 
-  <!-- 1. Soft 3D Ambient Drop Shadow -->
-  <ellipse cx="256" cy="466" rx="196" ry="26" fill="url(#ambientGlow)"/>
-  <rect x="28" y="34" width="456" height="456" rx="104" fill="#0B0908" opacity="0.55"/>
+  <!-- Main Sheet / Canvas -->
+  <g filter="url(#drop-shadow)">
+    <!-- Base page background with folded top-right corner -->
+    <path d="M 24 16
+             L 82 16
+             L 104 38
+             L 104 112
+             A 12 12 0 0 1 92 124
+             L 24 124
+             A 12 12 0 0 1 12 112
+             L 12 28
+             A 12 12 0 0 1 24 16 Z"
+          fill="url(#page-bg)"
+          stroke="#dfdedb"
+          stroke-width="1.5" />
 
-  <!-- 2. Outer Squircle Chassis (Dark Espresso & Warm Bronze Rim) -->
-  <rect x="28" y="24" width="456" height="456" rx="104" fill="url(#rimBevel)"/>
-  <rect x="33" y="29" width="446" height="446" rx="100" fill="url(#darkBase)"/>
-  <rect x="33" y="29" width="446" height="446" rx="100" fill="url(#warmCoreGlow)"/>
-
-  <!-- Subtle architectural grid / Rust gear precision ring -->
-  <circle cx="256" cy="252" r="192" fill="none" stroke="#DB632C" stroke-width="1.2" opacity="0.16" stroke-dasharray="6,8"/>
-  <circle cx="256" cy="252" r="168" fill="none" stroke="#F9F3E9" stroke-width="0.8" opacity="0.08"/>
-
-  <!-- 3. Stacked Manuscript Pages (3D Depth & Tactile Paper) -->
-  <!-- Rotated background sheet -->
-  <g transform="rotate(-5.5 256 258)">
-    <rect x="104" y="84" width="304" height="348" rx="26" fill="#0F0C0B" opacity="0.45"/>
-    <rect x="100" y="78" width="304" height="348" rx="26" fill="url(#sepiaSheetBack)"/>
+    <!-- Folded corner tab -->
+    <path d="M 82 16
+             L 82 34
+             A 4 4 0 0 0 86 38
+             L 104 38 Z"
+          fill="url(#fold-grad)" />
+    <path d="M 82 16
+             L 104 38
+             L 86 38
+             A 4 4 0 0 1 82 34 Z"
+          fill="#ffffff"
+          opacity="0.6" />
   </g>
 
-  <!-- Primary Sepia Parchment Sheet with Dog-Ear Fold -->
-  <path d="M 130 78 L 334 78 L 398 142 L 398 404 C 398 419 386 431 371 431 L 130 431 C 115 431 103 419 103 404 L 103 105 C 103 90 115 78 130 78 Z" fill="url(#paperShadow)" transform="translate(0, 10)"/>
-  <path d="M 130 74 L 334 74 L 398 138 L 398 400 C 398 415 386 427 371 427 L 130 427 C 115 427 103 415 103 400 L 103 101 C 103 86 115 74 130 74 Z" fill="url(#sepiaSheetFront)" stroke="#D9C7AE" stroke-width="1.5"/>
-
-  <!-- Subtle Ruled Typography Lines on the Parchment -->
-  <line x1="136" y1="136" x2="296" y2="136" stroke="#CBB89D" stroke-width="2.2" stroke-linecap="round" opacity="0.45"/>
-  <line x1="136" y1="168" x2="356" y2="168" stroke="#CBB89D" stroke-width="2.2" stroke-linecap="round" opacity="0.38"/>
-  <line x1="136" y1="358" x2="362" y2="358" stroke="#CBB89D" stroke-width="2.2" stroke-linecap="round" opacity="0.38"/>
-  <line x1="136" y1="388" x2="284" y2="388" stroke="#CBB89D" stroke-width="2.2" stroke-linecap="round" opacity="0.45"/>
-
-  <!-- Left Markdown Quote / Margin Accent Bar -->
-  <rect x="122" y="126" width="5" height="272" rx="2.5" fill="#DB632C" opacity="0.32"/>
-
-  <!-- Dog-Ear Folded Corner Shadow & Flap -->
-  <path d="M 334 74 L 398 138 L 350 150 C 338 150 330 142 334 74 Z" fill="#8C7355" opacity="0.28"/>
-  <path d="M 334 74 L 398 138 L 354 138 C 343 138 334 129 334 118 Z" fill="url(#pageFold)" stroke="#D5C2A7" stroke-width="1.2"/>
-
-  <!-- 4. Central Emblem: Sculptural Typographic "a" + Fountain Nib + Soaring Rust Accent -->
-  <!-- Soft shadow beneath the sculptural "a" -->
-  <g transform="translate(0, 7)" opacity="0.22">
-    <path d="M 284 218 C 284 184 258 164 218 164 C 184 164 158 179 150 202 L 184 212 C 190 198 202 191 218 191 C 238 191 248 201 248 216 L 248 224 L 212 228 C 166 233 142 252 142 284 C 142 315 166 336 202 336 C 225 336 242 326 251 312 C 254 326 266 335 284 335 C 296 335 307 331 314 326 L 310 299 C 305 302 300 304 295 304 C 287 304 284 299 284 289 Z M 248 268 C 248 292 231 308 208 308 C 189 308 178 297 178 282 C 178 265 192 254 218 251 L 248 247 Z" fill="#000000"/>
+  <!-- Subtle Document Text Preview Lines -->
+  <g opacity="0.45">
+    <!-- Header simulation line -->
+    <rect x="24" y="32" width="36" height="5" rx="2.5" fill="#1c71d8" />
+    <!-- Paragraph lines -->
+    <rect x="24" y="44" width="48" height="3" rx="1.5" fill="#77767b" />
+    <rect x="24" y="52" width="42" height="3" rx="1.5" fill="#9a9996" />
+    <rect x="24" y="60" width="34" height="3" rx="1.5" fill="#9a9996" />
   </g>
 
-  <!-- Expressive Typographic Lowercase "a" (Apostrophe-heritage reimagined with bold geometric serifs) -->
-  <path d="M 284 218 C 284 184 258 164 218 164 C 184 164 158 179 150 202 L 184 212 C 190 198 202 191 218 191 C 238 191 248 201 248 216 L 248 224 L 212 228 C 166 233 142 252 142 284 C 142 315 166 336 202 336 C 225 336 242 326 251 312 C 254 326 266 335 284 335 C 296 335 307 331 314 326 L 310 299 C 305 302 300 304 295 304 C 287 304 284 299 284 289 Z M 248 268 C 248 292 231 308 208 308 C 189 308 178 297 178 282 C 178 265 192 254 218 251 L 248 247 Z" fill="url(#inkCharcoal)"/>
+  <!-- The "Accent" Signature Mark: Bold, dynamic acute accent transforming into a pen/quill -->
+  <g filter="url(#accent-shadow)">
+    <!-- Stylized Acute Accent Mark (´) / Quill Blade -->
+    <path d="M 40 102
+             C 42 98, 48 84, 58 68
+             C 68 52, 82 36, 92 28
+             C 95 25, 99 26, 98 30
+             C 96 36, 88 52, 76 72
+             C 64 92, 52 106, 44 107
+             C 41 107, 39 105, 40 102 Z"
+          fill="url(#accent-grad)" />
 
-  <!-- 5. The Dynamic Rust-Orange Acute Accent (`´`) & Fountain Pen Nib Fusion -->
-  <!-- Drop shadow of the soaring Accent / Fountain Nib -->
-  <path d="M 220 184 L 252 122 L 332 72 C 344 65 358 79 350 91 L 300 170 L 238 202 Z" fill="#1A0D06" opacity="0.34" transform="translate(2, 8)"/>
+    <!-- Ink Nib / Focus Diamond at the apex -->
+    <circle cx="95" cy="27" r="4.5" fill="url(#coral-grad)" />
 
-  <!-- Main Sculpted Acute Accent / Fountain-Pen Nib Body (tapered calligraphic tail -> faceted nib shoulders -> precision tip) -->
-  <path d="M 218 190 L 246 126 C 250 117 258 110 267 104 L 334 68 C 346 61 360 75 352 87 L 315 154 C 309 163 302 171 293 175 L 228 200 C 221 203 215 197 218 190 Z" fill="url(#rustAccent)" stroke="#FFF2E2" stroke-width="1.8" stroke-linejoin="round"/>
+    <!-- Dynamic Feather Accent Line -->
+    <path d="M 52 86
+             Q 66 70 82 48"
+          stroke="#ffffff"
+          stroke-width="2"
+          stroke-linecap="round"
+          opacity="0.75" />
+  </g>
 
-  <!-- Left Beveled Facet of the Nib / Accent (Specular 3D Highlight) -->
-  <path d="M 222 189 L 249 128 C 253 119 260 112 269 107 L 336 71 C 341 68 345 71 342 76 L 281 137 L 222 194 Z" fill="url(#accentSpecular)"/>
-
-  <!-- Fountain Pen Nib Slit (from precision tip to breather hole) & Golden Breather Hole -->
-  <line x1="221" y1="194" x2="278" y2="139" stroke="#3D1605" stroke-width="3.2" stroke-linecap="round"/>
-  <circle cx="281" cy="136" r="8.5" fill="url(#goldNib)" stroke="#3D1605" stroke-width="2.6"/>
-
-  <!-- Warm Amber Markdown Spark / Period Dot at bottom-right of "a" -->
-  <circle cx="342" cy="316" r="16" fill="url(#rustAccent)"/>
-  <circle cx="337" cy="311" r="5" fill="#FFF3E0" opacity="0.65"/>
+  <!-- Markdown 'M↓' watermark in lower-right -->
+  <g opacity="0.3" transform="translate(64, 88)">
+    <rect x="0" y="0" width="32" height="20" rx="3" fill="#3584e4" />
+    <path d="M 4 15 L 4 5 L 8 10 L 12 5 L 12 15" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+    <path d="M 22 5 L 22 14 M 18 10 L 22 14 L 26 10" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+  </g>
 </svg>

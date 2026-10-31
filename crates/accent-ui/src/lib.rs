@@ -172,6 +172,7 @@ pub fn run_app(opts: LaunchOptions) -> eframe::Result {
     }
 
     let mut viewport = egui::ViewportBuilder::default()
+        .with_app_id("accent")
         .with_title("Accent")
         .with_inner_size([1200.0, 1100.0])
         .with_min_inner_size([600.0, 400.0])
