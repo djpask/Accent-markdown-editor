@@ -732,6 +732,55 @@ pub enum Action {
     MoveCursor(usize),
 }
 
+/// User preferences and session state persisted atomically across restarts in `settings.json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PersistedSettings {
+    pub theme: ThemeMode,
+    pub palette_preset: ColorPalettePreset,
+    pub locale: Locale,
+    pub dialect: MarkdownDialect,
+    pub line_width: LineWidthMode,
+    pub typography: TypographyConfig,
+    pub preview_active: bool,
+    pub preview_layout: PreviewLayout,
+    pub view_while_typing: bool,
+    pub hemingway_mode: bool,
+    pub focus_mode: bool,
+    pub toolbar_expanded: bool,
+    pub stat_metric: StatMetric,
+    pub selected_export_format: ExportFormat,
+    pub export_syntax_highlight: bool,
+    pub last_opened_dir: Option<PathBuf>,
+    pub last_opened_file: Option<PathBuf>,
+    pub recent_files: Vec<PathBuf>,
+}
+
+impl Default for PersistedSettings {
+    fn default() -> Self {
+        Self {
+            theme: ThemeMode::Sepia,
+            palette_preset: ColorPalettePreset::EditorialSlate,
+            locale: Locale::It,
+            dialect: MarkdownDialect::Gfm,
+            line_width: LineWidthMode::Compact,
+            typography: TypographyConfig::default(),
+            preview_active: false,
+            preview_layout: PreviewLayout::HalfWidth,
+            view_while_typing: true,
+            hemingway_mode: false,
+            focus_mode: false,
+            toolbar_expanded: true,
+            stat_metric: StatMetric::Words,
+            selected_export_format: ExportFormat::Pdf,
+            export_syntax_highlight: true,
+            last_opened_dir: None,
+            last_opened_file: None,
+            recent_files: Vec::new(),
+        }
+    }
+}
+
 /// Debounce threshold for *Save-while-typing* WAL journaling (`< 300ms` per `SPECS.md` Pillar 8).
 pub const JOURNAL_DEBOUNCE_MS: u64 = 200;
 
@@ -740,6 +789,7 @@ pub struct Session {
     pub document_title: String,
     pub current_file_path: Option<PathBuf>,
     pub is_dirty: bool,
+    pub config_path: PathBuf,
     pub recovery_dir: PathBuf,
     pub original_file_hash: Option<String>,
     pub last_edit_instant: Option<std::time::Instant>,
@@ -781,12 +831,32 @@ pub struct Session {
 
 impl Default for Session {
     fn default() -> Self {
-        Self::with_recovery_dir(accent_storage::default_recovery_dir())
+        #[cfg(test)]
+        {
+            let test_dir = std::env::temp_dir().join(format!(
+                "accent_unit_test_default_{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(test_dir.join("settings.json"));
+            Self::with_recovery_dir(test_dir)
+        }
+        #[cfg(not(test))]
+        {
+            Self::with_config_and_recovery(
+                accent_storage::default_config_path(),
+                accent_storage::default_recovery_dir(),
+            )
+        }
     }
 }
 
 impl Session {
     pub fn with_recovery_dir(recovery_dir: PathBuf) -> Self {
+        let config_path = recovery_dir.join("settings.json");
+        Self::with_config_and_recovery(config_path, recovery_dir)
+    }
+
+    pub fn with_config_and_recovery(config_path: PathBuf, recovery_dir: PathBuf) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let sample_path = PathBuf::from("/tmp/esempio_accent.md");
         if !sample_path.exists() {
@@ -808,6 +878,7 @@ impl Session {
             document_title: "esempio_accent.md".to_string(),
             current_file_path: Some(sample_path),
             is_dirty: false,
+            config_path,
             recovery_dir,
             original_file_hash: initial_hash,
             last_edit_instant: None,
@@ -845,8 +916,110 @@ impl Session {
             overlay: ActiveOverlay::None,
             display_word_count_override: None,
         };
+        session.load_settings_from_disk();
         session.check_startup_crash_recovery();
         session
+    }
+
+    /// Snapshots all user preferences, recent files, and last opened folder/file into `PersistedSettings`.
+    pub fn to_persisted_settings(&self) -> PersistedSettings {
+        PersistedSettings {
+            theme: self.theme,
+            palette_preset: self.palette_preset,
+            locale: self.locale,
+            dialect: self.dialect,
+            line_width: self.line_width,
+            typography: self.typography.clone(),
+            preview_active: self.preview_active,
+            preview_layout: self.preview_layout,
+            view_while_typing: self.view_while_typing,
+            hemingway_mode: self.hemingway_mode,
+            focus_mode: self.focus_mode,
+            toolbar_expanded: self.toolbar_expanded,
+            stat_metric: self.stat_metric,
+            selected_export_format: self.selected_export_format,
+            export_syntax_highlight: self.export_syntax_highlight,
+            last_opened_dir: Some(self.file_dialog_dir.clone()),
+            last_opened_file: self.current_file_path.clone(),
+            recent_files: self.recent_files.clone(),
+        }
+    }
+
+    /// Atomically persists `PersistedSettings` to `self.config_path` (`settings.json`).
+    pub fn save_settings(&self) -> std::io::Result<()> {
+        let settings = self.to_persisted_settings();
+        let json = serde_json::to_string_pretty(&settings)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        accent_storage::atomic_save(&self.config_path, &json)
+    }
+
+    /// Loads persisted settings and last opened directory/file from `self.config_path` if present.
+    pub fn load_settings_from_disk(&mut self) -> bool {
+        let Ok(raw) = std::fs::read_to_string(&self.config_path) else {
+            return false;
+        };
+        let Ok(settings) = serde_json::from_str::<PersistedSettings>(&raw) else {
+            return false;
+        };
+
+        self.theme = settings.theme;
+        self.palette_preset = settings.palette_preset;
+        self.locale = settings.locale;
+        self.dialect = settings.dialect;
+        self.line_width = settings.line_width;
+        self.typography = settings.typography;
+        self.typography.font_size = self.typography.font_size.clamp(12.0, 28.0);
+        self.typography.line_height = self.typography.line_height.clamp(1.1, 2.2);
+        self.preview_active = settings.preview_active;
+        self.preview_layout = settings.preview_layout;
+        self.view_while_typing = settings.view_while_typing;
+        self.hemingway_mode = settings.hemingway_mode;
+        self.focus_mode = settings.focus_mode;
+        self.toolbar_expanded = settings.toolbar_expanded;
+        self.stat_metric = settings.stat_metric;
+        self.selected_export_format = settings.selected_export_format;
+        self.export_syntax_highlight = settings.export_syntax_highlight;
+
+        if let Some(dir) = settings.last_opened_dir {
+            if dir.is_dir() {
+                self.file_dialog_dir = dir;
+            }
+        }
+
+        let existing_recents: Vec<PathBuf> = settings
+            .recent_files
+            .into_iter()
+            .filter(|p| p.exists())
+            .take(8)
+            .collect();
+        if !existing_recents.is_empty() {
+            self.recent_files = existing_recents;
+        }
+
+        if let Some(last_file) = settings.last_opened_file {
+            if last_file.is_file() {
+                if let Ok(content) = std::fs::read_to_string(&last_file) {
+                    let title = last_file
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("documento.md")
+                        .to_string();
+                    self.document_title = title.clone();
+                    self.file_dialog_input = title;
+                    if let Some(parent) = last_file.parent() {
+                        if parent.is_dir() && self.file_dialog_dir == std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")) {
+                            self.file_dialog_dir = parent.to_path_buf();
+                        }
+                    }
+                    self.current_file_path = Some(last_file);
+                    self.original_file_hash = Some(accent_storage::compute_content_hash(&content));
+                    self.buffer.set_text(&content);
+                    self.buffer.set_cursor(0);
+                }
+            }
+        }
+        self.update_default_export_path();
+        true
     }
 
     pub fn render_mermaid(&self, source: &str) -> Arc<RenderedMermaidDiagram> {
@@ -978,8 +1151,9 @@ impl Session {
         false
     }
 
-    /// Cleans up the recovery journal when the application closes normally without unsaved edits.
+    /// Cleans up the recovery journal and persists user settings when the application closes normally.
     pub fn on_clean_exit(&mut self) {
+        let _ = self.save_settings();
         if self.is_dirty {
             if self.journal_pending_flush {
                 let _ = self.flush_journal_now();
@@ -993,6 +1167,38 @@ impl Session {
     }
 
     pub fn apply(&mut self, action: Action) {
+        let prev_overlay = self.overlay;
+        let should_persist_settings = matches!(
+            action,
+            Action::SetTheme(_)
+                | Action::SetPalettePreset(_)
+                | Action::SetLocale(_)
+                | Action::SetDialect(_)
+                | Action::SetLineWidth(_)
+                | Action::SetProseFont(_)
+                | Action::SetCodeFont(_)
+                | Action::SetFontSize(_)
+                | Action::SetLineHeight(_)
+                | Action::SetPreviewLayout(_)
+                | Action::SetPreviewMode { .. }
+                | Action::SetEditorOnlyRaw
+                | Action::SetEditorLivePreview
+                | Action::SetStatMetric(_)
+                | Action::ToggleSplitPreview
+                | Action::ToggleViewWhileTyping
+                | Action::SetViewWhileTyping(_)
+                | Action::ToggleHemingway
+                | Action::ToggleFocusMode
+                | Action::ToggleToolbar
+                | Action::OpenFile(_)
+                | Action::SaveDocument
+                | Action::ConfirmRecoverySave
+                | Action::SaveAsFile(_)
+                | Action::SetFileDialogDir(_)
+                | Action::SelectExportFormat(_)
+                | Action::ToggleExportSyntaxHighlight
+                | Action::ExecuteExport
+        );
         match action {
             Action::SetTheme(theme) => self.theme = theme,
             Action::SetPalettePreset(preset) => self.palette_preset = preset,
@@ -1306,8 +1512,15 @@ impl Session {
                         .and_then(|n| n.to_str())
                         .unwrap_or("documento.md")
                         .to_string();
-                    self.document_title = title;
+                    self.document_title = title.clone();
+                    self.file_dialog_input = title;
+                    if let Some(parent) = path.parent() {
+                        if parent.is_dir() {
+                            self.file_dialog_dir = parent.to_path_buf();
+                        }
+                    }
                     self.current_file_path = Some(path.clone());
+                    self.update_default_export_path();
                     self.original_file_hash = Some(accent_storage::compute_content_hash(&text));
                     self.is_dirty = false;
                     self.journal_pending_flush = false;
@@ -1316,6 +1529,9 @@ impl Session {
                     self.chrome_autohidden = false;
                     self.recent_files.retain(|p| p != &path);
                     self.recent_files.insert(0, path.clone());
+                    if self.recent_files.len() > 8 {
+                        self.recent_files.truncate(8);
+                    }
                     self.status_message = Some(format!("Salvato come {}", path.display()));
                     self.overlay = ActiveOverlay::None;
                 }
@@ -1410,6 +1626,14 @@ impl Session {
                     self.last_edit_instant = Some(std::time::Instant::now());
                 }
             }
+        }
+
+        // Automatically persist user settings whenever a preference/directory/file changes
+        // OR when closing the Preferences dialog / settings overlays.
+        let closed_settings_overlay =
+            prev_overlay != ActiveOverlay::None && self.overlay != prev_overlay;
+        if should_persist_settings || closed_settings_overlay {
+            let _ = self.save_settings();
         }
     }
 
@@ -1648,6 +1872,70 @@ mod tests {
         assert!(std::fs::read_to_string(&doc_path)
             .expect("read saved file")
             .contains("Frase scritta prima del crash improvviso"));
+
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn test_persistent_settings_and_last_folder_across_restarts() {
+        let base_dir = std::env::temp_dir().join(format!(
+            "accent_settings_persist_test_{}_{}",
+            std::process::id(),
+            accent_storage::current_utc_ms()
+        ));
+        let recovery_dir = base_dir.join("recovery");
+        let config_path = base_dir.join("config").join("settings.json");
+        let docs_folder = base_dir.join("my_notes");
+        std::fs::create_dir_all(&docs_folder).expect("create docs_folder");
+        let note_path = docs_folder.join("appunti.md");
+        accent_storage::atomic_save(&note_path, "# Appunti Persistenti\n\nTesto salvato.\n")
+            .expect("write note_path");
+
+        {
+            let mut session =
+                Session::with_config_and_recovery(config_path.clone(), recovery_dir.clone());
+            // Open Preferences dialog, customize settings, open a file in docs_folder, and close Preferences
+            session.apply(Action::SetOverlay(ActiveOverlay::PreferencesDialog));
+            session.apply(Action::SetTheme(ThemeMode::Dark));
+            session.apply(Action::SetPalettePreset(ColorPalettePreset::NordicForest));
+            session.apply(Action::SetLocale(Locale::En));
+            session.apply(Action::SetDialect(MarkdownDialect::Glfm));
+            session.apply(Action::SetLineWidth(LineWidthMode::Wide));
+            session.apply(Action::SetProseFont("Literata".to_string()));
+            session.apply(Action::SetCodeFont("JetBrains Mono".to_string()));
+            session.apply(Action::SetFontSize(19.5));
+            session.apply(Action::SetLineHeight(1.65));
+            session.apply(Action::ToggleHemingway);
+            session.apply(Action::ToggleFocusMode);
+            session.apply(Action::SetStatMetric(StatMetric::ReadingTime));
+            // Close Preferences dialog -> triggers automatic save_settings()
+            session.apply(Action::SetOverlay(ActiveOverlay::None));
+            assert!(config_path.is_file());
+
+            // Open file inside docs_folder -> updates file_dialog_dir, recent_files, current_file_path
+            session.apply(Action::OpenFile(note_path.clone()));
+            assert_eq!(session.file_dialog_dir, docs_folder);
+        }
+
+        // Restart a fresh Session pointing to the same config_path and verify everything persisted
+        let restored = Session::with_config_and_recovery(config_path, recovery_dir);
+        assert_eq!(restored.theme, ThemeMode::Dark);
+        assert_eq!(restored.palette_preset, ColorPalettePreset::NordicForest);
+        assert_eq!(restored.locale, Locale::En);
+        assert_eq!(restored.dialect, MarkdownDialect::Glfm);
+        assert_eq!(restored.line_width, LineWidthMode::Wide);
+        assert_eq!(restored.typography.prose_font_family, "Literata");
+        assert_eq!(restored.typography.code_font_family, "JetBrains Mono");
+        assert!((restored.typography.font_size - 19.5).abs() < 1e-4);
+        assert!((restored.typography.line_height - 1.65).abs() < 1e-4);
+        assert!(restored.hemingway_mode);
+        assert!(restored.focus_mode);
+        assert_eq!(restored.stat_metric, StatMetric::ReadingTime);
+        assert_eq!(restored.file_dialog_dir, docs_folder);
+        assert_eq!(restored.current_file_path, Some(note_path.clone()));
+        assert_eq!(restored.document_title, "appunti.md");
+        assert!(restored.buffer.text().contains("Appunti Persistenti"));
+        assert!(restored.recent_files.contains(&note_path));
 
         let _ = std::fs::remove_dir_all(&base_dir);
     }

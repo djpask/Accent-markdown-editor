@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn test_version_system_consistency() {
-        assert_eq!(VERSION, "0.8.0");
+        assert_eq!(VERSION, "0.8.1");
         assert_eq!(accent_core::VERSION, VERSION);
         let version_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../VERSION");
         let file_ver = std::fs::read_to_string(version_file)

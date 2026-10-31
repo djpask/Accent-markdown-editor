@@ -93,7 +93,7 @@ pub fn journal_session_id_for_path(target_path: Option<&Path>) -> String {
     }
 }
 
-/// Resolves the recovery journal directory (`ACCENT_RECOVERY_DIR` if set, otherwise XDG/user state dir).
+/// Resolves the recovery journal directory (`ACCENT_RECOVERY_DIR` if set, otherwise XDG/Windows user state dir).
 pub fn default_recovery_dir() -> PathBuf {
     if let Ok(custom) = std::env::var("ACCENT_RECOVERY_DIR") {
         let trimmed = custom.trim();
@@ -107,6 +107,12 @@ pub fn default_recovery_dir() -> PathBuf {
             return PathBuf::from(trimmed).join("accent").join("recovery");
         }
     }
+    if let Ok(local_appdata) = std::env::var("LOCALAPPDATA") {
+        let trimmed = local_appdata.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed).join("Accent").join("recovery");
+        }
+    }
     if let Ok(home) = std::env::var("HOME") {
         let trimmed = home.trim();
         if !trimmed.is_empty() {
@@ -118,6 +124,42 @@ pub fn default_recovery_dir() -> PathBuf {
         }
     }
     std::env::temp_dir().join("accent-recovery")
+}
+
+/// Resolves the user settings configuration file path (`ACCENT_CONFIG_PATH` if set,
+/// otherwise `$XDG_CONFIG_HOME/accent/settings.json`, `~/.config/accent/settings.json`,
+/// or `%APPDATA%\Accent\settings.json` on Windows).
+pub fn default_config_path() -> PathBuf {
+    if let Ok(custom) = std::env::var("ACCENT_CONFIG_PATH") {
+        let trimmed = custom.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        let trimmed = xdg.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed).join("accent").join("settings.json");
+        }
+    }
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let trimmed = appdata.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed).join("Accent").join("settings.json");
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed)
+                .join(".config")
+                .join("accent")
+                .join("settings.json");
+        }
+    }
+    std::env::temp_dir()
+        .join("accent-config")
+        .join("settings.json")
 }
 
 /// Returns the journal file path inside `recovery_dir` for the given `target_path`.
