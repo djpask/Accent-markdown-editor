@@ -2,8 +2,8 @@ pub mod theme;
 
 use accent_core::{MarkdownDialect, PreviewBlock, PreviewInline};
 use accent_session::{
-    Action, ActiveOverlay, ExportFormat, FormatCommand, I18n, LineWidthMode, Locale,
-    PreviewLayout, Session, StatMetric, ThemeMode,
+    Action, ActiveOverlay, ColorPalettePreset, ExportFormat, FormatCommand, I18n, LineWidthMode,
+    Locale, PreviewLayout, Session, StatMetric, ThemeMode,
 };
 use egui::{
     epaint::StrokeKind, text::LayoutJob, Align2, Color32, Context, CornerRadius, FontId, Id,
@@ -73,7 +73,7 @@ pub fn render_ui(
     actions: &mut Vec<Action>,
     sync_cursor_to_widget: &mut bool,
 ) {
-    let pal = apply_theme(ctx, session.theme);
+    let pal = apply_theme(ctx, session.palette_preset, session.theme);
 
     // Wake up auto-hidden top/bottom bars when the mouse moves or a command key is pressed
     if session.chrome_autohidden {
@@ -353,7 +353,7 @@ pub fn render_ui(
             .with_title(format!("{} — Preview", session.document_title))
             .with_inner_size([720.0, 920.0]);
         ctx.show_viewport_immediate(vp_id, builder, |vp_ctx, _class| {
-            let vp_pal = apply_theme(vp_ctx, session.theme);
+            let vp_pal = apply_theme(vp_ctx, session.palette_preset, session.theme);
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(vp_pal.bg_preview))
                 .show(vp_ctx, |vp_ui| {
@@ -1252,6 +1252,7 @@ fn render_editor_pane(
     let view_while_typing = session.view_while_typing;
     let focus_mode = session.focus_mode;
     let theme_variant = session.theme;
+    let palette_preset = session.palette_preset;
     let prose_family = session.typography.prose_font_family.clone();
     let code_family = session.typography.code_font_family.clone();
     let selection_bytes = session.buffer.selection_byte_range();
@@ -1277,6 +1278,7 @@ fn render_editor_pane(
         focus_mode: bool,
         active_cursor_line: usize,
         theme_variant: ThemeMode,
+        palette_preset: ColorPalettePreset,
         wrap_w_bits: u32,
         font_size_bits: u32,
         line_step_bits: u32,
@@ -1303,6 +1305,7 @@ fn render_editor_pane(
             focus_mode,
             active_cursor_line,
             theme_variant,
+            palette_preset,
             wrap_w_bits: eff_wrap_w.to_bits(),
             font_size_bits: font_size.to_bits(),
             line_step_bits: line_step.to_bits(),
@@ -2909,17 +2912,20 @@ fn render_popovers(
                 pop_rect.left() + 172.0,
                 pop_rect.left() + 230.0,
             ];
+            let light_c = AccentPalette::for_preset(session.palette_preset, ThemeMode::Light).bg_canvas;
+            let sepia_c = AccentPalette::for_preset(session.palette_preset, ThemeMode::Sepia).bg_canvas;
+            let dark_c = AccentPalette::for_preset(session.palette_preset, ThemeMode::Dark).bg_canvas;
             let modes = [
-                (ThemeMode::Sepia, Color32::from_rgb(0xff, 0xff, 0xff)),
-                (ThemeMode::Light, Color32::from_rgb(0xff, 0xff, 0xff)),
-                (ThemeMode::Sepia, Color32::from_rgb(0xf9, 0xf3, 0xe9)),
-                (ThemeMode::Dark, Color32::from_rgb(0x2b, 0x2b, 0x2f)),
+                (ThemeMode::Sepia, light_c),
+                (ThemeMode::Light, light_c),
+                (ThemeMode::Sepia, sepia_c),
+                (ThemeMode::Dark, dark_c),
             ];
             for (idx, (&cx, &(mode, fill))) in xs.iter().zip(modes.iter()).enumerate() {
                 let center = Pos2::new(cx, circle_y);
                 painter.circle_filled(center, 21.0, fill);
                 if idx == 0 {
-                    painter.circle_filled(center, 20.0, Color32::from_rgb(0x2b, 0x2b, 0x2f));
+                    painter.circle_filled(center, 20.0, dark_c);
                     let left_half = Rect::from_min_max(
                         Pos2::new(center.x - 21.0, center.y - 21.0),
                         Pos2::new(center.x, center.y + 21.0),
@@ -2927,7 +2933,7 @@ fn render_popovers(
                     painter.with_clip_rect(left_half).circle_filled(
                         center,
                         20.0,
-                        Color32::from_rgb(0xff, 0xff, 0xff),
+                        light_c,
                     );
                 }
                 let is_selected = idx > 0 && session.theme == mode;
@@ -4087,7 +4093,7 @@ fn render_preferences_dialog(
     );
 
     let dlg_w = 760.0_f32;
-    let dlg_h = 540.0_f32;
+    let dlg_h = 610.0_f32;
     let dlg_rect = Rect::from_center_size(win_rect.center(), Vec2::new(dlg_w, dlg_h));
 
     // Soft drop shadow
@@ -4128,16 +4134,12 @@ fn render_preferences_dialog(
         actions.push(Action::SetOverlay(ActiveOverlay::None));
     }
 
-    // Inner grouped card container
+    // Inner grouped card container (7 rows)
     let card_rect = Rect::from_min_max(
-        Pos2::new(dlg_rect.left() + 34.0, dlg_rect.top() + 58.0),
-        Pos2::new(dlg_rect.right() - 34.0, dlg_rect.bottom() - 28.0),
+        Pos2::new(dlg_rect.left() + 34.0, dlg_rect.top() + 56.0),
+        Pos2::new(dlg_rect.right() - 34.0, dlg_rect.bottom() - 24.0),
     );
-    let card_fill = match session.theme {
-        ThemeMode::Light => Color32::from_rgb(0xfb, 0xfb, 0xfb),
-        ThemeMode::Sepia => Color32::from_rgb(0xfc, 0xf8, 0xf1),
-        ThemeMode::Dark => Color32::from_rgb(0x35, 0x35, 0x3a),
-    };
+    let card_fill = pal.bg_canvas;
     painter.rect_filled(card_rect, CornerRadius::same(12), card_fill);
     painter.rect_stroke(
         card_rect,
@@ -4146,8 +4148,8 @@ fn render_preferences_dialog(
         StrokeKind::Middle,
     );
 
-    let row_h = 75.0_f32;
-    for r in 1..6 {
+    let row_h = card_rect.height() / 7.0;
+    for r in 1..7 {
         let ry = card_rect.top() + (r as f32) * row_h;
         painter.line_segment(
             [
@@ -4608,5 +4610,93 @@ fn render_preferences_dialog(
             actions.push(Action::SetDialect(d));
         }
         dx += w_pill + 5.0;
+    }
+
+    // ------------------------------------------------------------------------
+    // Row 6: Ergonomic Color Palette Preset Selector (Editorial, Nordic, Rosé Pine, Classic)
+    // ------------------------------------------------------------------------
+    let r6_y = card_rect.top() + row_h * 6.5;
+    painter.text(
+        Pos2::new(left_x, r6_y - 9.0),
+        Align2::LEFT_CENTER,
+        I18n::tr(session.locale, "color_palette"),
+        font_ui_regular(14.0),
+        pal.fg_primary,
+    );
+    painter.text(
+        Pos2::new(left_x, r6_y + 11.0),
+        Align2::LEFT_CENTER,
+        I18n::tr(session.locale, "color_palette_sub"),
+        font_ui_regular(11.5),
+        pal.fg_muted,
+    );
+
+    let presets = [
+        (
+            ColorPalettePreset::EditorialSlate,
+            I18n::tr(session.locale, "palette_editorial"),
+            78.0_f32,
+        ),
+        (
+            ColorPalettePreset::NordicForest,
+            I18n::tr(session.locale, "palette_nordic"),
+            68.0_f32,
+        ),
+        (
+            ColorPalettePreset::VelvetDawn,
+            I18n::tr(session.locale, "palette_velvet"),
+            84.0_f32,
+        ),
+        (
+            ColorPalettePreset::Classic,
+            I18n::tr(session.locale, "palette_classic"),
+            74.0_f32,
+        ),
+    ];
+    let total_pal_w: f32 = presets.iter().map(|(_, _, w)| *w).sum::<f32>() + 15.0;
+    let mut ppx = right_x - total_pal_w;
+    for (idx, (preset, label, w_pill)) in presets.into_iter().enumerate() {
+        let active = session.palette_preset == preset;
+        let sample_pal = AccentPalette::for_preset(preset, session.theme);
+        let pill_r = Rect::from_min_max(
+            Pos2::new(ppx, r6_y - 14.0),
+            Pos2::new(ppx + w_pill, r6_y + 14.0),
+        );
+        painter.rect_filled(
+            pill_r,
+            CornerRadius::same(6),
+            if active {
+                pal.accent_orange
+            } else {
+                pal.bg_pill_button
+            },
+        );
+        // Mini color swatch dot showing the preset's accent color
+        let dot_pos = Pos2::new(pill_r.left() + 11.0, r6_y);
+        painter.circle_filled(
+            dot_pos,
+            4.5,
+            if active {
+                sample_pal.bg_canvas
+            } else {
+                sample_pal.accent_orange
+            },
+        );
+        painter.text(
+            Pos2::new(pill_r.center().x + 5.0, r6_y),
+            Align2::CENTER_CENTER,
+            label,
+            font_ui_bold(11.5),
+            if active {
+                Color32::WHITE
+            } else {
+                pal.fg_primary
+            },
+        );
+        let hit = ui.interact(pill_r, ui.id().with(("pref_palette", idx)), Sense::click());
+        if hit.clicked() {
+            actions.push(Action::SetPalettePreset(preset));
+        }
+        ppx += w_pill + 5.0;
     }
 }

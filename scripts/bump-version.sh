@@ -46,4 +46,9 @@ if [[ -f "$ROOT_DIR/packaging/windows/install-user.ps1" ]]; then
     sed -i -E "s/^\$AppVersion = \"[0-9]+\.[0-9]+\.[0-9]+\"/\$AppVersion = \"${SEMVER}\"/" "$ROOT_DIR/packaging/windows/install-user.ps1"
 fi
 
+# 6. Version consistency unit test in crates/accent-ui/src/lib.rs
+if [[ -f "$ROOT_DIR/crates/accent-ui/src/lib.rs" ]]; then
+    sed -i -E "s/assert_eq!\(VERSION, \"[0-9]+\.[0-9]+\.[0-9]+\"\);/assert_eq!(VERSION, \"${SEMVER}\");/" "$ROOT_DIR/crates/accent-ui/src/lib.rs"
+fi
+
 echo "==> Versione aggiornata con successo a ${SEMVER} in tutto il repository."

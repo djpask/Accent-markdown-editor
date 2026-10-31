@@ -198,7 +198,7 @@ pub fn run_app(opts: LaunchOptions) -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use accent_session::ThemeMode;
+    use accent_session::{ColorPalettePreset, ThemeMode};
 
     #[test]
     fn test_cli_args_parser() {
@@ -223,6 +223,41 @@ mod tests {
     }
 
     #[test]
+    fn test_ergonomic_palette_presets() {
+        let ed_light = ui::theme::AccentPalette::for_preset(
+            ColorPalettePreset::EditorialSlate,
+            ThemeMode::Light,
+        );
+        assert_eq!(ed_light.bg_canvas, egui::Color32::from_rgb(0xfa, 0xf9, 0xf5));
+        assert_eq!(ed_light.accent_orange, egui::Color32::from_rgb(0x2b, 0x6c, 0xb0));
+
+        let ed_sepia = ui::theme::AccentPalette::for_preset(
+            ColorPalettePreset::EditorialSlate,
+            ThemeMode::Sepia,
+        );
+        assert_eq!(ed_sepia.bg_canvas, egui::Color32::from_rgb(0xf4, 0xef, 0xe6));
+        assert_eq!(ed_sepia.accent_orange, egui::Color32::from_rgb(0x2c, 0x6e, 0x63));
+
+        let ed_dark = ui::theme::AccentPalette::for_preset(
+            ColorPalettePreset::EditorialSlate,
+            ThemeMode::Dark,
+        );
+        assert_eq!(ed_dark.bg_canvas, egui::Color32::from_rgb(0x19, 0x1c, 0x22));
+
+        let nordic_sepia = ui::theme::AccentPalette::for_preset(
+            ColorPalettePreset::NordicForest,
+            ThemeMode::Sepia,
+        );
+        assert_eq!(nordic_sepia.bg_canvas, egui::Color32::from_rgb(0xf3, 0xea, 0xd3));
+
+        let velvet_dark = ui::theme::AccentPalette::for_preset(
+            ColorPalettePreset::VelvetDawn,
+            ThemeMode::Dark,
+        );
+        assert_eq!(velvet_dark.bg_canvas, egui::Color32::from_rgb(0x1f, 0x1d, 0x29));
+    }
+
+    #[test]
     fn test_official_accent_logo_svg_and_png_generation() {
         let (w, h, _rgba, png_bytes) = accent_mermaid::rasterize_svg(OFFICIAL_ICON_SVG, 1.0)
             .expect("Failed to rasterize official Accent SVG icon");
@@ -244,7 +279,7 @@ mod tests {
 
     #[test]
     fn test_version_system_consistency() {
-        assert_eq!(VERSION, "0.7.0");
+        assert_eq!(VERSION, "0.8.0");
         assert_eq!(accent_core::VERSION, VERSION);
         let version_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../VERSION");
         let file_ver = std::fs::read_to_string(version_file)

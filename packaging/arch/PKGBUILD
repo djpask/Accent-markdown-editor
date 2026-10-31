@@ -1,6 +1,6 @@
 # Maintainer: Accent Developers
 pkgname=accent-markdown-editor
-pkgver=0.7.0
+pkgver=0.8.0
 pkgrel=1
 pkgdesc="Multiplatform distraction-free Markdown editor and viewer written in 100% pure Rust"
 arch=('x86_64')

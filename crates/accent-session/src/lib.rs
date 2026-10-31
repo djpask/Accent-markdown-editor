@@ -26,6 +26,19 @@ impl ThemeMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ColorPalettePreset {
+    /// Default: Editorial Paper & Slate (Alabaster Paper, Warm Book Paper, Midnight Slate)
+    #[default]
+    EditorialSlate,
+    /// Nordic Zen & Forest (Snow Mist, Everforest Warm, Nordic Night)
+    NordicForest,
+    /// Rosé Pine & Solarized Modern (Dawn Cream, Warm Sand, Velvet Dusk)
+    VelvetDawn,
+    /// Classic high-contrast palette
+    Classic,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Locale {
     En,
@@ -183,6 +196,30 @@ impl I18n {
             (Locale::It, "input_format_sub") => "Dialetto Markdown analizzato dall'AST nativo",
             (Locale::En, "input_format_sub") => "Markdown dialect parsed by the native AST",
             (Locale::Es, "input_format_sub") => "Dialecto Markdown analizado por el AST nativo",
+
+            (Locale::It, "color_palette") => "Palette cromatica",
+            (Locale::En, "color_palette") => "Color Palette",
+            (Locale::Es, "color_palette") => "Paleta de colores",
+
+            (Locale::It, "color_palette_sub") => "Tonalità ergonomiche per concentrazione e riposo visivo",
+            (Locale::En, "color_palette_sub") => "Ergonomic tones engineered for focus and eye comfort",
+            (Locale::Es, "color_palette_sub") => "Tonos ergonómicos para concentración y descanso visual",
+
+            (Locale::It, "palette_editorial") => "Editorial",
+            (Locale::En, "palette_editorial") => "Editorial",
+            (Locale::Es, "palette_editorial") => "Editorial",
+
+            (Locale::It, "palette_nordic") => "Nordic",
+            (Locale::En, "palette_nordic") => "Nordic",
+            (Locale::Es, "palette_nordic") => "Nordic",
+
+            (Locale::It, "palette_velvet") => "Rosé Pine",
+            (Locale::En, "palette_velvet") => "Rosé Pine",
+            (Locale::Es, "palette_velvet") => "Rosé Pine",
+
+            (Locale::It, "palette_classic") => "Classica",
+            (Locale::En, "palette_classic") => "Classic",
+            (Locale::Es, "palette_classic") => "Clásica",
 
             // Preview / Mode Popover (mutually exclusive & unambiguous)
             (Locale::It, "editor_modes_hdr") => "Modalità editor",
@@ -647,6 +684,7 @@ pub enum FormatCommand {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Action {
     SetTheme(ThemeMode),
+    SetPalettePreset(ColorPalettePreset),
     SetLocale(Locale),
     SetDialect(MarkdownDialect),
     SetLineWidth(LineWidthMode),
@@ -719,6 +757,7 @@ pub struct Session {
     pub status_message: Option<String>,
     pub buffer: DocumentBuffer,
     pub theme: ThemeMode,
+    pub palette_preset: ColorPalettePreset,
     pub locale: Locale,
     pub dialect: MarkdownDialect,
     pub line_width: LineWidthMode,
@@ -786,6 +825,7 @@ impl Session {
             status_message: None,
             buffer: default_buf,
             theme: ThemeMode::Sepia,
+            palette_preset: ColorPalettePreset::EditorialSlate,
             locale: Locale::It,
             dialect: MarkdownDialect::Gfm,
             line_width: LineWidthMode::Compact,
@@ -955,6 +995,7 @@ impl Session {
     pub fn apply(&mut self, action: Action) {
         match action {
             Action::SetTheme(theme) => self.theme = theme,
+            Action::SetPalettePreset(preset) => self.palette_preset = preset,
             Action::SetLocale(locale) => self.locale = locale,
             Action::SetDialect(dialect) => self.dialect = dialect,
             Action::SetLineWidth(lw) => self.line_width = lw,
