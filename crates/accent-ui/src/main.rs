@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use accent_ui::{parse_cli_args, run_app};
 
 fn main() -> eframe::Result {

@@ -6,4 +6,5 @@ license.workspace = true
 
 [dependencies]
 accent-core = { path = "../accent-core" }
+resvg.workspace = true
 serde.workspace = true

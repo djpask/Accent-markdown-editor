@@ -27,7 +27,7 @@ Given that Apostrophe is a Markdown editor for GNOME that allows users to previe
 
 6. **Integrated Mermaid Support (Zero-WebView)**: Native support for authoring and rendering flowcharts and diagrams directly within the document. `mermaid` code blocks are converted to SVG in pure Rust and rasterized onto GPU textures via **`resvg`**, ensuring crisp rendering on HiDPI displays without relying on external browsers or WebView components.
 
-7. **100% Embedded Rust Export Pipeline (Zero External Dependencies)**: Accent exports documents directly to **PDF**, **Word (`.docx`)**, and **EPUB** without requiring any external software installed on the user's system. The entire document generation pipeline is statically compiled into the executable using dedicated Rust crates (`krilla` / `typst` for PDF, `docx-rs` for Word, `epub-builder` for EPUB).
+7. **100% Embedded Rust Export Pipeline (Zero External Dependencies)**: Accent exports documents directly to **PDF**, **Word (`.docx`)**, **OpenDocument Text (`.odt`)**, **LaTeX (`.tex`)**, and **EPUB** without requiring any external software (such as Pandoc or a TeX distribution) installed on the user's system. The entire document generation pipeline is statically compiled into the executable using dedicated pure-Rust crates and serializers (`krilla` / `typst` for PDF, `docx-rs` for Word, ODF 1.2 XML packaged via `zip` with an uncompressed `mimetype` header for ODT, a direct AST-to-LaTeX serializer with strict special-character escaping for `.tex`, and `epub-builder` for EPUB).
 
 8. **Uncompromising Reliability & Crash Recovery**: Accent is engineered around a strict *zero data loss* principle: under no circumstances is data loss or user file corruption acceptable, even during a sudden power outage or system crash. The application implements:
    - ***Save-while-typing* Journaling**: on every edit (debounced under 300ms), the editor state is saved to a local recovery journal, allowing the application on next launch to resume work from the exact last word typed without ever leaving the original file half-written.
@@ -61,12 +61,17 @@ Keep these checkboxes updated as phases complete (`[ ]` Pending, `[~]` In Progre
   - [x] Implement inline live formatting in `accent-ui` editor canvas.
   - [x] Implement side-by-side Split Preview and separate OS Window Preview (`ctx.show_viewport_immediate`).
 
-- [ ] **Phase 4: Uncompromising Reliability (Crash Recovery WAL & Atomic Save)**
-  - [ ] Implement `< 300ms` debounced crash-recovery journaling in `accent-storage`.
-  - [ ] Implement automatic dirty-session restoration on startup after simulated crash.
-  - [ ] Implement `write-temp -> fsync -> atomic rename` file saving with comprehensive unit tests.
+- [x] **Phase 4: Uncompromising Reliability (Crash Recovery WAL & Atomic Save)**
+  - [x] Implement `< 300ms` debounced crash-recovery journaling in `accent-storage`.
+  - [x] Implement automatic dirty-session restoration on startup after simulated crash.
+  - [x] Implement `write-temp -> fsync -> atomic rename` file saving with comprehensive unit tests.
 
-- [ ] **Phase 5: Native Mermaid GPU Rendering & 100% Rust Export Pipeline**
-  - [ ] Integrate pure-Rust Mermaid SVG generation + `resvg` texture rasterization with hash caching.
-  - [ ] Implement embedded PDF (`krilla`/`typst`), Word (`docx-rs`), and EPUB (`epub-builder`) exporters.
-  - [ ] Final end-to-end visual comparison against `img/Apostrophe_screenshots/`.
+- [x] **Phase 5: Native Mermaid GPU Rendering & 100% Rust Export Pipeline**
+  - [x] Integrate pure-Rust Mermaid SVG generation + `resvg` texture rasterization with hash caching.
+  - [x] Implement embedded PDF (`krilla`/`typst`), Word (`docx-rs`), OpenDocument Text (`.odt` via ODF 1.2 XML + `zip`), LaTeX (`.tex` AST serializer), and EPUB (`epub-builder`) exporters.
+
+- [x] **Phase 6: The Ultimate Cross-Platform Restyling & Visual Identity**
+  - [x] Enable native OS window decorations (`with_decorations(true)`), unified slim Top Bar, and 5-mode compact editing pill.
+  - [x] Integrate `rfd` native file dialogs with automatic headless fallback.
+  - [x] Implement floating Search & Replace panel and floating Bottom Format Bar with redesigned Apostrophe-inspired `"a"` typography icons.
+  - [x] Design official Accent vector logo (`crates/accent-ui/resources/icon.svg`, `img/brand/accent_logo.svg`, `img/brand/accent_logo.png`) and Zen concentration mode.

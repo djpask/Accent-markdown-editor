@@ -6,5 +6,8 @@ license.workspace = true
 
 [dependencies]
 accent-core = { path = "../accent-core" }
+accent-mermaid = { path = "../accent-mermaid" }
+docx-rs.workspace = true
 pulldown-cmark.workspace = true
 serde.workspace = true
+zip.workspace = true

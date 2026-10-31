@@ -1,38 +1,18 @@
 pub mod ui;
 
-use accent_session::{
-    Action, ActiveOverlay, LineWidthMode, Locale, MarkdownDialect, PreviewLayout, Session,
-    ThemeMode,
-};
+use accent_session::{Action, Session};
 use eframe::egui;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Default)]
 pub struct LaunchOptions {
-    pub theme: Option<ThemeMode>,
-    pub locale: Option<Locale>,
-    pub dialect: Option<MarkdownDialect>,
-    pub line_width: Option<LineWidthMode>,
-    pub prose_font: Option<String>,
-    pub code_font: Option<String>,
-    pub font_size: Option<f32>,
-    pub line_height: Option<f32>,
-    pub overlay: Option<ActiveOverlay>,
-    pub preview_layout: Option<PreviewLayout>,
-    pub view_while_typing: Option<bool>,
-    pub cursor_offset: Option<usize>,
-    pub insert_text: Option<String>,
-    pub focus_mode: bool,
-    pub hemingway_mode: bool,
     pub file_path: Option<PathBuf>,
-    pub shot_path: Option<PathBuf>,
 }
 
 pub struct AccentApp {
     pub session: Session,
-    shot_path: Option<PathBuf>,
     frame_count: u32,
-    shot_requested: bool,
     sync_cursor_to_widget: bool,
 }
 
@@ -44,60 +24,10 @@ impl AccentApp {
         if let Some(fp) = opts.file_path {
             session.apply(Action::OpenFile(fp));
         }
-        if let Some(t) = opts.theme {
-            session.apply(Action::SetTheme(t));
-        }
-        if let Some(l) = opts.locale {
-            session.apply(Action::SetLocale(l));
-        }
-        if let Some(d) = opts.dialect {
-            session.apply(Action::SetDialect(d));
-        }
-        if let Some(lw) = opts.line_width {
-            session.apply(Action::SetLineWidth(lw));
-        }
-        if let Some(pf) = opts.prose_font {
-            session.apply(Action::SetProseFont(pf));
-        }
-        if let Some(cf) = opts.code_font {
-            session.apply(Action::SetCodeFont(cf));
-        }
-        if let Some(fs) = opts.font_size {
-            session.apply(Action::SetFontSize(fs));
-        }
-        if let Some(lh) = opts.line_height {
-            session.apply(Action::SetLineHeight(lh));
-        }
-        if let Some(layout) = opts.preview_layout {
-            session.apply(Action::SetPreviewMode {
-                active: true,
-                layout,
-            });
-        }
-        if let Some(vwt) = opts.view_while_typing {
-            session.apply(Action::SetViewWhileTyping(vwt));
-        }
-        if let Some(cur) = opts.cursor_offset {
-            session.apply(Action::MoveCursor(cur));
-        }
-        if let Some(txt) = opts.insert_text {
-            session.apply(Action::InsertText(txt));
-        }
-        if let Some(o) = opts.overlay {
-            session.apply(Action::SetOverlay(o));
-        }
-        if opts.focus_mode {
-            session.apply(Action::ToggleFocusMode);
-        }
-        if opts.hemingway_mode {
-            session.apply(Action::ToggleHemingway);
-        }
 
         Self {
             session,
-            shot_path: opts.shot_path,
             frame_count: 0,
-            shot_requested: false,
             sync_cursor_to_widget: true,
         }
     }
@@ -107,27 +37,10 @@ impl eframe::App for AccentApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.frame_count += 1;
 
-        // Handle incoming screenshot event if --shot was requested
-        let events = ctx.input(|i| i.raw.events.clone());
-        for event in events {
-            if let egui::Event::Screenshot { image, .. } = event {
-                if let Some(path) = &self.shot_path {
-                    if let Some(parent) = path.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    let pixels = image.as_raw();
-                    let w = image.width() as u32;
-                    let h = image.height() as u32;
-                    let _ = image::save_buffer(path, pixels, w, h, image::ColorType::Rgba8);
-                }
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                return;
-            }
-        }
-
         // Borrow-Checker Rule (AGENTS.md Section 3):
         // Treat Session as read-only during UI rendering, collect Actions into a frame-local Vec,
         // and drain/apply all actions at the end of update().
+        let atlas_before = ctx.fonts(|f| f.font_image_size());
         let mut actions = Vec::new();
         ui::render_ui(
             ctx,
@@ -135,6 +48,7 @@ impl eframe::App for AccentApp {
             &mut actions,
             &mut self.sync_cursor_to_widget,
         );
+        let atlas_after = ctx.fonts(|f| f.font_image_size());
         let had_actions = !actions.is_empty();
         for action in actions {
             if matches!(
@@ -144,6 +58,8 @@ impl eframe::App for AccentApp {
                     | Action::NewDocument
                     | Action::OpenFile(_)
                     | Action::OpenTutorial
+                    | Action::ConfirmRecoverySave
+                    | Action::DiscardRecovery
                     | Action::FindNext
                     | Action::FindPrev
                     | Action::InsertText(_)
@@ -153,119 +69,99 @@ impl eframe::App for AccentApp {
             }
             self.session.apply(action);
         }
-        if had_actions {
-            ctx.request_repaint();
+
+        // Phase 4: Poll < 300ms debounced Write-Ahead Recovery Journal (WAL) flush
+        let now = Instant::now();
+        let _ = self.session.poll_journal_flush(now);
+        if let Some(wait) = self.session.time_until_next_journal_flush(now) {
+            ctx.request_repaint_after(
+                wait.max(Duration::from_millis(16))
+                    .min(Duration::from_millis(250)),
+            );
         }
 
-        if self.shot_path.is_some() {
-            if self.frame_count >= 2 && !self.shot_requested {
-                self.shot_requested = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
-            }
+        if had_actions || atlas_before != atlas_after || self.frame_count <= 3 {
             ctx.request_repaint();
         }
+    }
+
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 0.0]
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.session.on_clean_exit();
     }
 }
 
 pub fn parse_cli_args(args: &[String]) -> LaunchOptions {
     let mut opts = LaunchOptions::default();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--shot" if i + 1 < args.len() => {
-                opts.shot_path = Some(PathBuf::from(&args[i + 1]));
-                i += 2;
-            }
-            "--theme" if i + 1 < args.len() => {
-                opts.theme = ThemeMode::from_str_name(&args[i + 1]);
-                i += 2;
-            }
-            "--locale" if i + 1 < args.len() => {
-                opts.locale = Locale::from_code(&args[i + 1]);
-                i += 2;
-            }
-            "--dialect" if i + 1 < args.len() => {
-                opts.dialect = MarkdownDialect::from_str_name(&args[i + 1]);
-                i += 2;
-            }
-            "--width" if i + 1 < args.len() => {
-                opts.line_width = LineWidthMode::from_str_name(&args[i + 1]);
-                i += 2;
-            }
-            "--prose-font" if i + 1 < args.len() => {
-                opts.prose_font = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--code-font" if i + 1 < args.len() => {
-                opts.code_font = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--font-size" if i + 1 < args.len() => {
-                opts.font_size = args[i + 1].parse().ok();
-                i += 2;
-            }
-            "--line-height" if i + 1 < args.len() => {
-                opts.line_height = args[i + 1].parse().ok();
-                i += 2;
-            }
-            "--preview" if i + 1 < args.len() => {
-                opts.preview_layout = PreviewLayout::from_str_name(&args[i + 1]);
-                i += 2;
-            }
-            "--live" | "--view-while-typing" => {
-                opts.view_while_typing = Some(true);
-                i += 1;
-            }
-            "--cursor" if i + 1 < args.len() => {
-                opts.cursor_offset = args[i + 1].parse().ok();
-                i += 2;
-            }
-            "--insert" if i + 1 < args.len() => {
-                opts.insert_text = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--overlay" if i + 1 < args.len() => {
-                opts.overlay = match args[i + 1].to_ascii_lowercase().as_str() {
-                    "open" => Some(ActiveOverlay::OpenMenu),
-                    "save" => Some(ActiveOverlay::SaveMenu),
-                    "preview" => Some(ActiveOverlay::PreviewMenu),
-                    "main" => Some(ActiveOverlay::MainMenu),
-                    "stats" => Some(ActiveOverlay::StatsMenu),
-                    "width" | "linewidth" => Some(ActiveOverlay::LineWidthMenu),
-                    "prefs" | "preferences" => Some(ActiveOverlay::PreferencesDialog),
-                    _ => Some(ActiveOverlay::None),
-                };
-                i += 2;
-            }
-            "--focus" => {
-                opts.focus_mode = true;
-                i += 1;
-            }
-            "--hemingway" => {
-                opts.hemingway_mode = true;
-                i += 1;
-            }
-            "--file" if i + 1 < args.len() => {
-                opts.file_path = Some(PathBuf::from(&args[i + 1]));
-                i += 2;
-            }
-            arg if !arg.starts_with('-') && opts.file_path.is_none() => {
-                opts.file_path = Some(PathBuf::from(arg));
-                i += 1;
-            }
-            _ => {
-                i += 1;
-            }
+    for arg in args {
+        if !arg.starts_with('-') && opts.file_path.is_none() {
+            opts.file_path = Some(PathBuf::from(arg));
         }
     }
     opts
 }
 
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const OFFICIAL_ICON_SVG: &str = include_str!("../resources/icon.svg");
+
+pub fn load_app_icon() -> Option<egui::IconData> {
+    let (width, height, rgba, _png) = accent_mermaid::rasterize_svg(OFFICIAL_ICON_SVG, 0.25)?;
+    Some(egui::IconData {
+        rgba,
+        width,
+        height,
+    })
+}
+
+/// Generates a multi-resolution Windows `.ico` file (`256x256`, `64x64`, `32x32`, `16x16` PNG frames)
+/// directly from the official Accent SVG logo.
+pub fn generate_windows_ico() -> Option<Vec<u8>> {
+    let scales = [
+        (0u8, 0.5_f32),     // 256x256 (0 in ICONDIRENTRY means 256px)
+        (64u8, 0.125_f32),  // 64x64
+        (32u8, 0.0625_f32), // 32x32
+        (16u8, 0.03125_f32), // 16x16
+    ];
+    let mut png_frames = Vec::with_capacity(scales.len());
+    for (dim_byte, scale) in scales {
+        let (_w, _h, _rgba, png_bytes) = accent_mermaid::rasterize_svg(OFFICIAL_ICON_SVG, scale)?;
+        png_frames.push((dim_byte, png_bytes));
+    }
+
+    let count = png_frames.len() as u16;
+    let mut ico = Vec::new();
+    // ICONDIR header (6 bytes)
+    ico.extend_from_slice(&0u16.to_le_bytes()); // idReserved = 0
+    ico.extend_from_slice(&1u16.to_le_bytes()); // idType = 1 (ICO)
+    ico.extend_from_slice(&count.to_le_bytes()); // idCount
+
+    let mut data_offset: u32 = 6 + (16 * png_frames.len() as u32);
+    for (dim_byte, png_bytes) in &png_frames {
+        let size = png_bytes.len() as u32;
+        ico.push(*dim_byte); // bWidth
+        ico.push(*dim_byte); // bHeight
+        ico.push(0); // bColorCount
+        ico.push(0); // bReserved
+        ico.extend_from_slice(&1u16.to_le_bytes()); // wPlanes = 1
+        ico.extend_from_slice(&32u16.to_le_bytes()); // wBitCount = 32
+        ico.extend_from_slice(&size.to_le_bytes()); // dwBytesInRes
+        ico.extend_from_slice(&data_offset.to_le_bytes()); // dwImageOffset
+        data_offset += size;
+    }
+
+    for (_dim_byte, png_bytes) in png_frames {
+        ico.extend_from_slice(&png_bytes);
+    }
+    Some(ico)
+}
+
 pub fn run_app(opts: LaunchOptions) -> eframe::Result {
-    // If DISPLAY=:99 is requested or running headless/screenshot mode, force X11 on :99 with software GL
+    // If DISPLAY=:99 is requested or running headless, force X11 on :99 with software GL
     let want_xvfb_99 = std::env::var("DISPLAY").as_deref() == Ok(":99")
-        || (std::env::var("DISPLAY").is_err() && std::env::var("WAYLAND_DISPLAY").is_err())
-        || opts.shot_path.is_some();
+        || (std::env::var("DISPLAY").is_err() && std::env::var("WAYLAND_DISPLAY").is_err());
     if want_xvfb_99 && std::path::Path::new("/tmp/.X11-unix/X99").exists() {
         unsafe {
             std::env::set_var("DISPLAY", ":99");
@@ -275,12 +171,18 @@ pub fn run_app(opts: LaunchOptions) -> eframe::Result {
         }
     }
 
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Accent")
+        .with_inner_size([1200.0, 1100.0])
+        .with_min_inner_size([600.0, 400.0])
+        .with_decorations(false)
+        .with_transparent(true);
+    if let Some(icon) = load_app_icon() {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon));
+    }
+
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Accent")
-            .with_inner_size([1200.0, 1100.0])
-            .with_min_inner_size([600.0, 400.0])
-            .with_decorations(false),
+        viewport,
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
@@ -295,41 +197,13 @@ pub fn run_app(opts: LaunchOptions) -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use accent_session::ThemeMode;
 
     #[test]
     fn test_cli_args_parser() {
-        let args = vec![
-            "--theme".to_string(),
-            "dark".to_string(),
-            "--locale".to_string(),
-            "en".to_string(),
-            "--dialect".to_string(),
-            "glfm".to_string(),
-            "--width".to_string(),
-            "wide".to_string(),
-            "--preview".to_string(),
-            "halfwidth".to_string(),
-            "--live".to_string(),
-            "--cursor".to_string(),
-            "375".to_string(),
-            "--overlay".to_string(),
-            "preview".to_string(),
-            "--shot".to_string(),
-            "img/Accent_screenshots/accent_shot.png".to_string(),
-        ];
+        let args = vec!["doc/esempio_accent.md".to_string()];
         let opts = parse_cli_args(&args);
-        assert_eq!(opts.theme, Some(ThemeMode::Dark));
-        assert_eq!(opts.locale, Some(Locale::En));
-        assert_eq!(opts.dialect, Some(MarkdownDialect::Glfm));
-        assert_eq!(opts.line_width, Some(LineWidthMode::Wide));
-        assert_eq!(opts.preview_layout, Some(PreviewLayout::HalfWidth));
-        assert_eq!(opts.view_while_typing, Some(true));
-        assert_eq!(opts.cursor_offset, Some(375));
-        assert_eq!(opts.overlay, Some(ActiveOverlay::PreviewMenu));
-        assert_eq!(
-            opts.shot_path,
-            Some(PathBuf::from("img/Accent_screenshots/accent_shot.png"))
-        );
+        assert_eq!(opts.file_path, Some(PathBuf::from("doc/esempio_accent.md")));
     }
 
     #[test]
@@ -345,5 +219,35 @@ mod tests {
         let dark = ui::theme::AccentPalette::for_mode(ThemeMode::Dark);
         assert_eq!(dark.bg_canvas, egui::Color32::from_rgb(0x2b, 0x2b, 0x2f));
         assert_eq!(dark.fg_primary, egui::Color32::from_rgb(0xee, 0xee, 0xee));
+    }
+
+    #[test]
+    fn test_official_accent_logo_svg_and_png_generation() {
+        let (w, h, _rgba, png_bytes) = accent_mermaid::rasterize_svg(OFFICIAL_ICON_SVG, 1.0)
+            .expect("Failed to rasterize official Accent SVG icon");
+        assert_eq!(w, 512);
+        assert_eq!(h, 512);
+        assert!(png_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(png_bytes.len() > 10_000);
+
+        let brand_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../img/brand");
+        let _ = std::fs::create_dir_all(&brand_dir);
+        std::fs::write(brand_dir.join("accent_logo.png"), &png_bytes)
+            .expect("Failed to write img/brand/accent_logo.png");
+
+        let ico_bytes = generate_windows_ico().expect("Failed to generate Windows .ico");
+        assert!(&ico_bytes[0..4] == &[0x00, 0x00, 0x01, 0x00]);
+        std::fs::write(brand_dir.join("accent_logo.ico"), &ico_bytes)
+            .expect("Failed to write img/brand/accent_logo.ico");
+    }
+
+    #[test]
+    fn test_version_system_consistency() {
+        assert_eq!(VERSION, "0.7.0");
+        assert_eq!(accent_core::VERSION, VERSION);
+        let version_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../VERSION");
+        let file_ver = std::fs::read_to_string(version_file)
+            .expect("Failed to read root VERSION file");
+        assert_eq!(file_ver.trim(), VERSION);
     }
 }

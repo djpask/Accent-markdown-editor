@@ -6,6 +6,9 @@ use std::cell::RefCell;
 use std::ops::Range;
 use std::sync::Arc;
 
+/// Canonical version of Accent synchronized across the Cargo workspace.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Default sample document showcasing Accent's multi-dialect Markdown capabilities.
 pub const DEFAULT_SAMPLE_MARKDOWN: &str = "\
 # Guida ed Esempi di Accent
@@ -297,6 +300,8 @@ pub struct EditorTextSegment {
     pub link: bool,
     /// True when Caret-Aware *View-while-typing* collapses this syntax delimiter (`font_size = 0.01`, transparent).
     pub collapsed_delimiter: bool,
+    /// True when this segment is a body line inside a collapsed `mermaid` code block in *View-while-typing* mode.
+    pub mermaid_collapsed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -570,7 +575,10 @@ impl DocumentBuffer {
         }
         let start = self.line_col_1based_to_byte(sp.start);
         let end_inclusive = self.line_col_1based_to_byte(sp.end);
-        let end = (end_inclusive + 1).min(self.rope.len_bytes());
+        let mut end = (end_inclusive + 1).min(self.rope.len_bytes());
+        while end < self.rope.len_bytes() && !self.as_str().is_char_boundary(end) {
+            end += 1;
+        }
         if start <= end {
             start..end
         } else {
@@ -1269,8 +1277,14 @@ impl DocumentBuffer {
                     .delimiter_byte_ranges
                     .iter()
                     .any(|dr| dr.start == line_start && dr.end == content_end);
-                let fence_collapsed =
-                    is_fence_delim && cb_ls.visibility == DelimiterVisibility::Collapsed;
+                let is_mermaid_block = matches!(
+                    &cb_ls.span.kind,
+                    AstSpanKind::CodeBlock { info, .. }
+                        if info.trim().to_ascii_lowercase().starts_with("mermaid")
+                );
+                let is_cb_collapsed = cb_ls.visibility == DelimiterVisibility::Collapsed;
+                let fence_collapsed = is_fence_delim && is_cb_collapsed;
+                let mermaid_body_collapsed = !is_fence_delim && is_mermaid_block && is_cb_collapsed;
                 out.push(EditorTextSegment {
                     text: text[line_start..content_end].to_string(),
                     byte_range: line_start..content_end,
@@ -1279,7 +1293,8 @@ impl DocumentBuffer {
                     code_block: true,
                     code_inline: true,
                     muted: is_fence_delim,
-                    collapsed_delimiter: fence_collapsed,
+                    collapsed_delimiter: fence_collapsed || mermaid_body_collapsed,
+                    mermaid_collapsed: mermaid_body_collapsed,
                     ..Default::default()
                 });
                 if content_end < full_line_end {
@@ -1289,7 +1304,8 @@ impl DocumentBuffer {
                         is_line_start: false,
                         line_index: line_idx,
                         code_block: true,
-                        collapsed_delimiter: fence_collapsed,
+                        collapsed_delimiter: fence_collapsed || mermaid_body_collapsed,
+                        mermaid_collapsed: mermaid_body_collapsed,
                         ..Default::default()
                     });
                 }
@@ -2032,6 +2048,21 @@ impl DocumentBuffer {
                     link_url,
                 });
             }
+            NodeValue::Math(m) => {
+                let formatted = if m.display_math {
+                    format!("$${}$$", m.literal)
+                } else {
+                    format!("${}$", m.literal)
+                };
+                out.push(PreviewInline {
+                    text: formatted,
+                    bold,
+                    italic: true,
+                    strikethrough,
+                    code: true,
+                    link_url,
+                });
+            }
             NodeValue::HtmlInline(raw) => {
                 out.push(PreviewInline {
                     text: raw.clone(),
@@ -2431,6 +2462,64 @@ let x = 42;
                 2,
                 "First table must have exactly 2 data rows (#101 and #102), not absorb trailing paragraphs"
             );
+        }
+    }
+
+    #[test]
+    fn test_utf8_multibyte_char_to_byte_caret_expansion_inclusive_boundaries() {
+        let doc = "Città perché — **parola** fine";
+        let mut buf = DocumentBuffer::from_str_content(doc);
+
+        // Locate the `Strong` span for `**parola**`
+        let spans = buf.extract_ast_spans(MarkdownDialect::Gfm);
+        let strong_span = spans
+            .iter()
+            .find(|s| matches!(s.kind, AstSpanKind::Strong))
+            .expect("Strong span for **parola** should exist");
+
+        assert_eq!(&doc[strong_span.byte_range.clone()], "**parola**");
+        let start_char = strong_span.char_range.start;
+        let end_char = strong_span.char_range.end;
+        // Verify that multi-byte UTF-8 chars ('à', 'é', '—') before `**parola**` cause byte_range != char_range
+        assert!(
+            strong_span.byte_range.start > start_char,
+            "Multi-byte UTF-8 characters before **parola** must make byte_range.start > char_range.start"
+        );
+
+        // Every single char position from the first `*` (start_char) through the position immediately
+        // after the last `*` (end_char) INCLUSIVE must expand `**parola**` when converted via char_to_byte!
+        for char_pos in 0..=buf.len_chars() {
+            buf.set_cursor(char_pos);
+            let caret_bytes = buf.selection_byte_range();
+            let live = buf.compute_live_spans(MarkdownDialect::Gfm, true, caret_bytes.clone());
+            let strong_live = live
+                .iter()
+                .find(|ls| matches!(ls.span.kind, AstSpanKind::Strong))
+                .expect("LiveSpan for Strong should exist");
+            let segs = buf.build_editor_segments(MarkdownDialect::Gfm, true, caret_bytes);
+            let any_collapsed = segs.iter().any(|s| s.collapsed_delimiter);
+
+            if (start_char..=end_char).contains(&char_pos) {
+                assert_eq!(
+                    strong_live.visibility,
+                    DelimiterVisibility::Expanded,
+                    "Expected Expanded at char_pos={char_pos} (within {start_char}..={end_char})"
+                );
+                assert!(
+                    !any_collapsed,
+                    "Expected no collapsed delimiters in segments at char_pos={char_pos}"
+                );
+            } else {
+                assert_eq!(
+                    strong_live.visibility,
+                    DelimiterVisibility::Collapsed,
+                    "Expected Collapsed at char_pos={char_pos} (outside {start_char}..={end_char})"
+                );
+                assert!(
+                    any_collapsed,
+                    "Expected collapsed `**` delimiters in segments at char_pos={char_pos}"
+                );
+            }
         }
     }
 }

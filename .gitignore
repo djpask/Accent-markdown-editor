@@ -1,6 +1,11 @@
 img/Apostrophe_screenshots/
 img/
+!img/brand/
 target/
+packaging/arch/pkg/
+packaging/arch/src/
+packaging/windows/dist/
+
 
 packaging/arch/pkg/
 packaging/arch/src/
