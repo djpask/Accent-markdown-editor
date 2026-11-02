@@ -14,8 +14,8 @@ use std::sync::Arc;
 use theme::{
     apply_theme, draw_chevron_down, draw_chevron_left, draw_chevron_up, draw_hamburger_icon,
     draw_new_doc_icon, draw_search_icon, draw_toolbar_icon, draw_view_mode_icon,
-    draw_window_button, font_editor_regular, font_ui_bold, font_ui_regular, resolve_code_font,
-    resolve_prose_font, AccentPalette,
+    draw_window_button, font_editor_italic, font_editor_regular, font_ui_bold, font_ui_regular,
+    resolve_code_font, resolve_prose_font, AccentPalette,
 };
 
 fn trigger_open_file_dialog(session: &Session, actions: &mut Vec<Action>) {
@@ -1389,36 +1389,78 @@ fn render_editor_pane(
                 resolve_prose_font(&prose_family, eff_font_size, seg.bold, seg.italic)
             };
 
-            let fg_base = if focus_mode && seg.line_index != active_cursor_line {
+            let color = if focus_mode && seg.line_index != active_cursor_line {
                 pal_copy.fg_focus_dimmed
-            } else if seg.heading_level.is_some() && view_while_typing {
-                pal_copy.fg_heading
+            } else if seg.is_heading_hashes {
+                let h_col = match seg.heading_level {
+                    Some(1 | 2) => pal_copy.fg_heading,
+                    _ => pal_copy.fg_subheading,
+                };
+                h_col.gamma_multiply(0.72)
+            } else if let Some(lvl) = seg.heading_level {
+                if seg.code_inline {
+                    pal_copy.markup_code_fg
+                } else if seg.link {
+                    pal_copy.accent_link
+                } else if lvl <= 2 {
+                    pal_copy.fg_heading
+                } else {
+                    pal_copy.fg_subheading
+                }
+            } else if seg.code_block {
+                if seg.code_comment {
+                    pal_copy.fg_muted
+                } else if seg.muted {
+                    pal_copy.markup_codeblock_fg.gamma_multiply(0.82)
+                } else {
+                    pal_copy.markup_codeblock_fg
+                }
+            } else if seg.code_inline {
+                if seg.muted {
+                    pal_copy.markup_code_fg.gamma_multiply(0.65)
+                } else {
+                    pal_copy.markup_code_fg
+                }
+            } else if seg.list_marker {
+                match seg.task_checked {
+                    Some(true) => pal_copy.markup_task_done,
+                    Some(false) => pal_copy.fg_muted,
+                    None => pal_copy.markup_list_marker,
+                }
+            } else if seg.table_pipe {
+                pal_copy.markup_list_marker
+            } else if seg.table_header_cell {
+                pal_copy.markup_emphasis_fg
+            } else if seg.link {
+                pal_copy.accent_link
+            } else if seg.link_url_part {
+                pal_copy.markup_link_url
+            } else if seg.bold || seg.italic {
+                if seg.muted {
+                    pal_copy.markup_emphasis_fg.gamma_multiply(0.68)
+                } else {
+                    pal_copy.markup_emphasis_fg
+                }
+            } else if seg.blockquote {
+                if seg.muted {
+                    pal_copy.markup_quote_bar
+                } else {
+                    pal_copy.markup_quote_fg
+                }
+            } else if seg.muted {
+                pal_copy.fg_muted
             } else {
                 pal_copy.fg_primary
             };
 
-            let color = if seg.muted {
-                pal_copy.fg_muted
-            } else if seg.link && view_while_typing {
-                pal_copy.accent_link
-            } else {
-                fg_base
-            };
-
-            let background = if seg.code_inline && !seg.code_block && view_while_typing && !seg.muted
-            {
-                pal_copy.bg_code_block
-            } else {
-                Color32::TRANSPARENT
-            };
+            let background = Color32::TRANSPARENT;
 
             let strikethrough = if seg.strikethrough && !seg.collapsed_delimiter {
                 Stroke::new(1.3, color)
             } else {
                 Stroke::NONE
             };
-            let underline = if seg.link && view_while_typing && !seg.collapsed_delimiter && !seg.muted
-            {
+            let underline = if seg.link && !seg.collapsed_delimiter && !seg.muted {
                 Stroke::new(1.0, pal_copy.accent_link)
             } else {
                 Stroke::NONE
@@ -1608,8 +1650,50 @@ fn render_editor_pane(
                             let rule_y = output.galley_pos.y + r_bot.max.y + 1.5;
                             scroll_painter.line_segment(
                                 [Pos2::new(x_body, rule_y), Pos2::new(x_right, rule_y)],
-                                Stroke::new(1.0, pal.border_headerbar),
+                                Stroke::new(1.2, pal.fg_heading.gamma_multiply(0.38)),
                             );
+                        }
+                        accent_core::AstSpanKind::CodeInline => {
+                            let c_start = if is_collapsed && ls.span.char_range.len() > 2 {
+                                ls.span.char_range.start + 1
+                            } else {
+                                ls.span.char_range.start
+                            };
+                            let c_end = if is_collapsed && ls.span.char_range.len() > 2 {
+                                ls.span.char_range.end.saturating_sub(1)
+                            } else {
+                                ls.span.char_range.end
+                            };
+                            if c_start < c_end {
+                                let r_start = output
+                                    .galley
+                                    .pos_from_ccursor(egui::text::CCursor::new(c_start));
+                                let r_end = output
+                                    .galley
+                                    .pos_from_ccursor(egui::text::CCursor::new(c_end));
+                                if (r_start.min.y - r_end.min.y).abs() < 4.0
+                                    && r_end.min.x > r_start.min.x
+                                {
+                                    let cy =
+                                        output.galley_pos.y + row_top(r_start) + font_size * 0.22;
+                                    let pill_h = (font_size * 1.16).max(16.0);
+                                    let pill_rect = Rect::from_min_max(
+                                        Pos2::new(
+                                            output.galley_pos.x + r_start.min.x - 2.5,
+                                            cy - pill_h * 0.52,
+                                        ),
+                                        Pos2::new(
+                                            output.galley_pos.x + r_end.min.x + 2.5,
+                                            cy + pill_h * 0.48,
+                                        ),
+                                    );
+                                    bg_shapes.push(egui::Shape::rect_filled(
+                                        pill_rect,
+                                        CornerRadius::same(3),
+                                        pal.bg_code_inline,
+                                    ));
+                                }
+                            }
                         }
                         accent_core::AstSpanKind::CodeBlock { info, .. } => {
                             let r_top = output.galley.pos_from_ccursor(egui::text::CCursor::new(
@@ -1691,7 +1775,7 @@ fn render_editor_pane(
                                         Align2::RIGHT_CENTER,
                                         info.trim(),
                                         font_ui_bold(11.0),
-                                        pal.fg_muted,
+                                        pal.markup_codeblock_fg,
                                     );
                                 }
                             }
@@ -1714,7 +1798,7 @@ fn render_editor_pane(
                                         Pos2::new(x_body - 8.5, ey),
                                     ),
                                     CornerRadius::same(2),
-                                    pal.border_headerbar,
+                                    pal.markup_quote_bar,
                                 );
                             }
                         }
@@ -1778,7 +1862,7 @@ fn render_editor_pane(
                                         scroll_painter.rect_filled(
                                             cb_rect,
                                             CornerRadius::same(3),
-                                            pal.accent_orange,
+                                            pal.markup_task_done,
                                         );
                                         scroll_painter.line_segment(
                                             [
@@ -1815,7 +1899,7 @@ fn render_editor_pane(
                                     scroll_painter.circle_filled(
                                         Pos2::new(x_body - 12.0, cy),
                                         3.2,
-                                        pal.fg_primary,
+                                        pal.markup_list_marker,
                                     );
                                 }
                             }
@@ -1887,7 +1971,7 @@ fn render_editor_pane(
                                     scroll_painter.rect_filled(
                                         row_rect,
                                         CornerRadius::ZERO,
-                                        pal.bg_code_block,
+                                        pal.bg_table_header,
                                     );
                                 } else if r_idx % 2 == 1 {
                                     scroll_painter.rect_filled(
@@ -1926,7 +2010,11 @@ fn render_editor_pane(
                                         } else {
                                             font_ui_regular(13.5)
                                         },
-                                        pal.fg_primary,
+                                        if r_idx == 0 {
+                                            pal.markup_emphasis_fg
+                                        } else {
+                                            pal.fg_primary
+                                        },
                                     );
                                     cx += cw;
                                 }
@@ -2091,8 +2179,10 @@ fn render_preview_pane(
                         };
                         let h_color = if *is_link_heading {
                             pal.accent_link
-                        } else {
+                        } else if *level <= 2 {
                             pal.fg_heading
+                        } else {
+                            pal.fg_subheading
                         };
                         let job = build_preview_inline_job(
                             inlines,
@@ -2109,7 +2199,7 @@ fn render_preview_pane(
                                 ui.allocate_exact_size(Vec2::new(avail_w, 2.0), Sense::hover());
                             ui.painter().line_segment(
                                 [rule_rect.left_center(), rule_rect.right_center()],
-                                Stroke::new(1.0, pal.border_headerbar),
+                                Stroke::new(1.2, pal.fg_heading.gamma_multiply(0.38)),
                             );
                         }
                         ui.add_space(6.0);
@@ -2138,7 +2228,7 @@ fn render_preview_pane(
                                         ui.painter().rect_filled(
                                             cb_rect,
                                             CornerRadius::same(3),
-                                            pal.accent_orange,
+                                            pal.markup_task_done,
                                         );
                                         ui.painter().line_segment(
                                             [
@@ -2175,13 +2265,13 @@ fn render_preview_pane(
                                     ui.label(
                                         egui::RichText::new(format!("{}.", idx + 1))
                                             .font(font_ui_bold(14.0))
-                                            .color(pal.fg_primary),
+                                            .color(pal.markup_list_marker),
                                     );
                                 } else {
                                     ui.label(
                                         egui::RichText::new("•")
                                             .font(font_ui_bold(14.0))
-                                            .color(pal.fg_primary),
+                                            .color(pal.markup_list_marker),
                                     );
                                 }
                                 let job = build_preview_inline_job(
@@ -2238,14 +2328,14 @@ fn render_preview_pane(
                             ui.painter().rect_filled(
                                 bar_r,
                                 CornerRadius::same(1),
-                                pal.border_headerbar,
+                                pal.markup_quote_bar,
                             );
                             ui.add_space(6.0);
                             let job = build_preview_inline_job(
                                 inlines,
                                 14.0,
                                 false,
-                                pal.fg_primary,
+                                pal.markup_quote_fg,
                                 pal,
                                 avail_w - 32.0,
                             );
@@ -2286,7 +2376,7 @@ fn render_preview_pane(
                                 Align2::LEFT_TOP,
                                 code,
                                 font_editor_regular(13.0),
-                                pal.fg_primary,
+                                pal.markup_codeblock_fg,
                             );
                             ui.add_space(10.0);
                         }
@@ -2335,7 +2425,7 @@ fn render_preview_pane(
                                 Pos2::new(t_rect.right(), ry + row_h),
                             );
                             if r_idx == 0 {
-                                tp.rect_filled(r_rect, CornerRadius::ZERO, pal.bg_code_block);
+                                tp.rect_filled(r_rect, CornerRadius::ZERO, pal.bg_table_header);
                             } else if r_idx % 2 == 1 {
                                 tp.rect_filled(
                                     r_rect,
@@ -2373,7 +2463,11 @@ fn render_preview_pane(
                                     } else {
                                         font_ui_regular(13.5)
                                     },
-                                    pal.fg_primary,
+                                    if r_idx == 0 {
+                                        pal.markup_emphasis_fg
+                                    } else {
+                                        pal.fg_primary
+                                    },
                                 );
                                 cx += cw;
                             }
@@ -2400,13 +2494,24 @@ fn build_preview_inline_job(
             font_editor_regular(font_size - 1.0)
         } else if base_bold || item.bold {
             font_ui_bold(font_size)
+        } else if item.italic {
+            font_editor_italic(font_size)
         } else {
             font_ui_regular(font_size)
         };
-        let color = if item.link_url.is_some() {
+        let color = if item.code {
+            pal.markup_code_fg
+        } else if item.link_url.is_some() {
             pal.accent_link
+        } else if (item.bold || item.italic) && !base_bold {
+            pal.markup_emphasis_fg
         } else {
             base_color
+        };
+        let background = if item.code {
+            pal.bg_code_inline
+        } else {
+            Color32::TRANSPARENT
         };
         let strikethrough = if item.strikethrough {
             Stroke::new(1.3, color)
@@ -2419,6 +2524,7 @@ fn build_preview_inline_job(
             TextFormat {
                 font_id,
                 color,
+                background,
                 strikethrough,
                 ..Default::default()
             },
@@ -4633,27 +4739,32 @@ fn render_preferences_dialog(
 
     let presets = [
         (
+            ColorPalettePreset::AmberCoral,
+            "Amber",
+            66.0_f32,
+        ),
+        (
             ColorPalettePreset::EditorialSlate,
             I18n::tr(session.locale, "palette_editorial"),
-            78.0_f32,
+            72.0_f32,
         ),
         (
             ColorPalettePreset::NordicForest,
             I18n::tr(session.locale, "palette_nordic"),
-            68.0_f32,
+            64.0_f32,
         ),
         (
             ColorPalettePreset::VelvetDawn,
             I18n::tr(session.locale, "palette_velvet"),
-            84.0_f32,
+            78.0_f32,
         ),
         (
             ColorPalettePreset::Classic,
             I18n::tr(session.locale, "palette_classic"),
-            74.0_f32,
+            68.0_f32,
         ),
     ];
-    let total_pal_w: f32 = presets.iter().map(|(_, _, w)| *w).sum::<f32>() + 15.0;
+    let total_pal_w: f32 = presets.iter().map(|(_, _, w)| *w).sum::<f32>() + 16.0;
     let mut ppx = right_x - total_pal_w;
     for (idx, (preset, label, w_pill)) in presets.into_iter().enumerate() {
         let active = session.palette_preset == preset;
@@ -4672,10 +4783,10 @@ fn render_preferences_dialog(
             },
         );
         // Mini color swatch dot showing the preset's accent color
-        let dot_pos = Pos2::new(pill_r.left() + 11.0, r6_y);
+        let dot_pos = Pos2::new(pill_r.left() + 10.0, r6_y);
         painter.circle_filled(
             dot_pos,
-            4.5,
+            4.2,
             if active {
                 sample_pal.bg_canvas
             } else {
@@ -4683,10 +4794,10 @@ fn render_preferences_dialog(
             },
         );
         painter.text(
-            Pos2::new(pill_r.center().x + 5.0, r6_y),
+            Pos2::new(pill_r.center().x + 4.0, r6_y),
             Align2::CENTER_CENTER,
             label,
-            font_ui_bold(11.5),
+            font_ui_bold(11.0),
             if active {
                 Color32::WHITE
             } else {
@@ -4697,6 +4808,6 @@ fn render_preferences_dialog(
         if hit.clicked() {
             actions.push(Action::SetPalettePreset(preset));
         }
-        ppx += w_pill + 5.0;
+        ppx += w_pill + 4.0;
     }
 }

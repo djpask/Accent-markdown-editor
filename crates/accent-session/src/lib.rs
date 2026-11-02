@@ -28,8 +28,10 @@ impl ThemeMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ColorPalettePreset {
-    /// Default: Editorial Paper & Slate (Alabaster Paper, Warm Book Paper, Midnight Slate)
+    /// Default: Amber & Coral (mdfried-inspired triadic Gold + Coral + Periwinkle palette)
     #[default]
+    AmberCoral,
+    /// Editorial Paper & Slate (Alabaster Paper, Warm Book Paper, Midnight Slate)
     EditorialSlate,
     /// Nordic Zen & Forest (Snow Mist, Everforest Warm, Nordic Night)
     NordicForest,

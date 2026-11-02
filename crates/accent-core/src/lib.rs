@@ -291,13 +291,19 @@ pub struct EditorTextSegment {
     pub is_heading_hashes: bool,
     pub blockquote: bool,
     pub list_item: bool,
+    pub list_marker: bool,
+    pub task_checked: Option<bool>,
     pub code_block: bool,
+    pub code_comment: bool,
     pub bold: bool,
     pub italic: bool,
     pub strikethrough: bool,
     pub code_inline: bool,
     pub muted: bool,
     pub link: bool,
+    pub link_url_part: bool,
+    pub table_pipe: bool,
+    pub table_header_cell: bool,
     /// True when Caret-Aware *View-while-typing* collapses this syntax delimiter (`font_size = 0.01`, transparent).
     pub collapsed_delimiter: bool,
     /// True when this segment is a body line inside a collapsed `mermaid` code block in *View-while-typing* mode.
@@ -1285,14 +1291,18 @@ impl DocumentBuffer {
                 let is_cb_collapsed = cb_ls.visibility == DelimiterVisibility::Collapsed;
                 let fence_collapsed = is_fence_delim && is_cb_collapsed;
                 let mermaid_body_collapsed = !is_fence_delim && is_mermaid_block && is_cb_collapsed;
+                let trimmed_cb = raw_line.trim_start();
+                let is_code_comment = !is_fence_delim
+                    && (trimmed_cb.starts_with('#') || trimmed_cb.starts_with("//"));
                 out.push(EditorTextSegment {
                     text: text[line_start..content_end].to_string(),
                     byte_range: line_start..content_end,
                     is_line_start: true,
                     line_index: line_idx,
                     code_block: true,
+                    code_comment: is_code_comment,
                     code_inline: true,
-                    muted: is_fence_delim,
+                    muted: is_fence_delim || is_code_comment,
                     collapsed_delimiter: fence_collapsed || mermaid_body_collapsed,
                     mermaid_collapsed: mermaid_body_collapsed,
                     ..Default::default()
@@ -1406,6 +1416,8 @@ impl DocumentBuffer {
         let base_bold = heading_level.is_some();
 
         let mut boundaries = vec![range.start, range.end];
+        let mut list_marker_range: Option<(Range<usize>, Option<bool>)> = None;
+
         for &s_idx in line_span_indices {
             let ls = &live_spans[s_idx];
             let sr = &ls.span.byte_range;
@@ -1421,6 +1433,47 @@ impl DocumentBuffer {
                 }
             }
             match &ls.span.kind {
+                AstSpanKind::ListItem { ordered, task, .. } if ls.span.start_line == line_idx => {
+                    let raw_l = &text[range.clone()];
+                    let trimmed = raw_l.trim_start_matches([' ', '\t']);
+                    let leading_ws = raw_l.len() - trimmed.len();
+                    let m_start = range.start + leading_ws;
+                    let m_len = if task.is_some() && trimmed.len() >= 5 {
+                        let after_box = &trimmed[5..];
+                        5 + usize::from(after_box.starts_with(' '))
+                    } else if !*ordered
+                        && (trimmed.starts_with("- ")
+                            || trimmed.starts_with("* ")
+                            || trimmed.starts_with("+ "))
+                    {
+                        2
+                    } else if *ordered {
+                        let digits = trimmed.chars().take_while(|c| c.is_ascii_digit()).count();
+                        if digits > 0
+                            && (trimmed[digits..].starts_with(". ")
+                                || trimmed[digits..].starts_with(") "))
+                        {
+                            digits + 2
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
+                    if m_len > 0 && m_start + m_len <= range.end {
+                        boundaries.push(m_start);
+                        boundaries.push(m_start + m_len);
+                        list_marker_range = Some((m_start..(m_start + m_len), *task));
+                    }
+                }
+                AstSpanKind::Table { .. } if ls.visibility == DelimiterVisibility::Expanded => {
+                    for (off, ch) in text[range.clone()].char_indices() {
+                        if ch == '|' {
+                            boundaries.push(range.start + off);
+                            boundaries.push(range.start + off + 1);
+                        }
+                    }
+                }
                 AstSpanKind::Strong
                 | AstSpanKind::Emph
                 | AstSpanKind::Strikethrough
@@ -1486,6 +1539,14 @@ impl DocumentBuffer {
                 ..Default::default()
             };
 
+            if let Some((ref mr, task_opt)) = list_marker_range {
+                if seg_start >= mr.start && seg_end <= mr.end {
+                    seg.list_marker = true;
+                    seg.task_checked = task_opt;
+                    seg.bold = true;
+                }
+            }
+
             for &s_idx in line_span_indices {
                 let ls = &live_spans[s_idx];
                 let sr = &ls.span.byte_range;
@@ -1497,13 +1558,29 @@ impl DocumentBuffer {
                     .iter()
                     .any(|dr| seg_start >= dr.start && seg_end <= dr.end);
                 if is_delim {
-                    seg.muted = true;
+                    if !matches!(ls.span.kind, AstSpanKind::Table { .. }) {
+                        seg.muted = true;
+                    }
                     if ls.visibility == DelimiterVisibility::Collapsed {
                         seg.collapsed_delimiter = true;
                     }
                 }
 
                 match &ls.span.kind {
+                    AstSpanKind::Table { .. } if ls.visibility == DelimiterVisibility::Expanded => {
+                        let line_slice = text[range.clone()].trim();
+                        let is_sep_row = !line_slice.is_empty()
+                            && line_slice
+                                .chars()
+                                .all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t'));
+                        if is_sep_row || &text[seg_start..seg_end] == "|" {
+                            seg.table_pipe = true;
+                            seg.bold = true;
+                        } else if line_idx == ls.span.start_line {
+                            seg.table_header_cell = true;
+                            seg.bold = true;
+                        }
+                    }
                     AstSpanKind::Strong => {
                         if !seg.collapsed_delimiter {
                             seg.bold = true;
@@ -1531,6 +1608,7 @@ impl DocumentBuffer {
                                 seg.bold = false;
                             } else if seg_start >= cr.end {
                                 seg.muted = true;
+                                seg.link_url_part = true;
                                 seg.italic = true;
                                 seg.bold = false;
                             } else {
@@ -1550,10 +1628,12 @@ impl DocumentBuffer {
                                 // alt text
                             } else {
                                 seg.muted = true;
+                                seg.link_url_part = true;
                                 seg.italic = true;
                             }
                         } else {
                             seg.muted = true;
+                            seg.link_url_part = true;
                             seg.italic = true;
                         }
                     }
@@ -2521,5 +2601,57 @@ let x = 42;
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_semantic_markup_segment_flags_lists_tables_links_and_comments() {
+        let md = "\
+1. **Strict Ban:**
+- [x] Done task
+- [ ] Todo task
+[guida](https://accent.dev)
+
+```bash
+# Comment line
+DISPLAY=:99 apostrophe
+```
+
+| Costrutto | Colore |
+| :--- | :--- |
+| Bold | Oro |
+";
+        let buf = DocumentBuffer::from_str_content(md);
+        // Source mode (view_while_typing = false -> all spans Expanded)
+        let segs = buf.build_editor_segments(MarkdownDialect::Gfm, false, 0..0);
+        let reconstructed: String = segs.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(reconstructed, md);
+
+        // Ordered list marker `1. `
+        assert!(segs.iter().any(|s| s.text == "1. " && s.list_marker));
+        // Checked task marker `- [x] `
+        assert!(segs
+            .iter()
+            .any(|s| s.text == "- [x] " && s.list_marker && s.task_checked == Some(true)));
+        // Unchecked task marker `- [ ] `
+        assert!(segs
+            .iter()
+            .any(|s| s.text == "- [ ] " && s.list_marker && s.task_checked == Some(false)));
+        // Link text and URL part
+        assert!(segs.iter().any(|s| s.text == "guida" && s.link));
+        assert!(segs
+            .iter()
+            .any(|s| s.text == "](https://accent.dev)" && s.link_url_part));
+        // Code block comment vs body
+        assert!(segs
+            .iter()
+            .any(|s| s.text == "# Comment line" && s.code_block && s.code_comment));
+        assert!(segs
+            .iter()
+            .any(|s| s.text == "DISPLAY=:99 apostrophe" && s.code_block && !s.code_comment));
+        // Expanded table pipes and header cells
+        assert!(segs.iter().any(|s| s.text == "|" && s.table_pipe));
+        assert!(segs
+            .iter()
+            .any(|s| s.text.contains("Costrutto") && s.table_header_cell));
     }
 }
