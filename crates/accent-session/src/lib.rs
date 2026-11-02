@@ -509,6 +509,10 @@ impl LineWidthMode {
     }
 }
 
+pub const DEFAULT_FONT_SIZE: f32 = 17.35;
+pub const MIN_FONT_SIZE: f32 = 10.0;
+pub const MAX_FONT_SIZE: f32 = 36.0;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TypographyConfig {
     pub prose_font_family: String,
@@ -522,7 +526,7 @@ impl Default for TypographyConfig {
         Self {
             prose_font_family: "Nimbus Mono PS".to_string(),
             code_font_family: "Nimbus Mono PS".to_string(),
-            font_size: 17.35,
+            font_size: DEFAULT_FONT_SIZE,
             line_height: 1.505,
         }
     }
@@ -694,6 +698,10 @@ pub enum Action {
     SetCodeFont(String),
     SetFontSize(f32),
     SetLineHeight(f32),
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
+    ZoomByStep(f32),
     SetPreviewLayout(PreviewLayout),
     SetPreviewMode { active: bool, layout: PreviewLayout },
     SetEditorOnlyRaw,
@@ -717,6 +725,13 @@ pub enum Action {
     SetSelection(usize, usize),
     ApplyFormat(FormatCommand),
     NewDocument,
+    NewTab,
+    SwitchTab(usize),
+    CloseTab(usize),
+    NextTab,
+    PrevTab,
+    Undo,
+    Redo,
     OpenFile(PathBuf),
     OpenTutorial,
     SaveDocument,
@@ -756,6 +771,8 @@ pub struct PersistedSettings {
     pub last_opened_dir: Option<PathBuf>,
     pub last_opened_file: Option<PathBuf>,
     pub recent_files: Vec<PathBuf>,
+    pub open_tab_files: Vec<PathBuf>,
+    pub active_tab_index: usize,
 }
 
 impl Default for PersistedSettings {
@@ -779,6 +796,8 @@ impl Default for PersistedSettings {
             last_opened_dir: None,
             last_opened_file: None,
             recent_files: Vec::new(),
+            open_tab_files: Vec::new(),
+            active_tab_index: 0,
         }
     }
 }
@@ -786,8 +805,27 @@ impl Default for PersistedSettings {
 /// Debounce threshold for *Save-while-typing* WAL journaling (`< 300ms` per `SPECS.md` Pillar 8).
 pub const JOURNAL_DEBOUNCE_MS: u64 = 200;
 
+/// Represents an open document tab with its own isolated buffer, undo/redo stack, cursor, dirty state, and WAL metadata.
+#[derive(Debug, Clone)]
+pub struct DocumentTab {
+    pub tab_id: u64,
+    pub document_title: String,
+    pub current_file_path: Option<PathBuf>,
+    pub is_dirty: bool,
+    pub original_file_hash: Option<String>,
+    pub last_edit_instant: Option<std::time::Instant>,
+    pub last_edit_utc_ms: u64,
+    pub journal_pending_flush: bool,
+    pub recovered_from_crash: bool,
+    pub recovery_banner_active: bool,
+    pub buffer: DocumentBuffer,
+}
+
 #[derive(Debug, Clone)]
 pub struct Session {
+    pub tabs: Vec<DocumentTab>,
+    pub active_tab_index: usize,
+    pub next_tab_id: u64,
     pub document_title: String,
     pub current_file_path: Option<PathBuf>,
     pub is_dirty: bool,
@@ -835,8 +873,10 @@ impl Default for Session {
     fn default() -> Self {
         #[cfg(test)]
         {
+            static TEST_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let seq = TEST_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let test_dir = std::env::temp_dir().join(format!(
-                "accent_unit_test_default_{}",
+                "accent_unit_test_default_{}_{seq}",
                 std::process::id()
             ));
             let _ = std::fs::remove_file(test_dir.join("settings.json"));
@@ -876,7 +916,23 @@ impl Session {
         }
         let default_buf = DocumentBuffer::default();
         let initial_hash = Some(accent_storage::compute_content_hash(&default_buf.text()));
+        let initial_tab = DocumentTab {
+            tab_id: 1,
+            document_title: "esempio_accent.md".to_string(),
+            current_file_path: Some(sample_path.clone()),
+            is_dirty: false,
+            original_file_hash: initial_hash.clone(),
+            last_edit_instant: None,
+            last_edit_utc_ms: 0,
+            journal_pending_flush: false,
+            recovered_from_crash: false,
+            recovery_banner_active: false,
+            buffer: default_buf.clone(),
+        };
         let mut session = Self {
+            tabs: vec![initial_tab],
+            active_tab_index: 0,
+            next_tab_id: 2,
             document_title: "esempio_accent.md".to_string(),
             current_file_path: Some(sample_path),
             is_dirty: false,
@@ -920,11 +976,116 @@ impl Session {
         };
         session.load_settings_from_disk();
         session.check_startup_crash_recovery();
+        session.sync_active_tab_to_slot();
         session
     }
 
-    /// Snapshots all user preferences, recent files, and last opened folder/file into `PersistedSettings`.
+    /// Synchronizes the top-level active document fields of `Session` into `self.tabs[self.active_tab_index]`.
+    pub fn sync_active_tab_to_slot(&mut self) {
+        if self.tabs.is_empty() {
+            let id = self.next_tab_id;
+            self.next_tab_id += 1;
+            self.tabs.push(DocumentTab {
+                tab_id: id,
+                document_title: self.document_title.clone(),
+                current_file_path: self.current_file_path.clone(),
+                is_dirty: self.is_dirty,
+                original_file_hash: self.original_file_hash.clone(),
+                last_edit_instant: self.last_edit_instant,
+                last_edit_utc_ms: self.last_edit_utc_ms,
+                journal_pending_flush: self.journal_pending_flush,
+                recovered_from_crash: self.recovered_from_crash,
+                recovery_banner_active: self.recovery_banner_active,
+                buffer: self.buffer.clone(),
+            });
+            self.active_tab_index = 0;
+            return;
+        }
+        if self.active_tab_index >= self.tabs.len() {
+            self.active_tab_index = self.tabs.len() - 1;
+        }
+        let slot = &mut self.tabs[self.active_tab_index];
+        slot.document_title = self.document_title.clone();
+        slot.current_file_path = self.current_file_path.clone();
+        slot.is_dirty = self.is_dirty;
+        slot.original_file_hash = self.original_file_hash.clone();
+        slot.last_edit_instant = self.last_edit_instant;
+        slot.last_edit_utc_ms = self.last_edit_utc_ms;
+        slot.journal_pending_flush = self.journal_pending_flush;
+        slot.recovered_from_crash = self.recovered_from_crash;
+        slot.recovery_banner_active = self.recovery_banner_active;
+        slot.buffer = self.buffer.clone();
+    }
+
+    /// Loads `self.tabs[self.active_tab_index]` into the top-level active document fields of `Session`.
+    pub fn load_active_tab_from_slot(&mut self) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        if self.active_tab_index >= self.tabs.len() {
+            self.active_tab_index = self.tabs.len() - 1;
+        }
+        let slot = &self.tabs[self.active_tab_index];
+        self.document_title = slot.document_title.clone();
+        self.current_file_path = slot.current_file_path.clone();
+        self.is_dirty = slot.is_dirty;
+        self.original_file_hash = slot.original_file_hash.clone();
+        self.last_edit_instant = slot.last_edit_instant;
+        self.last_edit_utc_ms = slot.last_edit_utc_ms;
+        self.journal_pending_flush = slot.journal_pending_flush;
+        self.recovered_from_crash = slot.recovered_from_crash;
+        self.recovery_banner_active = slot.recovery_banner_active;
+        self.buffer = slot.buffer.clone();
+        self.file_dialog_input = self.document_title.clone();
+        self.display_word_count_override = None;
+        self.update_default_export_path();
+    }
+
+    /// Returns the current typography zoom scale factor relative to `DEFAULT_FONT_SIZE` (`1.0` = 100%).
+    pub fn zoom_scale(&self) -> f32 {
+        (self.typography.font_size / DEFAULT_FONT_SIZE).clamp(0.5, 2.5)
+    }
+
+    /// Returns the current typography zoom percentage (e.g. `100`, `115`, `85`).
+    pub fn zoom_percentage(&self) -> u32 {
+        ((self.typography.font_size / DEFAULT_FONT_SIZE) * 100.0).round() as u32
+    }
+
+    fn next_untitled_name(&self) -> String {
+        if !self.tabs.iter().any(|t| t.document_title == "untitled.md") {
+            return "untitled.md".to_string();
+        }
+        let mut n = 2usize;
+        loop {
+            let candidate = format!("untitled-{n}.md");
+            if !self.tabs.iter().any(|t| t.document_title == candidate) {
+                return candidate;
+            }
+            n += 1;
+        }
+    }
+
+    /// Snapshots all user preferences, recent files, and open tabs into `PersistedSettings`.
     pub fn to_persisted_settings(&self) -> PersistedSettings {
+        let mut open_tab_files = Vec::new();
+        for (idx, tab) in self.tabs.iter().enumerate() {
+            let path_opt = if idx == self.active_tab_index {
+                self.current_file_path.as_ref()
+            } else {
+                tab.current_file_path.as_ref()
+            };
+            if let Some(p) = path_opt {
+                if !open_tab_files.contains(p) {
+                    open_tab_files.push(p.clone());
+                }
+            }
+        }
+        let active_tab_index = self
+            .current_file_path
+            .as_ref()
+            .and_then(|cur| open_tab_files.iter().position(|p| p == cur))
+            .unwrap_or(0);
+
         PersistedSettings {
             theme: self.theme,
             palette_preset: self.palette_preset,
@@ -944,6 +1105,8 @@ impl Session {
             last_opened_dir: Some(self.file_dialog_dir.clone()),
             last_opened_file: self.current_file_path.clone(),
             recent_files: self.recent_files.clone(),
+            open_tab_files,
+            active_tab_index,
         }
     }
 
@@ -955,7 +1118,7 @@ impl Session {
         accent_storage::atomic_save(&self.config_path, &json)
     }
 
-    /// Loads persisted settings and last opened directory/file from `self.config_path` if present.
+    /// Loads persisted settings, open tabs, and last opened directory/file from `self.config_path` if present.
     pub fn load_settings_from_disk(&mut self) -> bool {
         let Ok(raw) = std::fs::read_to_string(&self.config_path) else {
             return false;
@@ -970,7 +1133,13 @@ impl Session {
         self.dialect = settings.dialect;
         self.line_width = settings.line_width;
         self.typography = settings.typography;
-        self.typography.font_size = self.typography.font_size.clamp(12.0, 28.0);
+        if !self.typography.font_size.is_finite() {
+            self.typography.font_size = DEFAULT_FONT_SIZE;
+        }
+        self.typography.font_size = self
+            .typography
+            .font_size
+            .clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
         self.typography.line_height = self.typography.line_height.clamp(1.1, 2.2);
         self.preview_active = settings.preview_active;
         self.preview_layout = settings.preview_layout;
@@ -998,7 +1167,44 @@ impl Session {
             self.recent_files = existing_recents;
         }
 
-        if let Some(last_file) = settings.last_opened_file {
+        // Restore open tabs if present, otherwise fall back to `last_opened_file`
+        let mut restored_tabs = Vec::new();
+        for tab_path in &settings.open_tab_files {
+            if tab_path.is_file() {
+                if let Ok(content) = std::fs::read_to_string(tab_path) {
+                    let title = tab_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("documento.md")
+                        .to_string();
+                    let mut buf = DocumentBuffer::from_str_content(&content);
+                    buf.set_cursor(0);
+                    let id = self.next_tab_id;
+                    self.next_tab_id += 1;
+                    restored_tabs.push(DocumentTab {
+                        tab_id: id,
+                        document_title: title,
+                        current_file_path: Some(tab_path.clone()),
+                        is_dirty: false,
+                        original_file_hash: Some(accent_storage::compute_content_hash(&content)),
+                        last_edit_instant: None,
+                        last_edit_utc_ms: 0,
+                        journal_pending_flush: false,
+                        recovered_from_crash: false,
+                        recovery_banner_active: false,
+                        buffer: buf,
+                    });
+                }
+            }
+        }
+
+        if !restored_tabs.is_empty() {
+            self.tabs = restored_tabs;
+            self.active_tab_index = settings
+                .active_tab_index
+                .min(self.tabs.len().saturating_sub(1));
+            self.load_active_tab_from_slot();
+        } else if let Some(last_file) = settings.last_opened_file {
             if last_file.is_file() {
                 if let Ok(content) = std::fs::read_to_string(&last_file) {
                     let title = last_file
@@ -1009,7 +1215,10 @@ impl Session {
                     self.document_title = title.clone();
                     self.file_dialog_input = title;
                     if let Some(parent) = last_file.parent() {
-                        if parent.is_dir() && self.file_dialog_dir == std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")) {
+                        if parent.is_dir()
+                            && self.file_dialog_dir
+                                == std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                        {
                             self.file_dialog_dir = parent.to_path_buf();
                         }
                     }
@@ -1017,6 +1226,7 @@ impl Session {
                     self.original_file_hash = Some(accent_storage::compute_content_hash(&content));
                     self.buffer.set_text(&content);
                     self.buffer.set_cursor(0);
+                    self.sync_active_tab_to_slot();
                 }
             }
         }
@@ -1078,22 +1288,41 @@ impl Session {
         Ok(written)
     }
 
-    /// Checks whether the `< 300ms` debounce window has elapsed and flushes the journal if needed.
+    /// Checks whether the `< 300ms` debounce window has elapsed and flushes the journal for any dirty tab.
     pub fn poll_journal_flush(&mut self, now: std::time::Instant) -> bool {
-        if !self.is_dirty || !self.journal_pending_flush {
-            return false;
-        }
+        self.sync_active_tab_to_slot();
         let debounce = std::time::Duration::from_millis(JOURNAL_DEBOUNCE_MS);
-        let ready = match self.last_edit_instant {
-            Some(last) => now.saturating_duration_since(last) >= debounce,
-            None => true,
-        };
-        if ready {
-            let _ = self.flush_journal_now();
-            true
-        } else {
-            false
+        let mut any_flushed = false;
+        for tab in &mut self.tabs {
+            if !tab.is_dirty || !tab.journal_pending_flush {
+                continue;
+            }
+            let ready = match tab.last_edit_instant {
+                Some(last) => now.saturating_duration_since(last) >= debounce,
+                None => true,
+            };
+            if ready {
+                let cur_char = tab.buffer.cursor();
+                let cur_byte = tab.buffer.char_to_byte(cur_char);
+                let entry = accent_storage::RecoveryJournalEntry::new(
+                    tab.current_file_path.clone(),
+                    tab.document_title.clone(),
+                    tab.buffer.text(),
+                    cur_char,
+                    cur_byte,
+                    tab.original_file_hash.clone(),
+                    tab.is_dirty,
+                );
+                if accent_storage::write_journal_entry(&self.recovery_dir, &entry).is_ok() {
+                    tab.journal_pending_flush = false;
+                    any_flushed = true;
+                }
+            }
         }
+        if self.active_tab_index < self.tabs.len() {
+            self.journal_pending_flush = self.tabs[self.active_tab_index].journal_pending_flush;
+        }
+        any_flushed
     }
 
     /// Returns the remaining duration before the pending journal flush should be triggered.
@@ -1155,16 +1384,34 @@ impl Session {
 
     /// Cleans up the recovery journal and persists user settings when the application closes normally.
     pub fn on_clean_exit(&mut self) {
+        self.sync_active_tab_to_slot();
         let _ = self.save_settings();
-        if self.is_dirty {
-            if self.journal_pending_flush {
-                let _ = self.flush_journal_now();
+        for tab in &mut self.tabs {
+            if tab.is_dirty {
+                if tab.journal_pending_flush {
+                    let cur_char = tab.buffer.cursor();
+                    let cur_byte = tab.buffer.char_to_byte(cur_char);
+                    let entry = accent_storage::RecoveryJournalEntry::new(
+                        tab.current_file_path.clone(),
+                        tab.document_title.clone(),
+                        tab.buffer.text(),
+                        cur_char,
+                        cur_byte,
+                        tab.original_file_hash.clone(),
+                        tab.is_dirty,
+                    );
+                    let _ = accent_storage::write_journal_entry(&self.recovery_dir, &entry);
+                    tab.journal_pending_flush = false;
+                }
+            } else {
+                let _ = accent_storage::remove_journal_for_target(
+                    &self.recovery_dir,
+                    tab.current_file_path.as_deref(),
+                );
             }
-        } else {
-            let _ = accent_storage::remove_journal_for_target(
-                &self.recovery_dir,
-                self.current_file_path.as_deref(),
-            );
+        }
+        if self.active_tab_index < self.tabs.len() {
+            self.journal_pending_flush = self.tabs[self.active_tab_index].journal_pending_flush;
         }
     }
 
@@ -1181,6 +1428,10 @@ impl Session {
                 | Action::SetCodeFont(_)
                 | Action::SetFontSize(_)
                 | Action::SetLineHeight(_)
+                | Action::ZoomIn
+                | Action::ZoomOut
+                | Action::ZoomReset
+                | Action::ZoomByStep(_)
                 | Action::SetPreviewLayout(_)
                 | Action::SetPreviewMode { .. }
                 | Action::SetEditorOnlyRaw
@@ -1192,6 +1443,12 @@ impl Session {
                 | Action::ToggleHemingway
                 | Action::ToggleFocusMode
                 | Action::ToggleToolbar
+                | Action::NewDocument
+                | Action::NewTab
+                | Action::SwitchTab(_)
+                | Action::CloseTab(_)
+                | Action::NextTab
+                | Action::PrevTab
                 | Action::OpenFile(_)
                 | Action::SaveDocument
                 | Action::ConfirmRecoverySave
@@ -1209,8 +1466,52 @@ impl Session {
             Action::SetLineWidth(lw) => self.line_width = lw,
             Action::SetProseFont(family) => self.typography.prose_font_family = family,
             Action::SetCodeFont(family) => self.typography.code_font_family = family,
-            Action::SetFontSize(size) => self.typography.font_size = size.clamp(12.0, 28.0),
-            Action::SetLineHeight(lh) => self.typography.line_height = lh.clamp(1.1, 2.2),
+            Action::SetFontSize(size) => {
+                if size.is_finite() {
+                    self.typography.font_size = size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+                }
+            }
+            Action::SetLineHeight(lh) => {
+                if lh.is_finite() {
+                    self.typography.line_height = lh.clamp(1.1, 2.2);
+                }
+            }
+            Action::ZoomIn => {
+                self.typography.font_size =
+                    (self.typography.font_size + 1.0).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+                self.status_message = Some(format!(
+                    "Zoom: {}% ({:.1} pt)",
+                    self.zoom_percentage(),
+                    self.typography.font_size
+                ));
+            }
+            Action::ZoomOut => {
+                self.typography.font_size =
+                    (self.typography.font_size - 1.0).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+                self.status_message = Some(format!(
+                    "Zoom: {}% ({:.1} pt)",
+                    self.zoom_percentage(),
+                    self.typography.font_size
+                ));
+            }
+            Action::ZoomReset => {
+                self.typography.font_size = DEFAULT_FONT_SIZE;
+                self.status_message = Some(format!(
+                    "Zoom: 100% ({:.1} pt)",
+                    self.typography.font_size
+                ));
+            }
+            Action::ZoomByStep(delta) => {
+                if delta.is_finite() && delta.abs() > 1e-4 {
+                    self.typography.font_size =
+                        (self.typography.font_size + delta).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+                    self.status_message = Some(format!(
+                        "Zoom: {}% ({:.1} pt)",
+                        self.zoom_percentage(),
+                        self.typography.font_size
+                    ));
+                }
+            }
             Action::SetPreviewLayout(layout) => {
                 self.preview_layout = layout;
                 self.preview_active = true;
@@ -1360,71 +1661,244 @@ impl Session {
                     }
                 }
             }
-            Action::NewDocument => {
+            Action::NewDocument | Action::NewTab => {
+                self.sync_active_tab_to_slot();
                 let _ = accent_storage::remove_journal_for_target(&self.recovery_dir, None);
-                self.document_title = "untitled.md".to_string();
-                self.current_file_path = None;
-                self.is_dirty = false;
-                self.journal_pending_flush = false;
-                self.recovered_from_crash = false;
-                self.recovery_banner_active = false;
-                self.chrome_autohidden = false;
-                self.display_word_count_override = None;
+                let title = self.next_untitled_name();
                 let init_txt = "# Nuovo Documento\n\nInizia a scrivere qui...\n";
-                self.original_file_hash = Some(accent_storage::compute_content_hash(init_txt));
-                self.buffer.set_text(init_txt);
-                self.buffer.set_cursor(self.buffer.len_chars());
+                let mut new_buf = DocumentBuffer::from_str_content(init_txt);
+                new_buf.set_cursor(new_buf.len_chars());
+                let id = self.next_tab_id;
+                self.next_tab_id += 1;
+                let new_tab = DocumentTab {
+                    tab_id: id,
+                    document_title: title,
+                    current_file_path: None,
+                    is_dirty: false,
+                    original_file_hash: Some(accent_storage::compute_content_hash(init_txt)),
+                    last_edit_instant: None,
+                    last_edit_utc_ms: 0,
+                    journal_pending_flush: false,
+                    recovered_from_crash: false,
+                    recovery_banner_active: false,
+                    buffer: new_buf,
+                };
+                self.tabs.push(new_tab);
+                self.active_tab_index = self.tabs.len() - 1;
+                self.load_active_tab_from_slot();
+                self.chrome_autohidden = false;
                 self.overlay = ActiveOverlay::None;
             }
+            Action::SwitchTab(idx) => {
+                if idx < self.tabs.len() && idx != self.active_tab_index {
+                    self.sync_active_tab_to_slot();
+                    self.active_tab_index = idx;
+                    self.load_active_tab_from_slot();
+                    self.chrome_autohidden = false;
+                }
+            }
+            Action::NextTab => {
+                if self.tabs.len() > 1 {
+                    self.sync_active_tab_to_slot();
+                    self.active_tab_index = (self.active_tab_index + 1) % self.tabs.len();
+                    self.load_active_tab_from_slot();
+                    self.chrome_autohidden = false;
+                }
+            }
+            Action::PrevTab => {
+                if self.tabs.len() > 1 {
+                    self.sync_active_tab_to_slot();
+                    self.active_tab_index =
+                        (self.active_tab_index + self.tabs.len() - 1) % self.tabs.len();
+                    self.load_active_tab_from_slot();
+                    self.chrome_autohidden = false;
+                }
+            }
+            Action::CloseTab(idx) => {
+                if idx < self.tabs.len() {
+                    self.sync_active_tab_to_slot();
+                    if !self.tabs[idx].is_dirty {
+                        let _ = accent_storage::remove_journal_for_target(
+                            &self.recovery_dir,
+                            self.tabs[idx].current_file_path.as_deref(),
+                        );
+                    }
+                    if self.tabs.len() <= 1 {
+                        let init_txt = "# Nuovo Documento\n\nInizia a scrivere qui...\n";
+                        let mut new_buf = DocumentBuffer::from_str_content(init_txt);
+                        new_buf.set_cursor(new_buf.len_chars());
+                        let id = self.next_tab_id;
+                        self.next_tab_id += 1;
+                        self.tabs[0] = DocumentTab {
+                            tab_id: id,
+                            document_title: "untitled.md".to_string(),
+                            current_file_path: None,
+                            is_dirty: false,
+                            original_file_hash: Some(accent_storage::compute_content_hash(
+                                init_txt,
+                            )),
+                            last_edit_instant: None,
+                            last_edit_utc_ms: 0,
+                            journal_pending_flush: false,
+                            recovered_from_crash: false,
+                            recovery_banner_active: false,
+                            buffer: new_buf,
+                        };
+                        self.active_tab_index = 0;
+                    } else {
+                        self.tabs.remove(idx);
+                        if idx < self.active_tab_index {
+                            self.active_tab_index -= 1;
+                        } else if self.active_tab_index >= self.tabs.len() {
+                            self.active_tab_index = self.tabs.len() - 1;
+                        }
+                    }
+                    self.load_active_tab_from_slot();
+                    self.chrome_autohidden = false;
+                }
+            }
+            Action::Undo => {
+                if self.buffer.undo() {
+                    let current_hash = accent_storage::compute_content_hash(&self.buffer.text());
+                    self.is_dirty = self.original_file_hash.as_deref() != Some(current_hash.as_str());
+                    self.journal_pending_flush = self.is_dirty;
+                    self.last_edit_instant = Some(std::time::Instant::now());
+                }
+            }
+            Action::Redo => {
+                if self.buffer.redo() {
+                    let current_hash = accent_storage::compute_content_hash(&self.buffer.text());
+                    self.is_dirty = self.original_file_hash.as_deref() != Some(current_hash.as_str());
+                    self.journal_pending_flush = self.is_dirty;
+                    self.last_edit_instant = Some(std::time::Instant::now());
+                }
+            }
             Action::OpenFile(path) => {
+                self.sync_active_tab_to_slot();
                 let disk_content = std::fs::read_to_string(&path).ok();
                 let disk_hash = disk_content
                     .as_deref()
                     .map(accent_storage::compute_content_hash);
 
-                if let Some(mut entry) = accent_storage::find_recovery_journal_for_path(
-                    &self.recovery_dir,
-                    Some(&path),
-                ) {
-                    if entry.original_file_hash.is_none() {
-                        entry.original_file_hash = disk_hash;
+                // 1. Check if `path` is already open in an existing tab (deduplication)
+                if let Some(existing_idx) = self
+                    .tabs
+                    .iter()
+                    .position(|t| t.current_file_path.as_ref() == Some(&path))
+                {
+                    self.active_tab_index = existing_idx;
+                    self.load_active_tab_from_slot();
+                    if let Some(mut entry) = accent_storage::find_recovery_journal_for_path(
+                        &self.recovery_dir,
+                        Some(&path),
+                    ) {
+                        if entry.original_file_hash.is_none() {
+                            entry.original_file_hash = disk_hash;
+                        }
+                        self.restore_from_journal_entry(entry);
                     }
-                    self.restore_from_journal_entry(entry);
-                    self.recent_files.retain(|p| p != &path);
-                    self.recent_files.insert(0, path);
-                    if self.recent_files.len() > 8 {
-                        self.recent_files.truncate(8);
-                    }
-                    self.overlay = ActiveOverlay::None;
-                } else if let Some(content) = disk_content {
-                    let title = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("documento.md")
-                        .to_string();
-                    self.document_title = title.clone();
-                    self.file_dialog_input = title;
                     if let Some(parent) = path.parent() {
-                        self.file_dialog_dir = parent.to_path_buf();
+                        if parent.is_dir() {
+                            self.file_dialog_dir = parent.to_path_buf();
+                        }
                     }
-                    self.current_file_path = Some(path.clone());
-                    self.update_default_export_path();
-                    self.original_file_hash = disk_hash;
-                    self.is_dirty = false;
-                    self.journal_pending_flush = false;
-                    self.recovered_from_crash = false;
-                    self.recovery_banner_active = false;
-                    self.chrome_autohidden = false;
-                    self.display_word_count_override = None;
-                    self.buffer.set_text(&content);
-                    self.buffer.set_cursor(0);
                     self.recent_files.retain(|p| p != &path);
                     self.recent_files.insert(0, path);
                     if self.recent_files.len() > 8 {
                         self.recent_files.truncate(8);
                     }
-                    self.status_message = Some(format!("Aperto: {}", self.document_title));
                     self.overlay = ActiveOverlay::None;
+                } else {
+                    // Decide whether to reuse the current tab (only if it is an untouched untitled buffer
+                    // or the sole untouched initial sample `/tmp/esempio_accent.md`) or open a new tab.
+                    let is_untouched_placeholder = !self.is_dirty
+                        && (self.current_file_path.is_none()
+                            || (self.tabs.len() == 1
+                                && self.current_file_path.as_deref()
+                                    == Some(std::path::Path::new("/tmp/esempio_accent.md"))));
+
+                    if let Some(mut entry) = accent_storage::find_recovery_journal_for_path(
+                        &self.recovery_dir,
+                        Some(&path),
+                    ) {
+                        if entry.original_file_hash.is_none() {
+                            entry.original_file_hash = disk_hash;
+                        }
+                        if !is_untouched_placeholder {
+                            let id = self.next_tab_id;
+                            self.next_tab_id += 1;
+                            self.tabs.push(DocumentTab {
+                                tab_id: id,
+                                document_title: entry.document_title.clone(),
+                                current_file_path: Some(path.clone()),
+                                is_dirty: true,
+                                original_file_hash: entry.original_file_hash.clone(),
+                                last_edit_instant: None,
+                                last_edit_utc_ms: 0,
+                                journal_pending_flush: false,
+                                recovered_from_crash: true,
+                                recovery_banner_active: true,
+                                buffer: DocumentBuffer::default(),
+                            });
+                            self.active_tab_index = self.tabs.len() - 1;
+                        }
+                        self.restore_from_journal_entry(entry);
+                        self.recent_files.retain(|p| p != &path);
+                        self.recent_files.insert(0, path);
+                        if self.recent_files.len() > 8 {
+                            self.recent_files.truncate(8);
+                        }
+                        self.overlay = ActiveOverlay::None;
+                    } else if let Some(content) = disk_content {
+                        let title = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("documento.md")
+                            .to_string();
+                        if !is_untouched_placeholder {
+                            let id = self.next_tab_id;
+                            self.next_tab_id += 1;
+                            let mut buf = DocumentBuffer::from_str_content(&content);
+                            buf.set_cursor(0);
+                            self.tabs.push(DocumentTab {
+                                tab_id: id,
+                                document_title: title.clone(),
+                                current_file_path: Some(path.clone()),
+                                is_dirty: false,
+                                original_file_hash: disk_hash.clone(),
+                                last_edit_instant: None,
+                                last_edit_utc_ms: 0,
+                                journal_pending_flush: false,
+                                recovered_from_crash: false,
+                                recovery_banner_active: false,
+                                buffer: buf,
+                            });
+                            self.active_tab_index = self.tabs.len() - 1;
+                        }
+                        self.document_title = title.clone();
+                        self.file_dialog_input = title;
+                        if let Some(parent) = path.parent() {
+                            self.file_dialog_dir = parent.to_path_buf();
+                        }
+                        self.current_file_path = Some(path.clone());
+                        self.update_default_export_path();
+                        self.original_file_hash = disk_hash;
+                        self.is_dirty = false;
+                        self.journal_pending_flush = false;
+                        self.recovered_from_crash = false;
+                        self.recovery_banner_active = false;
+                        self.chrome_autohidden = false;
+                        self.display_word_count_override = None;
+                        self.buffer.set_text(&content);
+                        self.buffer.set_cursor(0);
+                        self.recent_files.retain(|p| p != &path);
+                        self.recent_files.insert(0, path);
+                        if self.recent_files.len() > 8 {
+                            self.recent_files.truncate(8);
+                        }
+                        self.status_message = Some(format!("Aperto: {}", self.document_title));
+                        self.overlay = ActiveOverlay::None;
+                    }
                 }
             }
             Action::OpenTutorial => {
@@ -1629,6 +2103,9 @@ impl Session {
                 }
             }
         }
+
+        // Keep `self.tabs[self.active_tab_index]` in sync with top-level active document fields
+        self.sync_active_tab_to_slot();
 
         // Automatically persist user settings whenever a preference/directory/file changes
         // OR when closing the Preferences dialog / settings overlays.
@@ -1940,5 +2417,280 @@ mod tests {
         assert!(restored.recent_files.contains(&note_path));
 
         let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn test_text_zoom_in_out_reset_and_clamping() {
+        let mut session = Session::default();
+        assert!((session.typography.font_size - DEFAULT_FONT_SIZE).abs() < 1e-4);
+        assert_eq!(session.zoom_percentage(), 100);
+
+        // Zoom In (+1.0 pt per step)
+        session.apply(Action::ZoomIn);
+        assert!((session.typography.font_size - (DEFAULT_FONT_SIZE + 1.0)).abs() < 1e-4);
+        assert!(session.zoom_percentage() > 100);
+
+        // Zoom Out (-1.0 pt per step)
+        session.apply(Action::ZoomOut);
+        assert!((session.typography.font_size - DEFAULT_FONT_SIZE).abs() < 1e-4);
+        assert_eq!(session.zoom_percentage(), 100);
+
+        // ZoomByStep beyond MAX_FONT_SIZE -> clamped to MAX_FONT_SIZE (36.0)
+        session.apply(Action::ZoomByStep(100.0));
+        assert!((session.typography.font_size - MAX_FONT_SIZE).abs() < 1e-4);
+
+        // ZoomByStep below MIN_FONT_SIZE -> clamped to MIN_FONT_SIZE (10.0)
+        session.apply(Action::ZoomByStep(-200.0));
+        assert!((session.typography.font_size - MIN_FONT_SIZE).abs() < 1e-4);
+
+        // ZoomReset -> returns to DEFAULT_FONT_SIZE (17.35, 100%)
+        session.apply(Action::ZoomReset);
+        assert!((session.typography.font_size - DEFAULT_FONT_SIZE).abs() < 1e-4);
+        assert_eq!(session.zoom_percentage(), 100);
+    }
+
+    #[test]
+    fn test_text_zoom_persistence_roundtrip() {
+        let base_dir = std::env::temp_dir().join(format!(
+            "accent_zoom_persist_test_{}_{}",
+            std::process::id(),
+            accent_storage::current_utc_ms()
+        ));
+        let recovery_dir = base_dir.join("recovery");
+        let config_path = base_dir.join("settings.json");
+
+        {
+            let mut session =
+                Session::with_config_and_recovery(config_path.clone(), recovery_dir.clone());
+            session.apply(Action::ZoomByStep(4.65)); // 17.35 + 4.65 = 22.0 pt
+            assert!((session.typography.font_size - 22.0).abs() < 1e-3);
+        }
+
+        let restored = Session::with_config_and_recovery(config_path, recovery_dir);
+        assert!((restored.typography.font_size - 22.0).abs() < 1e-3);
+        assert_eq!(restored.zoom_percentage(), 127);
+
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn stress_test_text_zoom_rapid_wheel_oscillations_10000_steps() {
+        let mut session = Session::default();
+        for i in 0..10_000 {
+            let delta = match i % 7 {
+                0 => 0.75,
+                1 => -1.25,
+                2 => 3.5,
+                3 => -4.1,
+                4 => f32::NAN,
+                5 => f32::INFINITY,
+                _ => 0.33,
+            };
+            session.apply(Action::ZoomByStep(delta));
+            assert!(session.typography.font_size.is_finite());
+            assert!(
+                (MIN_FONT_SIZE..=MAX_FONT_SIZE).contains(&session.typography.font_size),
+                "Font size {} out of bounds at step {i}",
+                session.typography.font_size
+            );
+            if i % 500 == 0 {
+                session.apply(Action::ZoomReset);
+                assert!((session.typography.font_size - DEFAULT_FONT_SIZE).abs() < 1e-4);
+            }
+        }
+    }
+
+    #[test]
+    fn test_multitab_lifecycle_new_switch_close_and_deduplication() {
+        let base_dir = std::env::temp_dir().join(format!(
+            "accent_multitab_lifecycle_test_{}_{}",
+            std::process::id(),
+            accent_storage::current_utc_ms()
+        ));
+        std::fs::create_dir_all(&base_dir).unwrap();
+        let file_a = base_dir.join("alpha.md");
+        let file_b = base_dir.join("beta.md");
+        let file_c = base_dir.join("gamma.md");
+        accent_storage::atomic_save(&file_a, "# Alpha 🚀\n").unwrap();
+        accent_storage::atomic_save(&file_b, "# Beta 🦀\n").unwrap();
+        accent_storage::atomic_save(&file_c, "# Gamma ✨\n").unwrap();
+
+        let mut session = Session::with_recovery_dir(base_dir.join("recovery"));
+        assert_eq!(session.tabs.len(), 1);
+
+        // First OpenFile reuses the initial placeholder tab (`esempio_accent.md`)
+        session.apply(Action::OpenFile(file_a.clone()));
+        assert_eq!(session.tabs.len(), 1);
+        assert_eq!(session.document_title, "alpha.md");
+        assert_eq!(session.active_tab_index, 0);
+
+        // Second OpenFile opens in a NEW tab (index 1)
+        session.apply(Action::OpenFile(file_b.clone()));
+        assert_eq!(session.tabs.len(), 2);
+        assert_eq!(session.document_title, "beta.md");
+        assert_eq!(session.active_tab_index, 1);
+
+        // Third OpenFile opens in a NEW tab (index 2)
+        session.apply(Action::OpenFile(file_c.clone()));
+        assert_eq!(session.tabs.len(), 3);
+        assert_eq!(session.document_title, "gamma.md");
+        assert_eq!(session.active_tab_index, 2);
+
+        // Re-opening `alpha.md` deduplicates and switches back to Tab 0!
+        session.apply(Action::OpenFile(file_a.clone()));
+        assert_eq!(session.tabs.len(), 3);
+        assert_eq!(session.active_tab_index, 0);
+        assert_eq!(session.document_title, "alpha.md");
+        assert_eq!(session.buffer.text(), "# Alpha 🚀\n");
+
+        // NextTab / PrevTab wrap around
+        session.apply(Action::PrevTab);
+        assert_eq!(session.active_tab_index, 2);
+        assert_eq!(session.document_title, "gamma.md");
+        session.apply(Action::NextTab);
+        assert_eq!(session.active_tab_index, 0);
+        assert_eq!(session.document_title, "alpha.md");
+
+        // Close middle tab (index 1, `beta.md`)
+        session.apply(Action::CloseTab(1));
+        assert_eq!(session.tabs.len(), 2);
+        assert_eq!(session.tabs[0].document_title, "alpha.md");
+        assert_eq!(session.tabs[1].document_title, "gamma.md");
+
+        // Close remaining 2 tabs -> closing the last tab leaves a clean `untitled.md` tab
+        session.apply(Action::CloseTab(1));
+        session.apply(Action::CloseTab(0));
+        assert_eq!(session.tabs.len(), 1);
+        assert_eq!(session.document_title, "untitled.md");
+        assert!(session.current_file_path.is_none());
+
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn test_multitab_isolated_undo_redo_dirty_state_and_cursors() {
+        let mut session = Session::default();
+        session.apply(Action::UpdateBufferText("Testo Tab Zero".to_string()));
+        session.apply(Action::MoveCursor(5));
+        assert!(session.is_dirty);
+
+        // Open a second tab (`untitled.md`)
+        session.apply(Action::NewTab);
+        assert_eq!(session.tabs.len(), 2);
+        assert_eq!(session.active_tab_index, 1);
+        assert!(!session.is_dirty);
+        session.apply(Action::InsertText(" Aggiunta Tab Uno 🚀".to_string()));
+        assert!(session.is_dirty);
+        let tab1_edited = session.buffer.text();
+
+        // Switch back to Tab 0 and verify its buffer, cursor, and dirty state are intact
+        session.apply(Action::SwitchTab(0));
+        assert_eq!(session.active_tab_index, 0);
+        assert_eq!(session.buffer.text(), "Testo Tab Zero");
+        assert_eq!(session.buffer.cursor(), 5);
+        assert!(session.is_dirty);
+
+        // Undo in Tab 0 must NOT affect Tab 1
+        session.apply(Action::Undo);
+        assert_ne!(session.buffer.text(), "Testo Tab Zero");
+        session.apply(Action::SwitchTab(1));
+        assert_eq!(session.buffer.text(), tab1_edited);
+
+        // Undo and Redo in Tab 1
+        session.apply(Action::Undo);
+        assert!(!session.buffer.text().contains("Aggiunta Tab Uno 🚀"));
+        session.apply(Action::Redo);
+        assert_eq!(session.buffer.text(), tab1_edited);
+    }
+
+    #[test]
+    fn test_multitab_persistence_and_wal_recovery() {
+        let base_dir = std::env::temp_dir().join(format!(
+            "accent_multitab_persist_wal_{}_{}",
+            std::process::id(),
+            accent_storage::current_utc_ms()
+        ));
+        let recovery_dir = base_dir.join("recovery");
+        let config_path = base_dir.join("settings.json");
+        std::fs::create_dir_all(&recovery_dir).unwrap();
+
+        let doc1 = base_dir.join("doc1.md");
+        let doc2 = base_dir.join("doc2.md");
+        accent_storage::atomic_save(&doc1, "# Doc 1\n").unwrap();
+        accent_storage::atomic_save(&doc2, "# Doc 2\n").unwrap();
+
+        {
+            let mut session =
+                Session::with_config_and_recovery(config_path.clone(), recovery_dir.clone());
+            session.apply(Action::OpenFile(doc1.clone()));
+            session.apply(Action::OpenFile(doc2.clone()));
+            assert_eq!(session.tabs.len(), 2);
+            assert_eq!(session.active_tab_index, 1);
+            // Edit Tab 0 (`doc1.md`) and flush WAL
+            session.apply(Action::SwitchTab(0));
+            session.apply(Action::UpdateBufferText("# Doc 1 Modificato non salvato\n".to_string()));
+            let future = std::time::Instant::now()
+                + std::time::Duration::from_millis(JOURNAL_DEBOUNCE_MS + 50);
+            assert!(session.poll_journal_flush(future));
+        }
+
+        // Restart session: both tabs must be restored and active_tab_index == 0 with WAL recovery!
+        let restored = Session::with_config_and_recovery(config_path, recovery_dir);
+        assert_eq!(restored.tabs.len(), 2);
+        assert_eq!(restored.active_tab_index, 0);
+        assert_eq!(restored.document_title, "doc1.md");
+        assert!(restored.recovered_from_crash);
+        assert_eq!(restored.buffer.text(), "# Doc 1 Modificato non salvato\n");
+        assert_eq!(restored.tabs[1].document_title, "doc2.md");
+        assert_eq!(restored.tabs[1].buffer.text(), "# Doc 2\n");
+
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn stress_test_multitab_100_concurrent_tabs_heavy_switching_and_editing() {
+        let mut session = Session::default();
+        // Open 99 additional tabs -> 100 concurrent tabs total
+        for i in 1..100 {
+            session.apply(Action::NewTab);
+            session.apply(Action::UpdateBufferText(format!(
+                "# Tab Numero {i} 🚀\n\nContenuto iniziale del tab {i}.\n"
+            )));
+        }
+        assert_eq!(session.tabs.len(), 100);
+
+        // Perform 2,500 cross-tab switches, edits, format commands, and cursor movements
+        for step in 0..2_500 {
+            let target_tab = (step * 37) % session.tabs.len();
+            session.apply(Action::SwitchTab(target_tab));
+            assert_eq!(session.active_tab_index, target_tab);
+
+            match step % 5 {
+                0 => session.apply(Action::InsertText(" ✨🦀".to_string())),
+                1 => session.apply(Action::ApplyFormat(FormatCommand::Bold)),
+                2 => session.apply(Action::NextTab),
+                3 => session.apply(Action::PrevTab),
+                _ => {
+                    session.apply(Action::Undo);
+                    session.apply(Action::Redo);
+                }
+            }
+        }
+
+        // Close 50 tabs from various positions and verify remaining 50 tabs are valid and consistent
+        for close_step in 0..50 {
+            let idx = (close_step * 7) % session.tabs.len();
+            session.apply(Action::CloseTab(idx));
+        }
+        assert_eq!(session.tabs.len(), 50);
+        assert!(session.active_tab_index < 50);
+        assert_eq!(
+            session.document_title,
+            session.tabs[session.active_tab_index].document_title
+        );
+        assert_eq!(
+            session.buffer.text(),
+            session.tabs[session.active_tab_index].buffer.text()
+        );
     }
 }

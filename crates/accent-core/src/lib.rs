@@ -430,6 +430,8 @@ pub struct DocumentBuffer {
     cached_stats: DocumentStats,
     cursor_char_offset: usize,
     selection_end_char_offset: usize,
+    undo_stack: Vec<(String, usize, usize)>,
+    redo_stack: Vec<(String, usize, usize)>,
     cache: RefCell<DocumentAstCache>,
 }
 
@@ -455,8 +457,58 @@ impl DocumentBuffer {
             cached_stats,
             cursor_char_offset: default_caret,
             selection_end_char_offset: default_caret,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             cache: RefCell::new(DocumentAstCache::default()),
         }
+    }
+
+    fn push_undo_snapshot(&mut self) {
+        if self.undo_stack.len() >= 128 {
+            self.undo_stack.remove(0);
+        }
+        self.undo_stack.push((
+            self.cached_text.clone(),
+            self.cursor_char_offset,
+            self.selection_end_char_offset,
+        ));
+        self.redo_stack.clear();
+    }
+
+    /// Reverts the last text mutation on this buffer, returning `true` if a state was restored.
+    pub fn undo(&mut self) -> bool {
+        let Some((prev_text, prev_cur, prev_sel)) = self.undo_stack.pop() else {
+            return false;
+        };
+        self.redo_stack.push((
+            self.cached_text.clone(),
+            self.cursor_char_offset,
+            self.selection_end_char_offset,
+        ));
+        self.rope = Rope::from_str(&prev_text);
+        let len = self.rope.len_chars();
+        self.cursor_char_offset = prev_cur.min(len);
+        self.selection_end_char_offset = prev_sel.min(len);
+        self.sync_after_mutation();
+        true
+    }
+
+    /// Re-applies the last undone text mutation on this buffer, returning `true` if a state was restored.
+    pub fn redo(&mut self) -> bool {
+        let Some((next_text, next_cur, next_sel)) = self.redo_stack.pop() else {
+            return false;
+        };
+        self.undo_stack.push((
+            self.cached_text.clone(),
+            self.cursor_char_offset,
+            self.selection_end_char_offset,
+        ));
+        self.rope = Rope::from_str(&next_text);
+        let len = self.rope.len_chars();
+        self.cursor_char_offset = next_cur.min(len);
+        self.selection_end_char_offset = next_sel.min(len);
+        self.sync_after_mutation();
+        true
     }
 
     fn sync_after_mutation(&mut self) {
@@ -593,6 +645,7 @@ impl DocumentBuffer {
     }
 
     pub fn insert_text(&mut self, text: &str) {
+        self.push_undo_snapshot();
         let sel = self.selection_char_range();
         if sel.start < sel.end {
             self.rope.remove(sel.clone());
@@ -607,6 +660,7 @@ impl DocumentBuffer {
 
     /// Wraps the current selection with `prefix` and `suffix` (or inserts `prefix + placeholder + suffix` if empty).
     pub fn wrap_selection(&mut self, prefix: &str, suffix: &str, placeholder: &str) {
+        self.push_undo_snapshot();
         let sel = self.selection_char_range();
         if sel.start < sel.end {
             let selected: String = self.rope.slice(sel.clone()).to_string();
@@ -633,6 +687,7 @@ impl DocumentBuffer {
         if self.cached_text == text {
             return;
         }
+        self.push_undo_snapshot();
         self.rope = Rope::from_str(text);
         let len = self.rope.len_chars();
         self.cursor_char_offset = self.cursor_char_offset.min(len);
@@ -819,6 +874,7 @@ impl DocumentBuffer {
                                 let leading_ws = raw_l.len() - trimmed.len();
                                 let is_task_prefix = task.is_some()
                                     && trimmed.len() >= 5
+                                    && trimmed.is_char_boundary(5)
                                     && matches!(
                                         &trimmed[..5],
                                         "- [ ]"
@@ -997,7 +1053,7 @@ impl DocumentBuffer {
                     let raw_l = &text[lr.clone()];
                     let trimmed = raw_l.trim_start_matches([' ', '\t']);
                     let leading_ws = raw_l.len() - trimmed.len();
-                    if trimmed.len() >= 5 {
+                    if trimmed.len() >= 5 && trimmed.is_char_boundary(5) {
                         let after_box = &trimmed[5..];
                         let space_len = usize::from(after_box.starts_with(' '));
                         content_byte_start = lr.start + leading_ws + 5 + space_len;
@@ -1438,7 +1494,7 @@ impl DocumentBuffer {
                     let trimmed = raw_l.trim_start_matches([' ', '\t']);
                     let leading_ws = raw_l.len() - trimmed.len();
                     let m_start = range.start + leading_ws;
-                    let m_len = if task.is_some() && trimmed.len() >= 5 {
+                    let m_len = if task.is_some() && trimmed.len() >= 5 && trimmed.is_char_boundary(5) {
                         let after_box = &trimmed[5..];
                         5 + usize::from(after_box.starts_with(' '))
                     } else if !*ordered
@@ -2100,7 +2156,7 @@ impl DocumentBuffer {
         match &data.value {
             NodeValue::Text(t) => {
                 out.push(PreviewInline {
-                    text: t.clone(),
+                    text: expand_emoji_shortcodes(t),
                     bold,
                     italic,
                     strikethrough,
@@ -2230,6 +2286,109 @@ impl DocumentBuffer {
             })
             .collect()
     }
+}
+
+/// Looks up a standard GitHub/Markdown emoji shortcode name (without surrounding colons) and returns its Unicode emoji string.
+pub fn lookup_emoji_shortcode(shortcode: &str) -> Option<&'static str> {
+    match shortcode {
+        "rocket" => Some("🚀"),
+        "sparkles" => Some("✨"),
+        "star" => Some("⭐"),
+        "star2" | "glowing_star" => Some("🌟"),
+        "fire" => Some("🔥"),
+        "zap" | "lightning" => Some("⚡"),
+        "crab" | "rust" => Some("🦀"),
+        "warning" | "warn" => Some("⚠"),
+        "check" | "white_check_mark" | "heavy_check_mark" => Some("✓"),
+        "x" | "cross_mark" => Some("✗"),
+        "bulb" | "idea" => Some("💡"),
+        "heart" => Some("❤"),
+        "thumbsup" | "+1" => Some("👍"),
+        "thumbsdown" | "-1" => Some("👎"),
+        "smile" | "grinning" => Some("😀"),
+        "joy" => Some("😂"),
+        "wink" => Some("😉"),
+        "thinking" => Some("🤔"),
+        "eyes" => Some("👀"),
+        "tada" | "party" => Some("🎉"),
+        "100" => Some("💯"),
+        "info" | "information_source" => Some("ℹ"),
+        "stop" | "octagonal_sign" => Some("🛑"),
+        "book" | "open_book" => Some("📖"),
+        "memo" | "pencil" => Some("📝"),
+        "link" => Some("🔗"),
+        "lock" => Some("🔒"),
+        "unlock" => Some("🔓"),
+        "key" => Some("🔑"),
+        "gear" | "settings" => Some("⚙"),
+        "bug" => Some("🐛"),
+        "wrench" => Some("🔧"),
+        "hammer" => Some("🔨"),
+        "package" => Some("📦"),
+        "Wave" | "wave" => Some("👋"),
+        "clap" => Some("👏"),
+        "muscle" => Some("💪"),
+        "pray" => Some("🙏"),
+        "trophy" => Some("🏆"),
+        "crown" => Some("👑"),
+        "gem" => Some("💎"),
+        "bell" => Some("🔔"),
+        "bookmark" => Some("🔖"),
+        "pushpin" | "pin" => Some("📌"),
+        "calendar" => Some("📅"),
+        "hourglass" | "clock" => Some("⏳"),
+        "mag" | "magnifying_glass" | "search" => Some("🔍"),
+        "chart_with_upwards_trend" => Some("📈"),
+        "shield" => Some("🛡"),
+        "globe" | "earth" => Some("🌐"),
+        "computer" | "laptop" => Some("💻"),
+        "coffee" => Some("☕"),
+        "pizza" => Some("🍕"),
+        "sun" | "sunny" => Some("☀"),
+        "moon" => Some("🌙"),
+        "cloud" => Some("☁"),
+        "rainbow" => Some("🌈"),
+        "umbrella" => Some("☂"),
+        "snowflake" => Some("❄"),
+        "music" | "musical_note" => Some("🎵"),
+        "art" => Some("🎨"),
+        _ => None,
+    }
+}
+
+/// Expands `:shortcode:` tokens inside `text` into their Unicode emoji equivalents while leaving unknown `:tokens:` untouched.
+pub fn expand_emoji_shortcodes(text: &str) -> String {
+    if !text.contains(':') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b':' {
+            let mut end = i + 1;
+            while end < bytes.len()
+                && (bytes[end].is_ascii_alphanumeric()
+                    || bytes[end] == b'_'
+                    || bytes[end] == b'+'
+                    || bytes[end] == b'-')
+            {
+                end += 1;
+            }
+            if end > i + 1 && end < bytes.len() && bytes[end] == b':' {
+                let candidate = &text[(i + 1)..end];
+                if let Some(emoji) = lookup_emoji_shortcode(candidate) {
+                    out.push_str(emoji);
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+        let ch = text[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }
 
 #[cfg(test)]
@@ -2653,5 +2812,166 @@ DISPLAY=:99 apostrophe
         assert!(segs
             .iter()
             .any(|s| s.text.contains("Costrutto") && s.table_header_cell));
+    }
+
+    #[test]
+    fn test_unicode_emoji_basic_and_zwj_ast_alignment() {
+        let md = "\
+# Titolo 🚀 con Famiglia 👨‍👩‍👧‍👦 e Bandiera 🇮🇹
+
+Paragrafo con **grassetto 🦀👍🏽✨**, *corsivo 👩‍💻*, ~~barrato 🏳️‍🌈~~ e `codice 💡⚡`.
+
+- [x] Task completato ✅ con cuore ❤️
+- [ ] Task aperto ⚠️ con stella ⭐
+1. Elemento numerato 🔥 con link [Sito 🌐](https://accent.dev/🚀)
+
+> Citazione con bussola 🧭 e ingranaggio ⚙️
+
+| Emoji | Descrizione | Stato |
+| :--- | :---: | ---: |
+| 🚀 | Razzo spaziale | Attivo ✅ |
+| 👨‍👩‍👧‍👦 | Sequenza ZWJ (25 byte) | Testato 💯 |
+";
+        let buf = DocumentBuffer::from_str_content(md);
+        for view_while_typing in [false, true] {
+            let segs = buf.build_editor_segments(MarkdownDialect::Gfm, view_while_typing, 0..0);
+            let reconstructed: String = segs.iter().map(|s| s.text.as_str()).collect();
+            assert_eq!(
+                reconstructed, md,
+                "1:1 UTF-8 reconstruction must hold with complex ZWJ and flag emojis"
+            );
+
+            // Verify every segment's byte_range matches its exact slice in `md`
+            for seg in &segs {
+                assert!(md.is_char_boundary(seg.byte_range.start));
+                assert!(md.is_char_boundary(seg.byte_range.end));
+                assert_eq!(&md[seg.byte_range.clone()], seg.text.as_str());
+            }
+        }
+
+        // Verify byte_to_char and char_to_byte roundtrip at every single char index
+        for char_idx in 0..=buf.len_chars() {
+            let byte_idx = buf.char_to_byte(char_idx);
+            assert!(md.is_char_boundary(byte_idx));
+            assert_eq!(buf.byte_to_char(byte_idx), char_idx);
+        }
+    }
+
+    #[test]
+    fn test_unicode_emoji_caret_unfolding_boundary_precision() {
+        let md = "Inizio 🚀👨‍👩‍👧‍👦🇮🇹 **grassetto 🦀✨** e `codice 💡` fine\n";
+        let mut buf = DocumentBuffer::from_str_content(md);
+
+        let spans = buf.extract_ast_spans(MarkdownDialect::Gfm);
+        let strong_span = spans
+            .iter()
+            .find(|s| matches!(s.kind, AstSpanKind::Strong))
+            .expect("Strong span should exist");
+        let code_span = spans
+            .iter()
+            .find(|s| matches!(s.kind, AstSpanKind::CodeInline))
+            .expect("CodeInline span should exist");
+
+        assert_eq!(&md[strong_span.byte_range.clone()], "**grassetto 🦀✨**");
+        assert_eq!(&md[code_span.byte_range.clone()], "`codice 💡`");
+
+        for char_pos in 0..=buf.len_chars() {
+            buf.set_cursor(char_pos);
+            let caret_bytes = buf.selection_byte_range();
+            let live = buf.compute_live_spans(MarkdownDialect::Gfm, true, caret_bytes.clone());
+            let segs = buf.build_editor_segments(MarkdownDialect::Gfm, true, caret_bytes);
+            let reconstructed: String = segs.iter().map(|s| s.text.as_str()).collect();
+            assert_eq!(reconstructed, md);
+
+            let strong_live = live
+                .iter()
+                .find(|ls| matches!(ls.span.kind, AstSpanKind::Strong))
+                .unwrap();
+            let code_live = live
+                .iter()
+                .find(|ls| matches!(ls.span.kind, AstSpanKind::CodeInline))
+                .unwrap();
+
+            if (strong_span.char_range.start..=strong_span.char_range.end).contains(&char_pos) {
+                assert_eq!(strong_live.visibility, DelimiterVisibility::Expanded);
+            } else {
+                assert_eq!(strong_live.visibility, DelimiterVisibility::Collapsed);
+            }
+
+            if (code_span.char_range.start..=code_span.char_range.end).contains(&char_pos) {
+                assert_eq!(code_live.visibility, DelimiterVisibility::Expanded);
+            } else {
+                assert_eq!(code_live.visibility, DelimiterVisibility::Collapsed);
+            }
+        }
+    }
+
+    #[test]
+    fn test_emoji_shortcodes_expansion_and_preview() {
+        let raw = "Lancio :rocket: con :crab: e :sparkles: (ignora :non_esiste: e URL https://a.b:8080/c)";
+        let expanded = expand_emoji_shortcodes(raw);
+        assert_eq!(
+            expanded,
+            "Lancio 🚀 con 🦀 e ✨ (ignora :non_esiste: e URL https://a.b:8080/c)"
+        );
+
+        let buf = DocumentBuffer::from_str_content("# Titolo :rocket:\n\nTesto con :bulb: e :fire:\n");
+        let blocks = buf.parse_preview_blocks(MarkdownDialect::Gfm);
+        assert_eq!(blocks.len(), 2);
+        if let PreviewBlock::Heading { inlines, .. } = &blocks[0] {
+            let joined: String = inlines.iter().map(|i| i.text.as_str()).collect();
+            assert_eq!(joined, "Titolo 🚀");
+        } else {
+            panic!("Expected Heading preview block");
+        }
+    }
+
+    #[test]
+    fn stress_test_unicode_emoji_massive_document_10k_glyphs() {
+        // Build a heavy document with > 5,000 complex emojis across 600 lines of mixed Markdown
+        let mut big_md = String::with_capacity(120_000);
+        let emoji_cluster_line =
+            "- [x] **Sprint 🚀✨🦀** con sequenza ZWJ 👨‍👩‍👧‍👦👩‍💻, bandiera 🇮🇹🇪🇺, tono 👍🏽 e `codice 💡⚡🔥` in [Link 🌐](https://accent.dev/🎉)\n";
+        for i in 0..600 {
+            if i % 20 == 0 {
+                big_md.push_str(&format!("## Sezione {i} 🚀🌟🔥🦀\n\n"));
+            }
+            if i % 15 == 0 {
+                big_md.push_str("| Colonna 🚀 | Valore 🦀 |\n| :--- | ---: |\n| Dato 👨‍👩‍👧‍👦 | 100% 💯 |\n\n");
+            }
+            big_md.push_str(emoji_cluster_line);
+        }
+
+        let mut buf = DocumentBuffer::from_str_content(&big_md);
+        assert!(buf.len_chars() > 35_000);
+
+        // Cold build and 1:1 verification
+        let segs_cold = buf.build_editor_segments_arc(MarkdownDialect::Gfm, true, 0..0);
+        let reconstructed: String = segs_cold.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(reconstructed, big_md);
+
+        // Warm cache must be sub-millisecond
+        let t_warm = std::time::Instant::now();
+        let segs_warm = buf.build_editor_segments_arc(MarkdownDialect::Gfm, true, 0..0);
+        let warm_ms = t_warm.elapsed().as_secs_f64() * 1000.0;
+        assert!(Arc::ptr_eq(&segs_cold, &segs_warm));
+        assert!(warm_ms < 1.0, "Warm cache took {warm_ms:.3} ms");
+
+        // Stress 200 sequential edits with multi-scalar emojis + Undo/Redo roundtrip
+        let initial_text = buf.text();
+        for step in 0..100 {
+            let pos = (step * 137) % buf.len_chars().max(1);
+            buf.set_cursor(pos);
+            buf.insert_text("🎯👨‍🔬🇮🇹");
+        }
+        let segs_after_edits =
+            buf.build_editor_segments_arc(MarkdownDialect::Gfm, true, buf.selection_byte_range());
+        let after_reconstructed: String =
+            segs_after_edits.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(after_reconstructed, buf.text());
+
+        // Undo all 100 emoji insertions and verify exact restoration
+        while buf.undo() {}
+        assert_eq!(buf.text(), initial_text);
     }
 }

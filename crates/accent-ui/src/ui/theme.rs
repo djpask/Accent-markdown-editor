@@ -685,6 +685,45 @@ pub fn configure_fonts(ctx: &Context) {
         ],
     );
 
+    let has_sys_emoji = try_load_font(
+        &mut defs,
+        "sys_emoji_vec",
+        &[
+            "/usr/share/fonts/noto/NotoEmoji-Regular.ttf",
+            "/usr/share/fonts/TTF/NotoEmoji-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf",
+            "C:\\Windows\\Fonts\\seguiemj.ttf",
+        ],
+    );
+    let has_sys_symbols = try_load_font(
+        &mut defs,
+        "sys_symbols_vec",
+        &[
+            "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansSymbols-Regular.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/gnu-free/FreeSans.otf",
+            "C:\\Windows\\Fonts\\seguisym.ttf",
+        ],
+    );
+
+    if has_sys_emoji {
+        if let Some(mono) = defs.families.get_mut(&FontFamily::Monospace) {
+            mono.push("sys_emoji_vec".to_string());
+        }
+        if let Some(prop) = defs.families.get_mut(&FontFamily::Proportional) {
+            prop.push("sys_emoji_vec".to_string());
+        }
+    }
+    if has_sys_symbols {
+        if let Some(mono) = defs.families.get_mut(&FontFamily::Monospace) {
+            mono.push("sys_symbols_vec".to_string());
+        }
+        if let Some(prop) = defs.families.get_mut(&FontFamily::Proportional) {
+            prop.push("sys_symbols_vec".to_string());
+        }
+    }
+
     let fallback_mono = defs
         .families
         .get(&FontFamily::Monospace)
