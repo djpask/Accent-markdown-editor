@@ -1,7 +1,9 @@
 pub mod ui;
 
 use accent_session::{Action, Session};
-use accent_storage::{IpcRequest, SingleInstanceGuard, SingleInstanceOutcome};
+use accent_storage::{
+    FocusedFileWatcher, IpcRequest, SingleInstanceGuard, SingleInstanceOutcome,
+};
 use eframe::egui;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -16,6 +18,9 @@ pub struct AccentApp {
     frame_count: u32,
     sync_cursor_to_widget: bool,
     single_instance: Option<SingleInstanceGuard>,
+    file_watcher: Option<FocusedFileWatcher>,
+    last_watched_path: Option<PathBuf>,
+    last_fullscreen: bool,
 }
 
 impl AccentApp {
@@ -42,11 +47,25 @@ impl AccentApp {
             session.apply(Action::OpenFile(fp));
         }
 
+        let file_watcher = FocusedFileWatcher::new().ok();
+        if let Some(ref watcher) = file_watcher {
+            let egui_ctx = cc.egui_ctx.clone();
+            watcher.set_waker(move || {
+                egui_ctx.request_repaint();
+            });
+            watcher.set_watched_file(session.current_file_path.clone());
+        }
+        let last_watched_path = session.current_file_path.clone();
+        let last_fullscreen = session.fullscreen;
+
         Self {
             session,
             frame_count: 0,
             sync_cursor_to_widget: true,
             single_instance,
+            file_watcher,
+            last_watched_path,
+            last_fullscreen,
         }
     }
 }
@@ -72,6 +91,20 @@ impl eframe::App for AccentApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 ctx.request_repaint();
             }
+        }
+
+        // Check OS-driven file modification notification or window focus regain (zero continuous polling)
+        let watcher_notified = self
+            .file_watcher
+            .as_ref()
+            .is_some_and(|w| w.take_change_notification());
+        let window_gained_focus = ctx.input(|i| {
+            i.events
+                .iter()
+                .any(|e| matches!(e, egui::Event::WindowFocused(true)))
+        });
+        if watcher_notified || window_gained_focus {
+            self.session.apply(Action::CheckExternalFileModification);
         }
 
         // Borrow-Checker Rule (AGENTS.md Section 3):
@@ -122,6 +155,7 @@ impl eframe::App for AccentApp {
                     | Action::OpenTutorial
                     | Action::ConfirmRecoverySave
                     | Action::DiscardRecovery
+                    | Action::ReloadFromDisk
                     | Action::FindNext
                     | Action::FindPrev
                     | Action::InsertText(_)
@@ -130,6 +164,20 @@ impl eframe::App for AccentApp {
                 self.sync_cursor_to_widget = true;
             }
             self.session.apply(action);
+        }
+
+        // Update OS file watcher target whenever the active tab's file path changes
+        if self.session.current_file_path != self.last_watched_path {
+            self.last_watched_path = self.session.current_file_path.clone();
+            if let Some(ref watcher) = self.file_watcher {
+                watcher.set_watched_file(self.last_watched_path.clone());
+            }
+        }
+
+        // Synchronize fullscreen viewport command when toggled via menu or F11
+        if self.session.fullscreen != self.last_fullscreen {
+            self.last_fullscreen = self.session.fullscreen;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.session.fullscreen));
         }
 
         // Phase 4: Poll < 300ms debounced Write-Ahead Recovery Journal (WAL) flush
@@ -153,6 +201,7 @@ impl eframe::App for AccentApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.session.on_clean_exit();
+        self.file_watcher = None;
         self.single_instance = None;
     }
 }
@@ -366,7 +415,7 @@ mod tests {
 
     #[test]
     fn test_version_system_consistency() {
-        assert_eq!(VERSION, "0.8.5");
+        assert_eq!(VERSION, "0.8.6");
         assert_eq!(accent_core::VERSION, VERSION);
         let version_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../VERSION");
         let file_ver = std::fs::read_to_string(version_file)

@@ -102,6 +102,10 @@ impl I18n {
             (Locale::En, "focus_mode") => "Focus Mode",
             (Locale::Es, "focus_mode") => "Modo concentración",
 
+            (Locale::It, "fullscreen_mode") => "Schermo intero",
+            (Locale::En, "fullscreen_mode") => "Full Screen",
+            (Locale::Es, "fullscreen_mode") => "Pantalla completa",
+
             (Locale::It, "view_while_typing") => "Anteprima durante la digitazione",
             (Locale::En, "view_while_typing") => "View-while-typing (Live)",
             (Locale::Es, "view_while_typing") => "Vista en vivo al escribir",
@@ -323,17 +327,25 @@ impl I18n {
             (Locale::En, "tooltip_line_width") => "Choose text column width (80ch, 110ch, 140ch, Fluid)",
             (Locale::Es, "tooltip_line_width") => "Elegir ancho de columna de texto (80ch, 110ch, 140ch, Fluido)",
 
-            (Locale::It, "tooltip_search") => "Trova e sostituisci nel documento (Ctrl+F / Ctrl+H)",
-            (Locale::En, "tooltip_search") => "Find and replace in document (Ctrl+F / Ctrl+H)",
-            (Locale::Es, "tooltip_search") => "Buscar y reemplazar en el documento (Ctrl+F / Ctrl+H)",
+            (Locale::It, "tooltip_search") => "Trova e sostituisci nel documento (Ctrl+F)",
+            (Locale::En, "tooltip_search") => "Find and replace in document (Ctrl+F)",
+            (Locale::Es, "tooltip_search") => "Buscar y reemplazar en el documento (Ctrl+F)",
 
-            (Locale::It, "tooltip_preview") => "Modalità editor e pannello di anteprima (Ctrl+L / Ctrl+Shift+P)",
-            (Locale::En, "tooltip_preview") => "Editor modes and preview panel (Ctrl+L / Ctrl+Shift+P)",
-            (Locale::Es, "tooltip_preview") => "Modos de editor y panel de vista previa (Ctrl+L / Ctrl+Shift+P)",
+            (Locale::It, "tooltip_preview") => "Modalità editor e pannello di anteprima",
+            (Locale::En, "tooltip_preview") => "Editor modes and preview panel",
+            (Locale::Es, "tooltip_preview") => "Modos de editor y panel de vista previa",
 
-            (Locale::It, "tooltip_main_menu") => "Menu principale, temi e preferenze (F10)",
-            (Locale::En, "tooltip_main_menu") => "Main menu, themes and preferences (F10)",
-            (Locale::Es, "tooltip_main_menu") => "Menú principal, temas y preferencias (F10)",
+            (Locale::It, "tooltip_main_menu") => "Menu principale, temi e preferenze",
+            (Locale::En, "tooltip_main_menu") => "Main menu, themes and preferences",
+            (Locale::Es, "tooltip_main_menu") => "Menú principal, temas y preferencias",
+
+            (Locale::It, "tooltip_new_tab") => "Nuova scheda (Ctrl+T)",
+            (Locale::En, "tooltip_new_tab") => "New tab (Ctrl+T)",
+            (Locale::Es, "tooltip_new_tab") => "Nueva pestaña (Ctrl+T)",
+
+            (Locale::It, "tooltip_close_tab") => "Chiudi scheda (Ctrl+W)",
+            (Locale::En, "tooltip_close_tab") => "Close tab (Ctrl+W)",
+            (Locale::Es, "tooltip_close_tab") => "Cerrar pestaña (Ctrl+W)",
 
             (Locale::It, "tooltip_minimize") => "Riduci a icona la finestra",
             (Locale::En, "tooltip_minimize") => "Minimize window",
@@ -415,6 +427,23 @@ impl I18n {
             (Locale::It, "recovery_discard") => "Scarta ripristino",
             (Locale::En, "recovery_discard") => "Discard Recovery",
             (Locale::Es, "recovery_discard") => "Descartar recuperación",
+
+            // External File Modification on Disk Banner (it, en, es)
+            (Locale::It, "disk_mod_banner_msg") => "⟳ Il file sul disco è stato modificato da un'altra applicazione. Vuoi ricaricarlo?",
+            (Locale::En, "disk_mod_banner_msg") => "⟳ The file on disk was modified by another application. Reload it?",
+            (Locale::Es, "disk_mod_banner_msg") => "⟳ El archivo en disco fue modificado por otra aplicación. ¿Recargarlo?",
+
+            (Locale::It, "disk_mod_banner_dirty_msg") => "⚠ Il file sul disco è stato modificato esternamente (hai modifiche non salvate). Ricaricare dal file?",
+            (Locale::En, "disk_mod_banner_dirty_msg") => "⚠ The file on disk was modified externally (you have unsaved edits). Reload from file?",
+            (Locale::Es, "disk_mod_banner_dirty_msg") => "⚠ El archivo en disco fue modificado externamente (tienes cambios sin guardar). ¿Recargar?",
+
+            (Locale::It, "disk_mod_reload") => "Ricarica dal file",
+            (Locale::En, "disk_mod_reload") => "Reload from File",
+            (Locale::Es, "disk_mod_reload") => "Recargar archivo",
+
+            (Locale::It, "disk_mod_ignore") => "Ignora",
+            (Locale::En, "disk_mod_ignore") => "Ignore",
+            (Locale::Es, "disk_mod_ignore") => "Ignorar",
 
             // Phase 5: Interactive Export Dialog (it, en, es)
             (Locale::It, "export_formats_hdr") => "Formati",
@@ -718,6 +747,8 @@ pub enum Action {
     ToggleHemingway,
     NotifyHemingwayBlocked,
     ToggleFocusMode,
+    ToggleFullscreen,
+    SetFullscreen(bool),
     ToggleToolbar,
     ToggleSearchBar,
     SetChromeAutohidden(bool),
@@ -744,6 +775,9 @@ pub enum Action {
     SaveAsFile(PathBuf),
     ConfirmRecoverySave,
     DiscardRecovery,
+    CheckExternalFileModification,
+    ReloadFromDisk,
+    DismissExternalModification,
     SetFileDialogDir(PathBuf),
     SetFileDialogInput(String),
     SelectExportFormat(ExportFormat),
@@ -824,6 +858,8 @@ pub struct DocumentTab {
     pub journal_pending_flush: bool,
     pub recovered_from_crash: bool,
     pub recovery_banner_active: bool,
+    pub disk_modified_banner_active: bool,
+    pub dismissed_disk_hash: Option<String>,
     pub buffer: DocumentBuffer,
 }
 
@@ -843,6 +879,8 @@ pub struct Session {
     pub journal_pending_flush: bool,
     pub recovered_from_crash: bool,
     pub recovery_banner_active: bool,
+    pub disk_modified_banner_active: bool,
+    pub dismissed_disk_hash: Option<String>,
     pub recent_files: Vec<PathBuf>,
     pub file_dialog_dir: PathBuf,
     pub file_dialog_input: String,
@@ -864,6 +902,7 @@ pub struct Session {
     pub view_while_typing: bool,
     pub hemingway_mode: bool,
     pub focus_mode: bool,
+    pub fullscreen: bool,
     pub toolbar_expanded: bool,
     pub search_bar_open: bool,
     pub chrome_autohidden: bool,
@@ -933,6 +972,8 @@ impl Session {
             journal_pending_flush: false,
             recovered_from_crash: false,
             recovery_banner_active: false,
+            disk_modified_banner_active: false,
+            dismissed_disk_hash: None,
             buffer: default_buf.clone(),
         };
         let mut session = Self {
@@ -950,6 +991,8 @@ impl Session {
             journal_pending_flush: false,
             recovered_from_crash: false,
             recovery_banner_active: false,
+            disk_modified_banner_active: false,
+            dismissed_disk_hash: None,
             recent_files,
             file_dialog_dir: cwd,
             file_dialog_input: "documento.md".to_string(),
@@ -971,6 +1014,7 @@ impl Session {
             view_while_typing: true,
             hemingway_mode: false,
             focus_mode: false,
+            fullscreen: false,
             toolbar_expanded: true,
             search_bar_open: false,
             chrome_autohidden: false,
@@ -1002,6 +1046,8 @@ impl Session {
                 journal_pending_flush: self.journal_pending_flush,
                 recovered_from_crash: self.recovered_from_crash,
                 recovery_banner_active: self.recovery_banner_active,
+                disk_modified_banner_active: self.disk_modified_banner_active,
+                dismissed_disk_hash: self.dismissed_disk_hash.clone(),
                 buffer: self.buffer.clone(),
             });
             self.active_tab_index = 0;
@@ -1026,6 +1072,10 @@ impl Session {
         slot.journal_pending_flush = self.journal_pending_flush;
         slot.recovered_from_crash = self.recovered_from_crash;
         slot.recovery_banner_active = self.recovery_banner_active;
+        slot.disk_modified_banner_active = self.disk_modified_banner_active;
+        if slot.dismissed_disk_hash != self.dismissed_disk_hash {
+            slot.dismissed_disk_hash = self.dismissed_disk_hash.clone();
+        }
         if !std::ptr::eq(slot.buffer.as_str(), self.buffer.as_str())
             || slot.buffer.revision() != self.buffer.revision()
         {
@@ -1054,10 +1104,50 @@ impl Session {
         self.journal_pending_flush = slot.journal_pending_flush;
         self.recovered_from_crash = slot.recovered_from_crash;
         self.recovery_banner_active = slot.recovery_banner_active;
+        self.disk_modified_banner_active = slot.disk_modified_banner_active;
+        self.dismissed_disk_hash = slot.dismissed_disk_hash.clone();
         self.buffer = slot.buffer.clone();
         self.file_dialog_input = self.document_title.clone();
         self.display_word_count_override = None;
         self.update_default_export_path();
+    }
+
+    /// Checks whether the file on disk for the currently active tab has been modified externally
+    /// compared to `self.original_file_hash` (and `self.dismissed_disk_hash`).
+    pub fn check_active_tab_disk_modification(&mut self) -> bool {
+        let Some(ref path) = self.current_file_path else {
+            self.disk_modified_banner_active = false;
+            return false;
+        };
+        let Ok(disk_content) = std::fs::read_to_string(path) else {
+            return false;
+        };
+        let disk_hash = accent_storage::compute_content_hash(&disk_content);
+        let buf_hash = accent_storage::compute_content_hash(&self.buffer.text());
+
+        if self.original_file_hash.as_deref() == Some(disk_hash.as_str()) || disk_hash == buf_hash {
+            if self.disk_modified_banner_active {
+                self.disk_modified_banner_active = false;
+            }
+            if !self.is_dirty {
+                self.original_file_hash = Some(disk_hash);
+            }
+            return false;
+        }
+
+        if self.dismissed_disk_hash.as_deref() == Some(disk_hash.as_str()) {
+            return false;
+        }
+
+        self.disk_modified_banner_active = true;
+        self.chrome_autohidden = false;
+        let msg_key = if self.is_dirty {
+            "disk_mod_banner_dirty_msg"
+        } else {
+            "disk_mod_banner_msg"
+        };
+        self.status_message = Some(I18n::tr(self.locale, msg_key).to_string());
+        true
     }
 
     /// Returns the current typography zoom scale factor relative to `DEFAULT_FONT_SIZE` (`1.0` = 100%).
@@ -1256,6 +1346,8 @@ impl Session {
                         journal_pending_flush: false,
                         recovered_from_crash: false,
                         recovery_banner_active: false,
+                        disk_modified_banner_active: false,
+                        dismissed_disk_hash: None,
                         buffer: buf,
                     });
                 }
@@ -1724,11 +1816,19 @@ impl Session {
             Action::NotifyHemingwayBlocked => {
                 self.chrome_autohidden = false;
                 self.status_message = Some(
-                    "Modalità Hemingway attiva: cancellazione bloccata (Ctrl+T per disattivare)"
-                        .to_string(),
+                    "Modalità Hemingway attiva: cancellazione bloccata".to_string(),
                 );
             }
             Action::ToggleFocusMode => self.focus_mode = !self.focus_mode,
+            Action::ToggleFullscreen => {
+                self.fullscreen = !self.fullscreen;
+                self.chrome_autohidden = false;
+                self.overlay = ActiveOverlay::None;
+            }
+            Action::SetFullscreen(fs) => {
+                self.fullscreen = fs;
+                self.chrome_autohidden = false;
+            }
             Action::ToggleToolbar => self.toolbar_expanded = !self.toolbar_expanded,
             Action::ToggleSearchBar => {
                 self.search_bar_open = !self.search_bar_open;
@@ -1804,6 +1904,7 @@ impl Session {
                     if self.overlay == ActiveOverlay::None
                         && !self.search_bar_open
                         && !self.recovery_banner_active
+                        && !self.disk_modified_banner_active
                     {
                         self.chrome_autohidden = true;
                     }
@@ -1875,6 +1976,8 @@ impl Session {
                     journal_pending_flush: false,
                     recovered_from_crash: false,
                     recovery_banner_active: false,
+                    disk_modified_banner_active: false,
+                    dismissed_disk_hash: None,
                     buffer: new_buf,
                 };
                 self.tabs.push(new_tab);
@@ -1882,6 +1985,7 @@ impl Session {
                 self.load_active_tab_from_slot();
                 self.status_message = None;
                 self.chrome_autohidden = false;
+                self.search_bar_open = false;
                 self.overlay = ActiveOverlay::None;
             }
             Action::SwitchTab(idx) => {
@@ -1889,12 +1993,21 @@ impl Session {
                     self.sync_active_tab_to_slot();
                     self.active_tab_index = idx;
                     self.load_active_tab_from_slot();
+                    self.check_active_tab_disk_modification();
                     self.status_message = if self.recovery_banner_active {
                         Some(I18n::tr(self.locale, "recovery_banner_msg").to_string())
+                    } else if self.disk_modified_banner_active {
+                        let key = if self.is_dirty {
+                            "disk_mod_banner_dirty_msg"
+                        } else {
+                            "disk_mod_banner_msg"
+                        };
+                        Some(I18n::tr(self.locale, key).to_string())
                     } else {
                         None
                     };
                     self.chrome_autohidden = false;
+                    self.overlay = ActiveOverlay::None;
                 }
             }
             Action::NextTab => {
@@ -1902,12 +2015,21 @@ impl Session {
                     self.sync_active_tab_to_slot();
                     self.active_tab_index = (self.active_tab_index + 1) % self.tabs.len();
                     self.load_active_tab_from_slot();
+                    self.check_active_tab_disk_modification();
                     self.status_message = if self.recovery_banner_active {
                         Some(I18n::tr(self.locale, "recovery_banner_msg").to_string())
+                    } else if self.disk_modified_banner_active {
+                        let key = if self.is_dirty {
+                            "disk_mod_banner_dirty_msg"
+                        } else {
+                            "disk_mod_banner_msg"
+                        };
+                        Some(I18n::tr(self.locale, key).to_string())
                     } else {
                         None
                     };
                     self.chrome_autohidden = false;
+                    self.overlay = ActiveOverlay::None;
                 }
             }
             Action::PrevTab => {
@@ -1916,12 +2038,21 @@ impl Session {
                     self.active_tab_index =
                         (self.active_tab_index + self.tabs.len() - 1) % self.tabs.len();
                     self.load_active_tab_from_slot();
+                    self.check_active_tab_disk_modification();
                     self.status_message = if self.recovery_banner_active {
                         Some(I18n::tr(self.locale, "recovery_banner_msg").to_string())
+                    } else if self.disk_modified_banner_active {
+                        let key = if self.is_dirty {
+                            "disk_mod_banner_dirty_msg"
+                        } else {
+                            "disk_mod_banner_msg"
+                        };
+                        Some(I18n::tr(self.locale, key).to_string())
                     } else {
                         None
                     };
                     self.chrome_autohidden = false;
+                    self.overlay = ActiveOverlay::None;
                 }
             }
             Action::CloseTab(idx) => {
@@ -1950,6 +2081,8 @@ impl Session {
                             journal_pending_flush: false,
                             recovered_from_crash: false,
                             recovery_banner_active: false,
+                            disk_modified_banner_active: false,
+                            dismissed_disk_hash: None,
                             buffer: new_buf,
                         };
                         self.active_tab_index = 0;
@@ -1962,8 +2095,16 @@ impl Session {
                         }
                     }
                     self.load_active_tab_from_slot();
+                    self.check_active_tab_disk_modification();
                     self.status_message = if self.recovery_banner_active {
                         Some(I18n::tr(self.locale, "recovery_banner_msg").to_string())
+                    } else if self.disk_modified_banner_active {
+                        let key = if self.is_dirty {
+                            "disk_mod_banner_dirty_msg"
+                        } else {
+                            "disk_mod_banner_msg"
+                        };
+                        Some(I18n::tr(self.locale, key).to_string())
                     } else {
                         None
                     };
@@ -2029,6 +2170,7 @@ impl Session {
                     if !self.recovery_banner_active {
                         self.status_message = Some(format!("Aperto: {}", self.document_title));
                     }
+                    self.check_active_tab_disk_modification();
                     self.overlay = ActiveOverlay::None;
                 } else {
                     // Decide whether to reuse the current tab (only if it is an untouched untitled buffer
@@ -2083,10 +2225,14 @@ impl Session {
                                 journal_pending_flush: false,
                                 recovered_from_crash: true,
                                 recovery_banner_active: true,
+                                disk_modified_banner_active: false,
+                                dismissed_disk_hash: None,
                                 buffer: DocumentBuffer::default(),
                             });
                             self.active_tab_index = self.tabs.len() - 1;
                         }
+                        self.disk_modified_banner_active = false;
+                        self.dismissed_disk_hash = None;
                         self.restore_from_journal_entry(entry);
                         self.recent_files.retain(|p| !Self::paths_match(p, &path));
                         self.recent_files.insert(0, path);
@@ -2116,6 +2262,8 @@ impl Session {
                                 journal_pending_flush: false,
                                 recovered_from_crash: false,
                                 recovery_banner_active: false,
+                                disk_modified_banner_active: false,
+                                dismissed_disk_hash: None,
                                 buffer: fresh_buf.clone(),
                             });
                             self.active_tab_index = self.tabs.len() - 1;
@@ -2134,6 +2282,8 @@ impl Session {
                         self.journal_pending_flush = false;
                         self.recovered_from_crash = false;
                         self.recovery_banner_active = false;
+                        self.disk_modified_banner_active = false;
+                        self.dismissed_disk_hash = None;
                         self.chrome_autohidden = false;
                         self.display_word_count_override = None;
                         self.buffer = fresh_buf;
@@ -2162,6 +2312,8 @@ impl Session {
                 self.journal_pending_flush = false;
                 self.recovered_from_crash = false;
                 self.recovery_banner_active = false;
+                self.disk_modified_banner_active = false;
+                self.dismissed_disk_hash = None;
                 self.chrome_autohidden = false;
                 self.display_word_count_override = None;
                 let mut tut_buf = DocumentBuffer::from_str_content(TUTORIAL_MARKDOWN);
@@ -2189,6 +2341,8 @@ impl Session {
                     self.journal_pending_flush = false;
                     self.recovered_from_crash = false;
                     self.recovery_banner_active = false;
+                    self.disk_modified_banner_active = false;
+                    self.dismissed_disk_hash = None;
                     self.chrome_autohidden = false;
                     self.original_file_hash = Some(accent_storage::compute_content_hash(&text));
                     self.current_file_path = Some(target.clone());
@@ -2204,6 +2358,8 @@ impl Session {
                 self.journal_pending_flush = false;
                 self.recovered_from_crash = false;
                 self.recovery_banner_active = false;
+                self.disk_modified_banner_active = false;
+                self.dismissed_disk_hash = None;
                 self.chrome_autohidden = false;
                 self.display_word_count_override = None;
                 if let Some(path) = self.current_file_path.clone() {
@@ -2260,6 +2416,8 @@ impl Session {
                     self.journal_pending_flush = false;
                     self.recovered_from_crash = false;
                     self.recovery_banner_active = false;
+                    self.disk_modified_banner_active = false;
+                    self.dismissed_disk_hash = None;
                     self.chrome_autohidden = false;
                     self.recent_files.retain(|p| !Self::paths_match(p, &path));
                     self.recent_files.insert(0, path.clone());
@@ -2269,6 +2427,46 @@ impl Session {
                     self.status_message = Some(format!("Salvato come {}", path.display()));
                     self.overlay = ActiveOverlay::None;
                 }
+            }
+            Action::CheckExternalFileModification => {
+                self.check_active_tab_disk_modification();
+            }
+            Action::ReloadFromDisk => {
+                if let Some(path) = self.current_file_path.clone() {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        let _ = accent_storage::remove_journal_for_target(
+                            &self.recovery_dir,
+                            Some(&path),
+                        );
+                        let prev_cursor = self.buffer.cursor();
+                        let mut fresh_buf = DocumentBuffer::from_str_content(&content);
+                        fresh_buf.set_cursor(prev_cursor.min(fresh_buf.len_chars()));
+                        self.buffer = fresh_buf;
+                        self.original_file_hash =
+                            Some(accent_storage::compute_content_hash(&content));
+                        self.is_dirty = false;
+                        self.journal_pending_flush = false;
+                        self.recovered_from_crash = false;
+                        self.recovery_banner_active = false;
+                        self.disk_modified_banner_active = false;
+                        self.dismissed_disk_hash = None;
+                        self.chrome_autohidden = false;
+                        self.display_word_count_override = None;
+                        self.status_message =
+                            Some(format!("Ricaricato da disco: {}", self.document_title));
+                    }
+                }
+            }
+            Action::DismissExternalModification => {
+                if let Some(ref path) = self.current_file_path {
+                    if let Ok(content) = std::fs::read_to_string(path) {
+                        self.dismissed_disk_hash =
+                            Some(accent_storage::compute_content_hash(&content));
+                    }
+                }
+                self.disk_modified_banner_active = false;
+                self.chrome_autohidden = false;
+                self.is_dirty = true;
             }
             Action::SetFileDialogDir(dir) => {
                 if dir.is_dir() {
@@ -2348,6 +2546,7 @@ impl Session {
                 if self.overlay == ActiveOverlay::None
                     && !self.search_bar_open
                     && !self.recovery_banner_active
+                    && !self.disk_modified_banner_active
                 {
                     self.chrome_autohidden = true;
                 }
@@ -3233,5 +3432,82 @@ mod tests {
         ));
 
         let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn test_external_file_modification_detection_reload_and_dismiss() {
+        let base_dir = std::env::temp_dir().join(format!(
+            "accent_ext_file_mod_test_{}_{}",
+            std::process::id(),
+            accent_storage::current_utc_ms()
+        ));
+        std::fs::create_dir_all(&base_dir).unwrap();
+        let config_path = base_dir.join("settings.json");
+        let recovery_dir = base_dir.join("recovery");
+        let doc_a = base_dir.join("doc_a.md");
+        let doc_b = base_dir.join("doc_b.md");
+
+        accent_storage::atomic_save(&doc_a, "# Doc A v1\n").unwrap();
+        accent_storage::atomic_save(&doc_b, "# Doc B v1\n").unwrap();
+
+        let mut session =
+            Session::with_config_and_recovery(config_path.clone(), recovery_dir.clone());
+        session.apply(Action::OpenFile(doc_a.clone()));
+        session.apply(Action::OpenFile(doc_b.clone()));
+        assert_eq!(session.active_tab_index, 1);
+        assert!(!session.disk_modified_banner_active);
+
+        // External write to doc_b (focused tab)
+        accent_storage::atomic_save(&doc_b, "# Doc B v2 (modificato esternamente)\n").unwrap();
+        session.apply(Action::CheckExternalFileModification);
+        assert!(session.disk_modified_banner_active);
+
+        // Dismiss external modification -> banner hides, buffer stays v1, marked dirty
+        session.apply(Action::DismissExternalModification);
+        assert!(!session.disk_modified_banner_active);
+        assert!(session.is_dirty);
+        assert_eq!(session.buffer.text(), "# Doc B v1\n");
+
+        // Re-checking with the same disk content does NOT re-trigger the dismissed banner
+        session.apply(Action::CheckExternalFileModification);
+        assert!(!session.disk_modified_banner_active);
+
+        // A newer external write to doc_b DOES trigger the banner again
+        accent_storage::atomic_save(&doc_b, "# Doc B v3 (nuova modifica esterna)\n").unwrap();
+        session.apply(Action::CheckExternalFileModification);
+        assert!(session.disk_modified_banner_active);
+
+        // Reload from disk -> buffer updates to v3, banner closes, dirty flag cleared
+        session.apply(Action::ReloadFromDisk);
+        assert!(!session.disk_modified_banner_active);
+        assert!(!session.is_dirty);
+        assert_eq!(session.buffer.text(), "# Doc B v3 (nuova modifica esterna)\n");
+
+        // Modify doc_a on disk while doc_b is focused, then switch to doc_a via PrevTab -> banner activates immediately
+        accent_storage::atomic_save(&doc_a, "# Doc A v2 (modificato mentre in background)\n")
+            .unwrap();
+        session.apply(Action::PrevTab);
+        assert_eq!(session.active_tab_index, 0);
+        assert!(session.disk_modified_banner_active);
+        session.apply(Action::ReloadFromDisk);
+        assert_eq!(
+            session.buffer.text(),
+            "# Doc A v2 (modificato mentre in background)\n"
+        );
+        assert!(!session.disk_modified_banner_active);
+
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn test_fullscreen_toggle_and_set() {
+        let mut session = Session::default();
+        assert!(!session.fullscreen);
+        session.apply(Action::ToggleFullscreen);
+        assert!(session.fullscreen);
+        session.apply(Action::ToggleFullscreen);
+        assert!(!session.fullscreen);
+        session.apply(Action::SetFullscreen(true));
+        assert!(session.fullscreen);
     }
 }

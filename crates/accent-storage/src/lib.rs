@@ -495,6 +495,571 @@ impl Drop for SingleInstanceGuard {
     }
 }
 
+/// OS-driven file modification watcher for the currently focused document tab.
+///
+/// - **Linux (`#[cfg(target_os = "linux")]`)**: Uses kernel `inotify` (`inotify_init1`,
+///   `inotify_add_watch`, `poll`) with a self-pipe wakeup channel. Blocks indefinitely in
+///   `poll(..., -1)` with 0% CPU and zero disk polling until the kernel reports an in-place
+///   write (`IN_CLOSE_WRITE`, `IN_MODIFY`) or atomic rename (`IN_MOVED_TO`, `IN_CREATE`)
+///   targeting the watched file.
+/// - **Windows (`#[cfg(target_os = "windows")]`)**: Uses Win32 kernel change notifications
+///   (`FindFirstChangeNotificationW`, `FindNextChangeNotification`, `WaitForMultipleObjects`)
+///   plus a Win32 event object (`CreateEventW` / `SetEvent`) to block with 0% CPU and zero
+///   continuous polling until NTFS/ReFS notifies a modification in the parent directory.
+pub struct FocusedFileWatcher {
+    stop_flag: Arc<AtomicBool>,
+    changed_flag: Arc<AtomicBool>,
+    watched_path: Arc<Mutex<Option<PathBuf>>>,
+    waker: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>,
+    #[cfg(target_os = "linux")]
+    wake_write_fd: i32,
+    #[cfg(target_os = "windows")]
+    wake_event_handle: isize,
+}
+
+#[cfg(target_os = "linux")]
+mod linux_inotify {
+    use super::*;
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    const IN_NONBLOCK: i32 = 0o0004000;
+    const IN_CLOEXEC: i32 = 0o2000000;
+    const O_NONBLOCK: i32 = 0o0004000;
+    const O_CLOEXEC: i32 = 0o2000000;
+
+    const IN_MODIFY: u32 = 0x0000_0002;
+    const IN_ATTRIB: u32 = 0x0000_0004;
+    const IN_CLOSE_WRITE: u32 = 0x0000_0008;
+    const IN_MOVED_TO: u32 = 0x0000_0080;
+    const IN_CREATE: u32 = 0x0000_0100;
+    const IN_DELETE_SELF: u32 = 0x0000_0400;
+    const IN_MOVE_SELF: u32 = 0x0000_0800;
+
+    const DIR_WATCH_MASK: u32 = IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_MODIFY | IN_ATTRIB;
+    const FILE_WATCH_MASK: u32 =
+        IN_CLOSE_WRITE | IN_MODIFY | IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF;
+
+    const POLLIN: i16 = 0x0001;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+
+    #[repr(C)]
+    struct InotifyEventHeader {
+        wd: i32,
+        mask: u32,
+        cookie: u32,
+        len: u32,
+    }
+
+    extern "C" {
+        fn inotify_init1(flags: i32) -> i32;
+        fn inotify_add_watch(fd: i32, pathname: *const i8, mask: u32) -> i32;
+        fn inotify_rm_watch(fd: i32, wd: i32) -> i32;
+        fn pipe2(pipefd: *mut i32, flags: i32) -> i32;
+        fn poll(fds: *mut PollFd, nfds: usize, timeout: i32) -> i32;
+        fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+        fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+        fn close(fd: i32) -> i32;
+    }
+
+    pub fn spawn_linux_watcher(
+        stop_flag: Arc<AtomicBool>,
+        changed_flag: Arc<AtomicBool>,
+        watched_path: Arc<Mutex<Option<PathBuf>>>,
+        waker: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>,
+    ) -> io::Result<i32> {
+        let inotify_fd = unsafe { inotify_init1(IN_NONBLOCK | IN_CLOEXEC) };
+        if inotify_fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut pipe_fds = [-1i32; 2];
+        if unsafe { pipe2(pipe_fds.as_mut_ptr(), O_NONBLOCK | O_CLOEXEC) } < 0 {
+            let err = io::Error::last_os_error();
+            unsafe {
+                close(inotify_fd);
+            }
+            return Err(err);
+        }
+        let wake_read_fd = pipe_fds[0];
+        let wake_write_fd = pipe_fds[1];
+
+        std::thread::Builder::new()
+            .name("accent-file-watcher".to_string())
+            .spawn(move || {
+                let mut dir_wd: i32 = -1;
+                let mut file_wd: i32 = -1;
+                let mut active_target: Option<PathBuf> = None;
+                let mut active_file_name: Option<Vec<u8>> = None;
+
+                let rearm_watches = |inotify_fd: i32,
+                                     dir_wd: &mut i32,
+                                     file_wd: &mut i32,
+                                     target: &Option<PathBuf>,
+                                     file_name_out: &mut Option<Vec<u8>>| {
+                    if *dir_wd >= 0 {
+                        unsafe {
+                            inotify_rm_watch(inotify_fd, *dir_wd);
+                        }
+                        *dir_wd = -1;
+                    }
+                    if *file_wd >= 0 {
+                        unsafe {
+                            inotify_rm_watch(inotify_fd, *file_wd);
+                        }
+                        *file_wd = -1;
+                    }
+                    *file_name_out = None;
+                    if let Some(ref p) = target {
+                        let norm = normalize_path(p);
+                        if let Some(fname) = norm.file_name() {
+                            *file_name_out = Some(fname.as_bytes().to_vec());
+                        }
+                        if let Some(parent) = norm.parent() {
+                            if let Ok(c_dir) = CString::new(parent.as_os_str().as_bytes()) {
+                                *dir_wd = unsafe {
+                                    inotify_add_watch(inotify_fd, c_dir.as_ptr(), DIR_WATCH_MASK)
+                                };
+                            }
+                        }
+                        if let Ok(c_file) = CString::new(norm.as_os_str().as_bytes()) {
+                            *file_wd = unsafe {
+                                inotify_add_watch(inotify_fd, c_file.as_ptr(), FILE_WATCH_MASK)
+                            };
+                        }
+                    }
+                };
+
+                let drain_wake_pipe = |fd: i32| {
+                    let mut sink = [0u8; 64];
+                    while unsafe { read(fd, sink.as_mut_ptr(), sink.len()) } > 0 {}
+                };
+
+                // Initial arm if a path was already set
+                if let Ok(g) = watched_path.lock() {
+                    active_target = g.clone();
+                }
+                rearm_watches(
+                    inotify_fd,
+                    &mut dir_wd,
+                    &mut file_wd,
+                    &active_target,
+                    &mut active_file_name,
+                );
+
+                let mut event_buf = [0u8; 4096];
+                let mut coalesce_pending = false;
+
+                loop {
+                    if stop_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let mut fds = [
+                        PollFd {
+                            fd: wake_read_fd,
+                            events: POLLIN,
+                            revents: 0,
+                        },
+                        PollFd {
+                            fd: inotify_fd,
+                            events: POLLIN,
+                            revents: 0,
+                        },
+                    ];
+                    let timeout_ms = if coalesce_pending { 35 } else { -1 };
+                    let rc = unsafe { poll(fds.as_mut_ptr(), fds.len(), timeout_ms) };
+                    if stop_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if rc < 0 {
+                        let err = io::Error::last_os_error();
+                        if err.kind() == io::ErrorKind::Interrupted {
+                            continue;
+                        }
+                        break;
+                    }
+                    if rc == 0 && coalesce_pending {
+                        // Coalescing window elapsed after a relevant file modification event
+                        coalesce_pending = false;
+                        // Re-arm file watch in case an atomic rename replaced the inode
+                        if let Some(ref p) = active_target {
+                            let norm = normalize_path(p);
+                            if let Ok(c_file) = CString::new(norm.as_os_str().as_bytes()) {
+                                if file_wd >= 0 {
+                                    unsafe {
+                                        inotify_rm_watch(inotify_fd, file_wd);
+                                    }
+                                }
+                                file_wd = unsafe {
+                                    inotify_add_watch(inotify_fd, c_file.as_ptr(), FILE_WATCH_MASK)
+                                };
+                            }
+                        }
+                        changed_flag.store(true, Ordering::SeqCst);
+                        if let Ok(w_guard) = waker.lock() {
+                            if let Some(ref cb) = *w_guard {
+                                cb();
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Check if the watched path changed via wake pipe
+                    if (fds[0].revents & POLLIN) != 0 {
+                        drain_wake_pipe(wake_read_fd);
+                        if stop_flag.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let new_target = watched_path.lock().ok().and_then(|g| g.clone());
+                        if new_target != active_target {
+                            active_target = new_target;
+                            coalesce_pending = false;
+                            rearm_watches(
+                                inotify_fd,
+                                &mut dir_wd,
+                                &mut file_wd,
+                                &active_target,
+                                &mut active_file_name,
+                            );
+                        }
+                    }
+
+                    // Drain inotify events and check if any match our target file
+                    if (fds[1].revents & POLLIN) != 0 {
+                        loop {
+                            let n =
+                                unsafe { read(inotify_fd, event_buf.as_mut_ptr(), event_buf.len()) };
+                            if n <= 0 {
+                                break;
+                            }
+                            let n_usize = n as usize;
+                            let hdr_size = std::mem::size_of::<InotifyEventHeader>();
+                            let mut offset = 0usize;
+                            while offset + hdr_size <= n_usize {
+                                let hdr = unsafe {
+                                    std::ptr::read_unaligned(
+                                        event_buf.as_ptr().add(offset) as *const InotifyEventHeader
+                                    )
+                                };
+                                let name_start = offset + hdr_size;
+                                let name_end = (name_start + (hdr.len as usize)).min(n_usize);
+                                offset = name_end;
+
+                                if hdr.wd == file_wd && file_wd >= 0 {
+                                    coalesce_pending = true;
+                                } else if hdr.wd == dir_wd && dir_wd >= 0 && hdr.len > 0 {
+                                    let raw_name = &event_buf[name_start..name_end];
+                                    let trimmed_len = raw_name
+                                        .iter()
+                                        .position(|&b| b == 0)
+                                        .unwrap_or(raw_name.len());
+                                    let ev_name = &raw_name[..trimmed_len];
+                                    if let Some(ref wanted_name) = active_file_name {
+                                        if ev_name == wanted_name.as_slice() {
+                                            coalesce_pending = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if dir_wd >= 0 {
+                    unsafe {
+                        inotify_rm_watch(inotify_fd, dir_wd);
+                    }
+                }
+                if file_wd >= 0 {
+                    unsafe {
+                        inotify_rm_watch(inotify_fd, file_wd);
+                    }
+                }
+                unsafe {
+                    close(wake_read_fd);
+                    close(inotify_fd);
+                }
+            })?;
+
+        Ok(wake_write_fd)
+    }
+
+    pub fn signal_wake_pipe(wake_write_fd: i32) {
+        if wake_write_fd >= 0 {
+            let b = [1u8; 1];
+            unsafe {
+                let _ = write(wake_write_fd, b.as_ptr(), 1);
+            }
+        }
+    }
+
+    pub fn close_wake_pipe(wake_write_fd: i32) {
+        if wake_write_fd >= 0 {
+            unsafe {
+                close(wake_write_fd);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod windows_watcher {
+    use super::*;
+    use std::os::windows::ffi::OsStrExt;
+
+    const FILE_NOTIFY_CHANGE_FILE_NAME: u32 = 0x0000_0001;
+    const FILE_NOTIFY_CHANGE_SIZE: u32 = 0x0000_0008;
+    const FILE_NOTIFY_CHANGE_LAST_WRITE: u32 = 0x0000_0010;
+    const INVALID_HANDLE_VALUE: isize = -1;
+    const WAIT_OBJECT_0: u32 = 0x0000_0000;
+    const WAIT_TIMEOUT: u32 = 0x0000_0102;
+    const INFINITE: u32 = 0xFFFF_FFFF;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateEventW(
+            lpEventAttributes: *const std::ffi::c_void,
+            bManualReset: i32,
+            bInitialState: i32,
+            lpName: *const u16,
+        ) -> isize;
+        fn SetEvent(hEvent: isize) -> i32;
+        fn ResetEvent(hEvent: isize) -> i32;
+        fn CloseHandle(hObject: isize) -> i32;
+        fn FindFirstChangeNotificationW(
+            lpPathName: *const u16,
+            bWatchSubtree: i32,
+            dwNotifyFilter: u32,
+        ) -> isize;
+        fn FindNextChangeNotification(hChangeHandle: isize) -> i32;
+        fn FindCloseChangeNotification(hChangeHandle: isize) -> i32;
+        fn WaitForMultipleObjects(
+            nCount: u32,
+            lpHandles: *const isize,
+            bWaitAll: i32,
+            dwMilliseconds: u32,
+        ) -> u32;
+    }
+
+    pub fn spawn_windows_watcher(
+        stop_flag: Arc<AtomicBool>,
+        changed_flag: Arc<AtomicBool>,
+        watched_path: Arc<Mutex<Option<PathBuf>>>,
+        waker: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>,
+    ) -> io::Result<isize> {
+        let wake_event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+        if wake_event == 0 || wake_event == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+
+        std::thread::Builder::new()
+            .name("accent-file-watcher-win32".to_string())
+            .spawn(move || {
+                let mut change_handle: isize = INVALID_HANDLE_VALUE;
+                let mut active_target: Option<PathBuf> = None;
+
+                let rearm_win32 = |change_handle: &mut isize, target: &Option<PathBuf>| {
+                    if *change_handle != INVALID_HANDLE_VALUE && *change_handle != 0 {
+                        unsafe {
+                            FindCloseChangeNotification(*change_handle);
+                        }
+                        *change_handle = INVALID_HANDLE_VALUE;
+                    }
+                    if let Some(ref p) = target {
+                        let norm = normalize_path(p);
+                        if let Some(parent) = norm.parent() {
+                            let wide: Vec<u16> = parent
+                                .as_os_str()
+                                .encode_wide()
+                                .chain(std::iter::once(0))
+                                .collect();
+                            let h = unsafe {
+                                FindFirstChangeNotificationW(
+                                    wide.as_ptr(),
+                                    0,
+                                    FILE_NOTIFY_CHANGE_FILE_NAME
+                                        | FILE_NOTIFY_CHANGE_SIZE
+                                        | FILE_NOTIFY_CHANGE_LAST_WRITE,
+                                )
+                            };
+                            if h != 0 && h != INVALID_HANDLE_VALUE {
+                                *change_handle = h;
+                            }
+                        }
+                    }
+                };
+
+                if let Ok(g) = watched_path.lock() {
+                    active_target = g.clone();
+                }
+                rearm_win32(&mut change_handle, &active_target);
+                let mut coalesce_pending = false;
+
+                loop {
+                    if stop_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let timeout_ms = if coalesce_pending { 35 } else { INFINITE };
+                    let wait_rc = if change_handle != INVALID_HANDLE_VALUE && change_handle != 0 {
+                        let handles = [wake_event, change_handle];
+                        unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, timeout_ms) }
+                    } else {
+                        let handles = [wake_event];
+                        unsafe { WaitForMultipleObjects(1, handles.as_ptr(), 0, timeout_ms) }
+                    };
+
+                    if stop_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if wait_rc == WAIT_TIMEOUT && coalesce_pending {
+                        coalesce_pending = false;
+                        changed_flag.store(true, Ordering::SeqCst);
+                        if let Ok(w_guard) = waker.lock() {
+                            if let Some(ref cb) = *w_guard {
+                                cb();
+                            }
+                        }
+                        continue;
+                    }
+                    if wait_rc == WAIT_OBJECT_0 {
+                        unsafe {
+                            ResetEvent(wake_event);
+                        }
+                        if stop_flag.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let new_target = watched_path.lock().ok().and_then(|g| g.clone());
+                        if new_target != active_target {
+                            active_target = new_target;
+                            coalesce_pending = false;
+                            rearm_win32(&mut change_handle, &active_target);
+                        }
+                    } else if wait_rc == WAIT_OBJECT_0 + 1 {
+                        if change_handle != INVALID_HANDLE_VALUE && change_handle != 0 {
+                            unsafe {
+                                FindNextChangeNotification(change_handle);
+                            }
+                        }
+                        coalesce_pending = true;
+                    } else {
+                        break;
+                    }
+                }
+
+                if change_handle != INVALID_HANDLE_VALUE && change_handle != 0 {
+                    unsafe {
+                        FindCloseChangeNotification(change_handle);
+                    }
+                }
+                unsafe {
+                    CloseHandle(wake_event);
+                }
+            })?;
+
+        Ok(wake_event)
+    }
+
+    pub fn signal_wake_event(wake_event: isize) {
+        if wake_event != 0 && wake_event != INVALID_HANDLE_VALUE {
+            unsafe {
+                SetEvent(wake_event);
+            }
+        }
+    }
+}
+
+impl FocusedFileWatcher {
+    /// Creates and starts an OS-driven file watcher for the active document tab.
+    pub fn new() -> io::Result<Self> {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let changed_flag = Arc::new(AtomicBool::new(false));
+        let watched_path = Arc::new(Mutex::new(None));
+        let waker: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>> = Arc::new(Mutex::new(None));
+
+        #[cfg(target_os = "linux")]
+        let wake_write_fd = linux_inotify::spawn_linux_watcher(
+            Arc::clone(&stop_flag),
+            Arc::clone(&changed_flag),
+            Arc::clone(&watched_path),
+            Arc::clone(&waker),
+        )?;
+
+        #[cfg(target_os = "windows")]
+        let wake_event_handle = windows_watcher::spawn_windows_watcher(
+            Arc::clone(&stop_flag),
+            Arc::clone(&changed_flag),
+            Arc::clone(&watched_path),
+            Arc::clone(&waker),
+        )?;
+
+        Ok(Self {
+            stop_flag,
+            changed_flag,
+            watched_path,
+            waker,
+            #[cfg(target_os = "linux")]
+            wake_write_fd,
+            #[cfg(target_os = "windows")]
+            wake_event_handle,
+        })
+    }
+
+    /// Registers a wakeup callback (e.g. `egui::Context::request_repaint`) invoked whenever
+    /// the operating system notifies that the watched file has been modified on disk.
+    pub fn set_waker<F>(&self, callback: F)
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        if let Ok(mut guard) = self.waker.lock() {
+            *guard = Some(Box::new(callback));
+        }
+    }
+
+    /// Updates the file path currently being watched (called when the user switches the focused tab,
+    /// opens a document, or saves a new file). Immediately wakes the kernel watcher thread to re-arm.
+    pub fn set_watched_file(&self, path: Option<PathBuf>) {
+        let normalized = path.map(|p| normalize_path(&p));
+        if let Ok(mut guard) = self.watched_path.lock() {
+            if *guard == normalized {
+                return;
+            }
+            *guard = normalized;
+        }
+        self.changed_flag.store(false, Ordering::SeqCst);
+        #[cfg(target_os = "linux")]
+        linux_inotify::signal_wake_pipe(self.wake_write_fd);
+        #[cfg(target_os = "windows")]
+        windows_watcher::signal_wake_event(self.wake_event_handle);
+    }
+
+    /// Returns `true` (and clears the notification flag) if the operating system reported a
+    /// modification event on the watched file since the last check.
+    pub fn take_change_notification(&self) -> bool {
+        self.changed_flag.swap(false, Ordering::SeqCst)
+    }
+}
+
+impl Drop for FocusedFileWatcher {
+    fn drop(&mut self) {
+        self.stop_flag.store(true, Ordering::Relaxed);
+        #[cfg(target_os = "linux")]
+        {
+            linux_inotify::signal_wake_pipe(self.wake_write_fd);
+            linux_inotify::close_wake_pipe(self.wake_write_fd);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            windows_watcher::signal_wake_event(self.wake_event_handle);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,6 +1223,95 @@ mod tests {
             SingleInstanceGuard::acquire_or_forward(&lock_path, None).expect("re-acquire primary");
         assert!(matches!(new_primary, SingleInstanceOutcome::Primary(_)));
 
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_focused_file_watcher_os_notification_detects_in_place_and_atomic_rename_writes() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "accent_file_watcher_test_{}_{}",
+            std::process::id(),
+            current_utc_ms()
+        ));
+        fs::create_dir_all(&test_dir).expect("create test_dir");
+        let file_a = test_dir.join("watched_a.md");
+        let file_b = test_dir.join("watched_b.md");
+        let unrelated = test_dir.join("other_file.md");
+        atomic_save(&file_a, "# Versione 1\n").expect("save file_a");
+        atomic_save(&file_b, "# File B v1\n").expect("save file_b");
+
+        let watcher = FocusedFileWatcher::new().expect("create FocusedFileWatcher");
+        let woke_count = Arc::new( std::sync::atomic::AtomicUsize::new(0));
+        let woke_clone = Arc::clone(&woke_count);
+        watcher.set_waker(move || {
+            woke_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        watcher.set_watched_file(Some(file_a.clone()));
+        // Give the watcher thread a few ms to arm the kernel inotify/Win32 watch
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(!watcher.take_change_notification());
+
+        // 1. Modifying an unrelated file in the same directory must NOT trigger a notification on Linux
+        #[cfg(target_os = "linux")]
+        {
+            fs::write(&unrelated, "unrelated modification").expect("write unrelated");
+            std::thread::sleep(Duration::from_millis(60));
+            assert!(
+                !watcher.take_change_notification(),
+                "Unrelated file write in parent directory must not trigger watched file notification"
+            );
+        }
+
+        // 2. Direct in-place write (`fs::write`) on `file_a` must trigger OS notification
+        fs::write(&file_a, "# Versione 2 (in-place write)\n").expect("in-place write");
+        let mut notified_in_place = false;
+        for _ in 0..40 {
+            if watcher.take_change_notification() {
+                notified_in_place = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            notified_in_place,
+            "OS file watcher must detect in-place modification without polling"
+        );
+        assert!(woke_count.load(Ordering::SeqCst) >= 1);
+
+        // 3. Atomic save (`write-temp -> rename`) on `file_a` must also trigger OS notification
+        atomic_save(&file_a, "# Versione 3 (atomic rename)\n").expect("atomic save");
+        let mut notified_atomic = false;
+        for _ in 0..40 {
+            if watcher.take_change_notification() {
+                notified_atomic = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            notified_atomic,
+            "OS file watcher must detect atomic rename modification"
+        );
+
+        // 4. Switching watched file to `file_b` (simulating tab switch) must watch `file_b`
+        watcher.set_watched_file(Some(file_b.clone()));
+        std::thread::sleep(Duration::from_millis(25));
+        atomic_save(&file_b, "# File B v2 (modified externally)\n").expect("modify file_b");
+        let mut notified_b = false;
+        for _ in 0..40 {
+            if watcher.take_change_notification() {
+                notified_b = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            notified_b,
+            "OS file watcher must detect modification after switching watched tab file"
+        );
+
+        drop(watcher);
         let _ = fs::remove_dir_all(&test_dir);
     }
 }

@@ -96,7 +96,7 @@ pub fn render_ui(
             let cmd_key = i.modifiers.ctrl
                 || i.modifiers.alt
                 || has_ctrl_or_alt_event
-                || i.key_pressed(egui::Key::F10)
+                || i.key_pressed(egui::Key::F11)
                 || i.key_pressed(egui::Key::Escape)
                 || i.key_pressed(egui::Key::F1);
             mouse_moved || cmd_key
@@ -132,7 +132,7 @@ pub fn render_ui(
     });
 
     // Global keyboard shortcuts (consume app-level Ctrl/Cmd shortcuts so `egui::TextEdit`
-    // does not interpret Ctrl+W as delete-word, Ctrl+H as backspace, or Ctrl+Z via widget undoer)
+    // does not interpret Ctrl+W as delete-word or Ctrl+Z via widget undoer)
     let mut trigger_open = false;
     let mut trigger_save_as = false;
     ctx.input_mut(|i| {
@@ -168,8 +168,9 @@ pub fn render_ui(
                 actions.push(Action::SetChromeAutohidden(false));
             }
         }
-        if i.key_pressed(egui::Key::F10) {
-            actions.push(Action::SetOverlay(ActiveOverlay::MainMenu));
+        // Full Screen mode via F11
+        if i.key_pressed(egui::Key::F11) {
+            actions.push(Action::ToggleFullscreen);
         }
         // Text Zoom keyboard shortcuts: Ctrl + '+'/'=', Ctrl + '-', Ctrl + '0'
         if key_chord(i, true, false, false, egui::Key::Plus)
@@ -193,77 +194,29 @@ pub fn render_ui(
         {
             actions.push(Action::Redo);
         }
-        // Multi-Tab keyboard shortcuts: Ctrl+W (close active tab), Ctrl+Tab / Ctrl+PageDown (next tab), Ctrl+Shift+Tab / Ctrl+PageUp (prev tab)
+        // Multi-Tab keyboard shortcuts:
+        // - Ctrl+T: open a new tab
+        // - Ctrl+W: close the active tab
+        // - Ctrl+Tab: switch to the next tab
+        // - Ctrl+Shift+Tab: switch to the previous tab
+        if key_chord(i, true, false, false, egui::Key::T) {
+            actions.push(Action::SetChromeAutohidden(false));
+            actions.push(Action::NewTab);
+        }
         if key_chord(i, true, false, false, egui::Key::W) {
             actions.push(Action::SetChromeAutohidden(false));
             actions.push(Action::CloseTab(session.active_tab_index));
         }
-        if key_chord(i, true, false, false, egui::Key::Tab)
-            || key_chord(i, true, false, false, egui::Key::PageDown)
-        {
+        if key_chord(i, true, false, false, egui::Key::Tab) {
             actions.push(Action::SetChromeAutohidden(false));
             actions.push(Action::NextTab);
         }
-        if key_chord(i, true, true, false, egui::Key::Tab)
-            || key_chord(i, true, false, false, egui::Key::PageUp)
-            || key_chord(i, true, true, false, egui::Key::PageUp)
-        {
+        if key_chord(i, true, true, false, egui::Key::Tab) {
             actions.push(Action::SetChromeAutohidden(false));
             actions.push(Action::PrevTab);
         }
-        if key_chord(i, true, false, false, egui::Key::L) {
-            actions.push(Action::ToggleViewWhileTyping);
-        }
-        if key_chord(i, true, false, false, egui::Key::E) {
-            actions.push(Action::SetOverlay(ActiveOverlay::ExportDialog));
-        }
-        if key_chord(i, true, true, false, egui::Key::E) {
-            actions.push(Action::SetEditorOnlyRaw);
-        }
-        if key_chord(i, true, true, false, egui::Key::P) {
-            let toggle =
-                !(session.preview_active && session.preview_layout == PreviewLayout::HalfWidth);
-            actions.push(Action::SetPreviewMode {
-                active: toggle,
-                layout: PreviewLayout::HalfWidth,
-            });
-        }
-        if key_chord(i, true, false, true, egui::Key::P) {
-            let toggle =
-                !(session.preview_active && session.preview_layout == PreviewLayout::FullWidth);
-            actions.push(Action::SetPreviewMode {
-                active: toggle,
-                layout: PreviewLayout::FullWidth,
-            });
-        }
-        if key_chord(i, true, true, false, egui::Key::J) {
-            let toggle =
-                !(session.preview_active && session.preview_layout == PreviewLayout::HalfHeight);
-            actions.push(Action::SetPreviewMode {
-                active: toggle,
-                layout: PreviewLayout::HalfHeight,
-            });
-        }
-        if key_chord(i, true, true, false, egui::Key::W) {
-            let toggle =
-                !(session.preview_active && session.preview_layout == PreviewLayout::Windowed);
-            actions.push(Action::SetPreviewMode {
-                active: toggle,
-                layout: PreviewLayout::Windowed,
-            });
-        }
-        if key_chord(i, true, false, false, egui::Key::Comma) {
-            actions.push(Action::SetOverlay(ActiveOverlay::PreferencesDialog));
-        }
-        if key_chord(i, true, false, false, egui::Key::D) {
-            actions.push(Action::ToggleFocusMode);
-        }
-        if key_chord(i, true, false, false, egui::Key::T) {
-            actions.push(Action::ToggleHemingway);
-        }
-        if key_chord(i, true, false, false, egui::Key::H)
-            || key_chord(i, true, false, false, egui::Key::F)
-        {
+        // Find & Replace shortcut: strictly Ctrl+F only (Ctrl+H removed)
+        if key_chord(i, true, false, false, egui::Key::F) {
             actions.push(Action::ToggleSearchBar);
         }
         if key_chord(i, true, false, false, egui::Key::S) {
@@ -300,7 +253,8 @@ pub fn render_ui(
         }
 
         // Remove consumed app-level Ctrl/Cmd key events from `i.events` so `egui::TextEdit`
-        // never mutates the buffer on Ctrl+W (delete word), Ctrl+H (backspace), or Ctrl+Z/Y (widget undoer).
+        // never mutates the buffer on Ctrl+W (delete word) or Ctrl+Z/Y (widget undoer),
+        // and `egui` does not move widget focus on Ctrl+Tab / Ctrl+Shift+Tab.
         i.events.retain(|ev| match ev {
             egui::Event::Key { key, modifiers, .. }
                 if modifiers.ctrl || modifiers.command =>
@@ -311,14 +265,8 @@ pub fn render_ui(
                 !matches!(
                     key,
                     egui::Key::W
-                        | egui::Key::H
                         | egui::Key::F
-                        | egui::Key::D
                         | egui::Key::T
-                        | egui::Key::L
-                        | egui::Key::E
-                        | egui::Key::P
-                        | egui::Key::J
                         | egui::Key::N
                         | egui::Key::O
                         | egui::Key::S
@@ -327,7 +275,6 @@ pub fn render_ui(
                         | egui::Key::Z
                         | egui::Key::Y
                         | egui::Key::Tab
-                        | egui::Key::Comma
                         | egui::Key::Plus
                         | egui::Key::Equals
                         | egui::Key::Minus
@@ -347,10 +294,13 @@ pub fn render_ui(
     let chrome_hidden = session.chrome_autohidden
         && session.overlay == ActiveOverlay::None
         && !session.search_bar_open
-        && !session.recovery_banner_active;
+        && !session.recovery_banner_active
+        && !session.disk_modified_banner_active;
     let chrome_alpha =
         ctx.animate_bool_with_time(Id::new("accent_zen_chrome_alpha"), !chrome_hidden, 0.20);
-    let is_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+    let is_maximized = ctx.input(|i| {
+        i.viewport().maximized.unwrap_or(false) || i.viewport().fullscreen.unwrap_or(false)
+    }) || session.fullscreen;
     let win_corner_radius = if is_maximized {
         CornerRadius::ZERO
     } else {
@@ -379,9 +329,11 @@ pub fn render_ui(
                 sync_cursor_to_widget,
             );
 
-            // 2. Render Crash Recovery Notification Banner if restored from dirty WAL journal
+            // 2. Render Crash Recovery or External File Modification Notification Banner
             if session.recovery_banner_active {
                 render_recovery_banner(ui, &painter, rect, session, &pal, actions);
+            } else if session.disk_modified_banner_active {
+                render_disk_modified_banner(ui, &painter, rect, session, &pal, actions);
             }
 
             if !is_maximized {
@@ -618,7 +570,7 @@ fn overlay_bounds(win_rect: Rect, session: &Session) -> Rect {
         ),
         ActiveOverlay::MainMenu => Rect::from_min_max(
             Pos2::new(win_rect.right() - 332.0, 40.0),
-            Pos2::new(win_rect.right() - 36.0, 440.0),
+            Pos2::new(win_rect.right() - 36.0, 472.0),
         ),
         ActiveOverlay::LineWidthMenu => Rect::from_min_max(
             Pos2::new(win_rect.right() - 330.0, 40.0),
@@ -927,31 +879,56 @@ fn render_tab_bar(
         Pos2::new(win_rect.left() + 1.0, tb_top),
         Pos2::new(win_rect.right() - 1.0, tb_bot),
     );
-    painter.rect_filled(
-        tb_rect,
-        CornerRadius::ZERO,
-        pal.bg_headerbar.gamma_multiply(0.92),
+
+    // Distinct recessed trough background so the raised active tab (`pal.bg_canvas`) stands out
+    // with high contrast in every theme (Light, Sepia, Dark) and every palette preset.
+    let trough_bg = match session.theme {
+        ThemeMode::Dark => Color32::from_rgba_unmultiplied(
+            ((pal.bg_headerbar.r() as u16 * 72) / 100) as u8,
+            ((pal.bg_headerbar.g() as u16 * 72) / 100) as u8,
+            ((pal.bg_headerbar.b() as u16 * 72) / 100) as u8,
+            pal.bg_headerbar.a(),
+        ),
+        ThemeMode::Light | ThemeMode::Sepia => Color32::from_rgba_unmultiplied(
+            ((pal.bg_headerbar.r() as u16 * 52 + pal.bg_code_block.r() as u16 * 48) / 100) as u8,
+            ((pal.bg_headerbar.g() as u16 * 52 + pal.bg_code_block.g() as u16 * 48) / 100) as u8,
+            ((pal.bg_headerbar.b() as u16 * 52 + pal.bg_code_block.b() as u16 * 48) / 100) as u8,
+            pal.bg_headerbar.a(),
+        ),
+    };
+    painter.rect_filled(tb_rect, CornerRadius::ZERO, trough_bg);
+
+    // Top & bottom border lines of the recessed tab bar trough
+    let border_col = pal.border_headerbar.gamma_multiply(0.90 * chrome_alpha);
+    painter.line_segment(
+        [
+            Pos2::new(tb_rect.left(), tb_top),
+            Pos2::new(tb_rect.right(), tb_top),
+        ],
+        Stroke::new(1.0, border_col.gamma_multiply(0.55)),
     );
     painter.line_segment(
         [
             Pos2::new(tb_rect.left(), tb_bot),
             Pos2::new(tb_rect.right(), tb_bot),
         ],
-        Stroke::new(
-            1.0,
-            pal.border_headerbar.gamma_multiply(0.42 * chrome_alpha),
-        ),
+        Stroke::new(1.0, border_col),
     );
 
     let n_tabs = session.tabs.len().max(1);
     let avail_w = (win_rect.width() - 68.0).max(160.0);
-    let tab_w = (avail_w / (n_tabs as f32)).clamp(92.0, 192.0).floor();
+    let tab_w = (avail_w / (n_tabs as f32)).clamp(96.0, 196.0).floor();
+    let max_vis = ((avail_w + 4.0) / (tab_w + 4.0)).floor().max(1.0) as usize;
+    let start_idx = if session.active_tab_index >= max_vis {
+        (session.active_tab_index + 1 - max_vis).min(n_tabs.saturating_sub(max_vis))
+    } else {
+        0
+    };
+    let end_idx = (start_idx + max_vis).min(n_tabs);
     let mut cur_x = win_rect.left() + 12.0;
 
-    for (idx, tab) in session.tabs.iter().enumerate() {
-        if cur_x + tab_w > win_rect.right() - 40.0 && idx > 0 {
-            break;
-        }
+    for idx in start_idx..end_idx {
+        let tab = &session.tabs[idx];
         let is_active = idx == session.active_tab_index;
         let is_dirty = if is_active {
             session.is_dirty
@@ -966,10 +943,10 @@ fn render_tab_bar(
 
         let tab_rect = Rect::from_min_max(
             Pos2::new(cur_x, tb_top + 3.0),
-            Pos2::new(cur_x + tab_w, tb_bot),
+            Pos2::new(cur_x + tab_w, if is_active { tb_bot + 1.0 } else { tb_bot - 1.0 }),
         );
         let close_rect = Rect::from_center_size(
-            Pos2::new(tab_rect.right() - 13.0, tab_rect.center().y),
+            Pos2::new(tab_rect.right() - 13.0, (tb_top + 3.0 + tb_bot) * 0.5),
             Vec2::new(18.0, 18.0),
         );
         let body_rect = Rect::from_min_max(
@@ -987,11 +964,13 @@ fn render_tab_bar(
             ui.id().with(("accent_tab_select", tab.tab_id, idx)),
             tab_sense,
         );
-        let close_hit = ui.interact(
-            close_rect,
-            ui.id().with(("accent_tab_close", tab.tab_id, idx)),
-            tab_sense,
-        );
+        let close_hit = ui
+            .interact(
+                close_rect,
+                ui.id().with(("accent_tab_close", tab.tab_id, idx)),
+                tab_sense,
+            )
+            .on_hover_text(I18n::tr(session.locale, "tooltip_close_tab"));
 
         let tab_corners = CornerRadius {
             nw: 7,
@@ -999,31 +978,79 @@ fn render_tab_bar(
             sw: 0,
             se: 0,
         };
-        let bg_fill = if is_active {
-            pal.bg_canvas
-        } else if body_hit.hovered() || close_hit.hovered() {
-            pal.bg_pill_button.gamma_multiply(0.68)
-        } else {
-            pal.bg_pill_button.gamma_multiply(0.28)
-        };
-        painter.rect_filled(tab_rect, tab_corners, bg_fill);
 
         if is_active {
+            // Active tab: raised card matching the document canvas, erasing the bottom trough line
+            // and outlined with a crisp contour + 3px top accent bar.
+            painter.rect_filled(tab_rect, tab_corners, pal.bg_canvas);
+            painter.rect_filled(
+                tab_rect,
+                tab_corners,
+                pal.accent_orange.gamma_multiply(0.06 * chrome_alpha),
+            );
+            // Left and right contour borders connecting down to the bottom trough line
+            let active_border = Stroke::new(1.2, border_col);
             painter.line_segment(
                 [
-                    Pos2::new(tab_rect.left() + 6.0, tab_rect.top() + 1.0),
-                    Pos2::new(tab_rect.right() - 6.0, tab_rect.top() + 1.0),
+                    Pos2::new(tab_rect.left(), tab_rect.top() + 5.0),
+                    Pos2::new(tab_rect.left(), tb_bot),
                 ],
-                Stroke::new(2.0, pal.accent_orange),
+                active_border,
             );
+            painter.line_segment(
+                [
+                    Pos2::new(tab_rect.right(), tab_rect.top() + 5.0),
+                    Pos2::new(tab_rect.right(), tb_bot),
+                ],
+                active_border,
+            );
+            // Prominent 3.0px top accent bar indicating the focused tab
+            let accent_bar_rect = Rect::from_min_max(
+                Pos2::new(tab_rect.left() + 1.0, tab_rect.top()),
+                Pos2::new(tab_rect.right() - 1.0, tab_rect.top() + 3.2),
+            );
+            painter.rect_filled(
+                accent_bar_rect,
+                CornerRadius {
+                    nw: 6,
+                    ne: 6,
+                    sw: 0,
+                    se: 0,
+                },
+                pal.accent_orange,
+            );
+        } else {
+            // Inactive tab: recessed into the trough at rest, soft highlight only on hover
+            if body_hit.hovered() || close_hit.hovered() {
+                painter.rect_filled(
+                    tab_rect,
+                    tab_corners,
+                    pal.bg_canvas.gamma_multiply(0.55),
+                );
+            }
+            // Subtle vertical separator on the right of inactive tabs (when the next tab isn't active)
+            if idx + 1 < end_idx && idx + 1 != session.active_tab_index {
+                painter.line_segment(
+                    [
+                        Pos2::new(tab_rect.right() + 2.0, tb_top + 8.0),
+                        Pos2::new(tab_rect.right() + 2.0, tb_bot - 5.0),
+                    ],
+                    Stroke::new(1.0, border_col.gamma_multiply(0.65)),
+                );
+            }
         }
 
+        let center_y = (tb_top + 3.0 + tb_bot) * 0.5;
         let mut text_x = tab_rect.left() + 10.0;
         if is_dirty {
             painter.circle_filled(
-                Pos2::new(text_x + 2.0, tab_rect.center().y),
+                Pos2::new(text_x + 2.0, center_y),
                 3.2,
-                pal.accent_orange,
+                if is_active {
+                    pal.accent_orange
+                } else {
+                    pal.fg_muted
+                },
             );
             text_x += 10.0;
         }
@@ -1037,18 +1064,18 @@ fn render_tab_bar(
         };
 
         painter.text(
-            Pos2::new(text_x, tab_rect.center().y),
+            Pos2::new(text_x, center_y),
             Align2::LEFT_CENTER,
             &display_label,
             if is_active {
-                font_ui_bold(12.2)
+                font_ui_bold(12.6)
             } else {
                 font_ui_regular(12.0)
             },
             if is_active {
                 pal.fg_primary
             } else {
-                pal.fg_muted
+                pal.fg_muted.gamma_multiply(0.88)
             },
         );
 
@@ -1059,8 +1086,10 @@ fn render_tab_bar(
         let cd = 2.8;
         let c_fg = if close_hit.hovered() {
             pal.fg_primary
+        } else if is_active {
+            pal.fg_primary.gamma_multiply(0.75)
         } else {
-            pal.fg_muted.gamma_multiply(0.78)
+            pal.fg_muted.gamma_multiply(0.65)
         };
         painter.line_segment(
             [
@@ -1091,15 +1120,17 @@ fn render_tab_bar(
         Pos2::new((cur_x + 14.0).min(win_rect.right() - 20.0), tb_top + 16.0),
         Vec2::new(22.0, 22.0),
     );
-    let add_hit = ui.interact(
-        add_tab_rect,
-        ui.id().with("accent_tabbar_new_tab_btn"),
-        if session.overlay == ActiveOverlay::None {
-            Sense::click()
-        } else {
-            Sense::hover()
-        },
-    );
+    let add_hit = ui
+        .interact(
+            add_tab_rect,
+            ui.id().with("accent_tabbar_new_tab_btn"),
+            if session.overlay == ActiveOverlay::None {
+                Sense::click()
+            } else {
+                Sense::hover()
+            },
+        )
+        .on_hover_text(I18n::tr(session.locale, "tooltip_new_tab"));
     if add_hit.hovered() {
         painter.rect_filled(add_tab_rect, CornerRadius::same(5), pal.bg_pill_button);
     }
@@ -1463,6 +1494,108 @@ fn render_recovery_banner(
     }
 }
 
+fn render_disk_modified_banner(
+    ui: &mut Ui,
+    painter: &Painter,
+    win_rect: Rect,
+    session: &Session,
+    pal: &AccentPalette,
+    actions: &mut Vec<Action>,
+) {
+    let top_offset = 68.0;
+    let banner_rect = Rect::from_min_max(
+        Pos2::new(win_rect.left(), top_offset),
+        Pos2::new(win_rect.right(), top_offset + 44.0),
+    );
+    let banner_bg = match session.theme {
+        ThemeMode::Dark => Color32::from_rgb(0x42, 0x35, 0x22),
+        ThemeMode::Sepia => Color32::from_rgb(0xf2, 0xe4, 0xca),
+        ThemeMode::Light => Color32::from_rgb(0xfd, 0xf2, 0xdb),
+    };
+    let banner_border = Color32::from_rgb(0xc8, 0x8a, 0x2e);
+    painter.rect_filled(banner_rect, CornerRadius::ZERO, banner_bg);
+    painter.line_segment(
+        [
+            Pos2::new(banner_rect.left(), banner_rect.bottom()),
+            Pos2::new(banner_rect.right(), banner_rect.bottom()),
+        ],
+        Stroke::new(1.0, banner_border),
+    );
+
+    let y_mid = banner_rect.center().y;
+    let msg = if session.is_dirty {
+        I18n::tr(session.locale, "disk_mod_banner_dirty_msg")
+    } else {
+        I18n::tr(session.locale, "disk_mod_banner_msg")
+    };
+    painter.text(
+        Pos2::new(banner_rect.left() + 24.0, y_mid),
+        Align2::LEFT_CENTER,
+        msg,
+        font_ui_bold(13.0),
+        pal.fg_primary,
+    );
+
+    let ignore_rect = Rect::from_center_size(
+        Pos2::new(banner_rect.right() - 104.0, y_mid),
+        Vec2::new(152.0, 28.0),
+    );
+    let reload_rect = Rect::from_center_size(
+        Pos2::new(banner_rect.right() - 268.0, y_mid),
+        Vec2::new(152.0, 28.0),
+    );
+
+    let reload_hit = ui.interact(
+        reload_rect,
+        ui.id().with("disk_mod_reload_btn"),
+        Sense::click(),
+    );
+    let reload_fill = if reload_hit.hovered() {
+        pal.accent_orange.gamma_multiply(1.08)
+    } else {
+        pal.accent_orange
+    };
+    painter.rect_filled(reload_rect, CornerRadius::same(6), reload_fill);
+    painter.text(
+        reload_rect.center(),
+        Align2::CENTER_CENTER,
+        I18n::tr(session.locale, "disk_mod_reload"),
+        font_ui_bold(12.5),
+        Color32::WHITE,
+    );
+    if reload_hit.clicked() {
+        actions.push(Action::ReloadFromDisk);
+    }
+
+    let ignore_hit = ui.interact(
+        ignore_rect,
+        ui.id().with("disk_mod_ignore_btn"),
+        Sense::click(),
+    );
+    let ignore_fill = if ignore_hit.hovered() {
+        pal.bg_pill_button
+    } else {
+        pal.bg_pill_button.gamma_multiply(0.75)
+    };
+    painter.rect_filled(ignore_rect, CornerRadius::same(6), ignore_fill);
+    painter.rect_stroke(
+        ignore_rect,
+        CornerRadius::same(6),
+        Stroke::new(1.0, pal.border_headerbar),
+        StrokeKind::Inside,
+    );
+    painter.text(
+        ignore_rect.center(),
+        Align2::CENTER_CENTER,
+        I18n::tr(session.locale, "disk_mod_ignore"),
+        font_ui_bold(12.5),
+        pal.fg_primary,
+    );
+    if ignore_hit.clicked() {
+        actions.push(Action::DismissExternalModification);
+    }
+}
+
 fn render_workspace_area(
     ui: &mut Ui,
     painter: &Painter,
@@ -1472,7 +1605,7 @@ fn render_workspace_area(
     actions: &mut Vec<Action>,
     sync_cursor_to_widget: &mut bool,
 ) {
-    let top_y = if session.recovery_banner_active {
+    let top_y = if session.recovery_banner_active || session.disk_modified_banner_active {
         38.0 + 44.0
     } else {
         win_rect.top() + 2.0
@@ -1937,6 +2070,14 @@ fn render_editor_pane(
                         egui::text_edit::TextEditState::load(ui.ctx(), te_id).unwrap_or_default();
                     te_state.cursor.set_char_range(Some(c_range));
                     te_state.store(ui.ctx(), te_id);
+                    if session.overlay == ActiveOverlay::None && !session.search_bar_open {
+                        ui.ctx().memory_mut(|m| m.request_focus(te_id));
+                    }
+                } else if session.overlay == ActiveOverlay::None
+                    && !session.search_bar_open
+                    && !ui.ctx().memory(|m| m.has_focus(te_id))
+                {
+                    ui.ctx().memory_mut(|m| m.request_focus(te_id));
                 }
                 let mut output = TextEdit::multiline(&mut editable_text)
                     .id(te_id)
@@ -2502,6 +2643,7 @@ fn render_editor_pane(
                     if session.overlay == ActiveOverlay::None && !session.search_bar_open {
                         output.response.request_focus();
                     }
+                    ui.ctx().request_repaint();
                 } else if !has_tab_change_action && !hemingway_blocked {
                     if let Some(c_range) = active_cursor_range {
                         let p = c_range.primary.index;
@@ -3364,15 +3506,11 @@ fn render_popovers(
             let active_mode = active_view_mode_index(session);
             let items: [(&str, &str, Action); 5] = match session.locale {
                 Locale::It => [
-                    ("Modifica", "Ctrl+Shift+E", Action::SetEditorOnlyRaw),
-                    (
-                        "Anteprima in-line •",
-                        "Ctrl+L",
-                        Action::SetEditorLivePreview,
-                    ),
+                    ("Modifica", "", Action::SetEditorOnlyRaw),
+                    ("Anteprima in-line •", "", Action::SetEditorLivePreview),
                     (
                         "Anteprima split a destra",
-                        "Ctrl+Shift+P",
+                        "",
                         Action::SetPreviewMode {
                             active: true,
                             layout: PreviewLayout::HalfWidth,
@@ -3380,7 +3518,7 @@ fn render_popovers(
                     ),
                     (
                         "Anteprima split sotto",
-                        "Ctrl+Shift+J",
+                        "",
                         Action::SetPreviewMode {
                             active: true,
                             layout: PreviewLayout::HalfHeight,
@@ -3388,7 +3526,7 @@ fn render_popovers(
                     ),
                     (
                         "Solo lettura",
-                        "Ctrl+Alt+P",
+                        "",
                         Action::SetPreviewMode {
                             active: true,
                             layout: PreviewLayout::FullWidth,
@@ -3396,15 +3534,15 @@ fn render_popovers(
                     ),
                 ],
                 Locale::Es => [
-                    ("Editar", "Ctrl+Shift+E", Action::SetEditorOnlyRaw),
+                    ("Editar", "", Action::SetEditorOnlyRaw),
                     (
                         "Vista previa en línea •",
-                        "Ctrl+L",
+                        "",
                         Action::SetEditorLivePreview,
                     ),
                     (
                         "Vista previa dividida a la derecha",
-                        "Ctrl+Shift+P",
+                        "",
                         Action::SetPreviewMode {
                             active: true,
                             layout: PreviewLayout::HalfWidth,
@@ -3412,7 +3550,7 @@ fn render_popovers(
                     ),
                     (
                         "Vista previa dividida abajo",
-                        "Ctrl+Shift+J",
+                        "",
                         Action::SetPreviewMode {
                             active: true,
                             layout: PreviewLayout::HalfHeight,
@@ -3420,7 +3558,7 @@ fn render_popovers(
                     ),
                     (
                         "Solo lectura",
-                        "Ctrl+Alt+P",
+                        "",
                         Action::SetPreviewMode {
                             active: true,
                             layout: PreviewLayout::FullWidth,
@@ -3428,11 +3566,11 @@ fn render_popovers(
                     ),
                 ],
                 Locale::En => [
-                    ("Edit", "Ctrl+Shift+E", Action::SetEditorOnlyRaw),
-                    ("Inline Preview •", "Ctrl+L", Action::SetEditorLivePreview),
+                    ("Edit", "", Action::SetEditorOnlyRaw),
+                    ("Inline Preview •", "", Action::SetEditorLivePreview),
                     (
                         "Split Preview Right",
-                        "Ctrl+Shift+P",
+                        "",
                         Action::SetPreviewMode {
                             active: true,
                             layout: PreviewLayout::HalfWidth,
@@ -3440,7 +3578,7 @@ fn render_popovers(
                     ),
                     (
                         "Split Preview Bottom",
-                        "Ctrl+Shift+J",
+                        "",
                         Action::SetPreviewMode {
                             active: true,
                             layout: PreviewLayout::HalfHeight,
@@ -3448,7 +3586,7 @@ fn render_popovers(
                     ),
                     (
                         "Read Only",
-                        "Ctrl+Alt+P",
+                        "",
                         Action::SetPreviewMode {
                             active: true,
                             layout: PreviewLayout::FullWidth,
@@ -3520,7 +3658,7 @@ fn render_popovers(
         ActiveOverlay::MainMenu => {
             let pop_rect = Rect::from_min_max(
                 Pos2::new(win_rect.right() - 332.0, 40.0),
-                Pos2::new(win_rect.right() - 36.0, 440.0),
+                Pos2::new(win_rect.right() - 36.0, 472.0),
             );
             painter.rect_filled(pop_rect, CornerRadius::same(12), pal.bg_popover);
             painter.rect_stroke(
@@ -3600,42 +3738,48 @@ fn render_popovers(
             let items = [
                 (
                     I18n::tr(session.locale, "hemingway_mode"),
-                    "Ctrl+T",
+                    "",
                     108.0,
                     session.hemingway_mode,
                 ),
                 (
                     I18n::tr(session.locale, "focus_mode"),
-                    "Ctrl+D",
+                    "",
                     142.0,
                     session.focus_mode,
                 ),
                 (
+                    I18n::tr(session.locale, "fullscreen_mode"),
+                    "F11",
+                    176.0,
+                    session.fullscreen,
+                ),
+                (
                     I18n::tr(session.locale, "find_replace"),
-                    "Ctrl+H",
-                    182.0,
+                    "Ctrl+F",
+                    214.0,
                     session.search_bar_open,
                 ),
                 (
                     I18n::tr(session.locale, "preferences"),
-                    "Ctrl+,",
-                    222.0,
+                    "",
+                    252.0,
                     false,
                 ),
                 (
                     I18n::tr(session.locale, "advanced_export"),
-                    "Ctrl+E",
-                    256.0,
+                    "",
+                    286.0,
                     false,
                 ),
-                (I18n::tr(session.locale, "open_tutorial"), "", 290.0, false),
+                (I18n::tr(session.locale, "open_tutorial"), "", 320.0, false),
                 (
                     I18n::tr(session.locale, "keyboard_shortcuts"),
-                    "Ctrl+?",
-                    322.0,
+                    "",
+                    352.0,
                     false,
                 ),
-                (I18n::tr(session.locale, "about"), "", 354.0, false),
+                (I18n::tr(session.locale, "about"), "", 384.0, false),
             ];
             for (idx, (label, shortcut, dy, active)) in items.into_iter().enumerate() {
                 let y = pop_rect.top() + dy;
@@ -3672,14 +3816,18 @@ fn render_popovers(
                         0 => actions.push(Action::ToggleHemingway),
                         1 => actions.push(Action::ToggleFocusMode),
                         2 => {
+                            actions.push(Action::ToggleFullscreen);
+                            actions.push(Action::SetOverlay(ActiveOverlay::None));
+                        }
+                        3 => {
                             actions.push(Action::ToggleSearchBar);
                             actions.push(Action::SetOverlay(ActiveOverlay::None));
                         }
-                        3 => actions.push(Action::SetOverlay(ActiveOverlay::PreferencesDialog)),
-                        4 => actions.push(Action::SetOverlay(ActiveOverlay::ExportDialog)),
-                        5 => actions.push(Action::OpenTutorial),
-                        6 => actions.push(Action::SetOverlay(ActiveOverlay::ShortcutsDialog)),
-                        7 => actions.push(Action::SetOverlay(ActiveOverlay::AboutDialog)),
+                        4 => actions.push(Action::SetOverlay(ActiveOverlay::PreferencesDialog)),
+                        5 => actions.push(Action::SetOverlay(ActiveOverlay::ExportDialog)),
+                        6 => actions.push(Action::OpenTutorial),
+                        7 => actions.push(Action::SetOverlay(ActiveOverlay::ShortcutsDialog)),
+                        8 => actions.push(Action::SetOverlay(ActiveOverlay::AboutDialog)),
                         _ => actions.push(Action::SetOverlay(ActiveOverlay::None)),
                     }
                 }
@@ -4606,19 +4754,46 @@ fn render_shortcuts_dialog(
     {
         actions.push(Action::SetOverlay(ActiveOverlay::None));
     }
+    let (lbl_new_tab, lbl_close_tab, lbl_next_tab, lbl_prev_tab, lbl_undo_redo, lbl_esc) =
+        match session.locale {
+            Locale::It => (
+                "Nuova scheda",
+                "Chiudi scheda",
+                "Scheda successiva",
+                "Scheda precedente",
+                "Annulla / Ripeti",
+                "Chiudi menu / finestra di dialogo",
+            ),
+            Locale::Es => (
+                "Nueva pestaña",
+                "Cerrar pestaña",
+                "Pestaña siguiente",
+                "Pestaña anterior",
+                "Deshacer / Rehacer",
+                "Cerrar menú / diálogo",
+            ),
+            Locale::En => (
+                "New Tab",
+                "Close Tab",
+                "Next Tab",
+                "Previous Tab",
+                "Undo / Redo",
+                "Close menu / dialog",
+            ),
+        };
     let shortcuts = [
-        ("Ctrl+Shift+E", I18n::tr(session.locale, "editor_only_raw")),
-        ("Ctrl+L", I18n::tr(session.locale, "view_while_typing")),
-        ("Ctrl+Shift+P", I18n::tr(session.locale, "half_width")),
-        ("Ctrl+Alt+P", I18n::tr(session.locale, "full_width")),
-        ("Ctrl+Shift+J", I18n::tr(session.locale, "half_height")),
-        ("Ctrl+Shift+W", I18n::tr(session.locale, "windowed")),
-        ("Ctrl+T", I18n::tr(session.locale, "hemingway_mode")),
-        ("Ctrl+D", I18n::tr(session.locale, "focus_mode")),
-        ("Ctrl+H", I18n::tr(session.locale, "find_replace")),
-        ("Ctrl+,", I18n::tr(session.locale, "preferences")),
-        ("F10", "Menu principale"),
-        ("Esc", "Chiudi menu / finestra di dialogo"),
+        ("Ctrl+T", lbl_new_tab),
+        ("Ctrl+W", lbl_close_tab),
+        ("Ctrl+Tab", lbl_next_tab),
+        ("Ctrl+Shift+Tab", lbl_prev_tab),
+        ("Ctrl+F", I18n::tr(session.locale, "find_replace")),
+        ("F11", I18n::tr(session.locale, "fullscreen_mode")),
+        ("Ctrl+N", I18n::tr(session.locale, "new_doc")),
+        ("Ctrl+O", I18n::tr(session.locale, "open_file")),
+        ("Ctrl+S", I18n::tr(session.locale, "save")),
+        ("Ctrl+Shift+S", I18n::tr(session.locale, "save_as")),
+        ("Ctrl+Z / Ctrl+Shift+Z", lbl_undo_redo),
+        ("Esc", lbl_esc),
     ];
     for (idx, (key, label)) in shortcuts.into_iter().enumerate() {
         let ry = dlg_rect.top() + 68.0 + (idx as f32) * 33.0;
