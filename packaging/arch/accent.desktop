@@ -14,5 +14,6 @@ Terminal=false
 Categories=Office;TextEditor;Utility;
 MimeType=text/markdown;text/x-markdown;text/plain;
 Keywords=markdown;editor;writer;preview;mermaid;pdf;docx;odt;epub;
-StartupNotify=true
+StartupNotify=false
 StartupWMClass=accent
+SingleMainWindow=true

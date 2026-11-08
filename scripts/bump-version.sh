@@ -51,4 +51,7 @@ if [[ -f "$ROOT_DIR/crates/accent-ui/src/lib.rs" ]]; then
     sed -i -E "s/assert_eq!\(VERSION, \"[0-9]+\.[0-9]+\.[0-9]+\"\);/assert_eq!(VERSION, \"${SEMVER}\");/" "$ROOT_DIR/crates/accent-ui/src/lib.rs"
 fi
 
+# 7. Synchronize Cargo.lock with the new workspace version (required by `cargo build --locked` in PKGBUILD)
+(cd "$ROOT_DIR" && cargo update --workspace --offline)
+
 echo "==> Versione aggiornata con successo a ${SEMVER} in tutto il repository."

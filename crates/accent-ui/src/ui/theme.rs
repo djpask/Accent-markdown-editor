@@ -739,6 +739,13 @@ pub fn configure_fonts(ctx: &Context) {
     if has_mono_reg {
         reg_vec.push("editor_reg".to_string());
     }
+    let emoji_slot_vec = if !reg_vec.is_empty() {
+        reg_vec.clone()
+    } else {
+        fallback_mono.clone()
+    };
+    defs.families
+        .insert(FontFamily::Name("EmojiSlot".into()), emoji_slot_vec);
     reg_vec.extend(fallback_mono.clone());
     defs.families
         .insert(FontFamily::Name("EditorRegular".into()), reg_vec.clone());
@@ -1434,6 +1441,301 @@ pub fn draw_toolbar_icon(painter: &Painter, center: Pos2, fg: Color32, idx: usiz
     }
 }
 
+/// Returns `true` if `ch` is a Unicode color emoji codepoint that should be rendered
+/// with full-color RGBA bitmap/vector graphics rather than `ab_glyph`'s monochrome outline.
+pub fn is_color_emoji_char(ch: char) -> bool {
+    let u = ch as u32;
+    if (0x1F3FB..=0x1F3FF).contains(&u) {
+        return false;
+    }
+    matches!(
+        u,
+        0x1F000..=0x1FAFF
+            | 0x2600..=0x27BF
+            | 0x231A..=0x231B
+            | 0x2328
+            | 0x23CF
+            | 0x23E9..=0x23F3
+            | 0x23F8..=0x23FA
+            | 0x25AA..=0x25AB
+            | 0x25B6
+            | 0x25C0
+            | 0x25FB..=0x25FE
+            | 0x2B05..=0x2B07
+            | 0x2B1B..=0x2B1C
+            | 0x2B50
+            | 0x2B55
+            | 0x203C
+            | 0x2049
+            | 0x2139
+            | 0x2934..=0x2935
+            | 0x3030
+            | 0x303D
+            | 0x3297
+            | 0x3299
+    )
+}
+
+/// Returns `true` if `ch` is an invisible emoji variation selector, ZWJ, or skin-tone combiner
+/// that should occupy zero visual width while preserving 1:1 character indices in `LayoutJob`.
+pub fn is_emoji_invisible_combiner(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0xFE0E | 0xFE0F | 0x200D | 0x20E3 | 0x1F3FB..=0x1F3FF
+    )
+}
+
+fn system_color_emoji_font_bytes() -> Option<&'static [u8]> {
+    static BYTES: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
+    BYTES
+        .get_or_init(|| {
+            let paths = [
+                "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+                "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+                "/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf",
+                "/usr/share/fonts/noto-color-emoji/NotoColorEmoji.ttf",
+            ];
+            for p in paths {
+                if let Ok(data) = fs::read(p) {
+                    return Some(data);
+                }
+            }
+            None
+        })
+        .as_deref()
+}
+
+fn synthesize_fallback_emoji_image(ch: char) -> Option<egui::ColorImage> {
+    let size = 64usize;
+    let mut pixels = vec![Color32::TRANSPARENT; size * size];
+    let center = (size as f32 - 1.0) * 0.5;
+
+    // Colored circles: 🔴 🟠 🟡 🟢 🔵 🟣 🟤 ⚫ ⚪
+    let circle_colors: Option<([u8; 3], [u8; 3])> = match ch {
+        '🔴' => Some(([0xEF, 0x44, 0x44], [0xB9, 0x1C, 0x1C])),
+        '🟠' => Some(([0xF9, 0x73, 0x16], [0xC2, 0x41, 0x0C])),
+        '🟡' => Some(([0xFA, 0xCC, 0x15], [0xCA, 0x8A, 0x04])),
+        '🟢' => Some(([0x22, 0xC5, 0x5E], [0x15, 0x80, 0x3D])),
+        '🔵' => Some(([0x3B, 0x82, 0xF6], [0x1D, 0x4E, 0xD8])),
+        '🟣' => Some(([0xA8, 0x55, 0xF7], [0x7E, 0x22, 0xCE])),
+        '🟤' => Some(([0xA1, 0x62, 0x07], [0x71, 0x3F, 0x12])),
+        '⚫' => Some(([0x37, 0x41, 0x51], [0x11, 0x18, 0x27])),
+        '⚪' => Some(([0xF8, 0xFA, 0xFC], [0x94, 0xA3, 0xB8])),
+        _ => None,
+    };
+
+    if let Some((fill, border)) = circle_colors {
+        let radius = 26.5_f32;
+        for y in 0..size {
+            for x in 0..size {
+                let dx = x as f32 - center;
+                let dy = y as f32 - center;
+                let dist = (dx * dx + dy * dy).sqrt();
+                if dist <= radius + 0.8 {
+                    let edge_alpha = ((radius + 0.8 - dist).clamp(0.0, 1.0) * 255.0) as u8;
+                    let is_rim = dist >= radius - 2.4;
+                    let base = if is_rim { border } else { fill };
+                    pixels[y * size + x] =
+                        Color32::from_rgba_unmultiplied(base[0], base[1], base[2], edge_alpha);
+                }
+            }
+        }
+        return Some(egui::ColorImage {
+            size: [size, size],
+            pixels,
+        });
+    }
+
+    // Colored squares: 🟥 🟧 🟨 🟩 🟦 🟪 🟫 ⬛ ⬜
+    let square_colors: Option<([u8; 3], [u8; 3])> = match ch {
+        '🟥' => Some(([0xEF, 0x44, 0x44], [0xB9, 0x1C, 0x1C])),
+        '🟧' => Some(([0xF9, 0x73, 0x16], [0xC2, 0x41, 0x0C])),
+        '🟨' => Some(([0xFA, 0xCC, 0x15], [0xCA, 0x8A, 0x04])),
+        '🟩' => Some(([0x22, 0xC5, 0x5E], [0x15, 0x80, 0x3D])),
+        '🟦' => Some(([0x3B, 0x82, 0xF6], [0x1D, 0x4E, 0xD8])),
+        '🟪' => Some(([0xA8, 0x55, 0xF7], [0x7E, 0x22, 0xCE])),
+        '🟫' => Some(([0xA1, 0x62, 0x07], [0x71, 0x3F, 0x12])),
+        '⬛' | '◼' | '▪' => Some(([0x37, 0x41, 0x51], [0x11, 0x18, 0x27])),
+        '⬜' | '◻' | '▫' => Some(([0xF8, 0xFA, 0xFC], [0x94, 0xA3, 0xB8])),
+        '✅' => Some(([0x22, 0xC5, 0x5E], [0x15, 0x80, 0x3D])),
+        '❌' => Some(([0xEF, 0x44, 0x44], [0xB9, 0x1C, 0x1C])),
+        '⚠' | '⭐' | '✨' => Some(([0xFA, 0xCC, 0x15], [0xCA, 0x8A, 0x04])),
+        _ => None,
+    };
+
+    if let Some((fill, border)) = square_colors {
+        let half = 24.0_f32;
+        for y in 0..size {
+            for x in 0..size {
+                let dx = (x as f32 - center).abs();
+                let dy = (y as f32 - center).abs();
+                if dx <= half && dy <= half {
+                    let is_rim = dx >= half - 2.5 || dy >= half - 2.5;
+                    let base = if is_rim { border } else { fill };
+                    pixels[y * size + x] = Color32::from_rgb(base[0], base[1], base[2]);
+                }
+            }
+        }
+        return Some(egui::ColorImage {
+            size: [size, size],
+            pixels,
+        });
+    }
+
+    None
+}
+
+/// Extracts a full-color RGBA emoji image from the system `NotoColorEmoji.ttf` (`CBDT`/`CBLC`
+/// bitmap tables via `ttf-parser`) or falls back to the built-in procedural RGBA renderer.
+pub fn load_color_emoji_image(ch: char) -> Option<egui::ColorImage> {
+    if let Some(font_bytes) = system_color_emoji_font_bytes() {
+        if let Ok(face) = ttf_parser::Face::parse(font_bytes, 0) {
+            if let Some(glyph_id) = face.glyph_index(ch) {
+                if let Some(raster) = face.glyph_raster_image(glyph_id, 128) {
+                    if let Ok(dyn_img) = image::load_from_memory(raster.data) {
+                        let rgba = dyn_img.to_rgba8();
+                        let w = rgba.width() as usize;
+                        let h = rgba.height() as usize;
+                        if w > 0 && h > 0 {
+                            return Some(egui::ColorImage::from_rgba_unmultiplied(
+                                [w, h],
+                                rgba.as_raw(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    synthesize_fallback_emoji_image(ch)
+}
+
+/// Retrieves or uploads a cached `egui::TextureHandle` for a color emoji character `ch`.
+pub fn get_or_load_color_emoji_texture(ctx: &Context, ch: char) -> Option<egui::TextureHandle> {
+    let cache_id = egui::Id::new(("accent_color_emoji_tex_v1", ch as u32));
+    if let Some(cached) = ctx.data_mut(|d| d.get_temp::<Option<egui::TextureHandle>>(cache_id)) {
+        return cached;
+    }
+    let loaded = load_color_emoji_image(ch).map(|color_img| {
+        ctx.load_texture(
+            format!("accent_emoji_{:X}", ch as u32),
+            color_img,
+            egui::TextureOptions::LINEAR,
+        )
+    });
+    ctx.data_mut(|d| d.insert_temp(cache_id, loaded.clone()));
+    loaded
+}
+
+/// Appends `text` to `job`, replacing color emoji codepoints with transparent fixed-advance
+/// slots so `ab_glyph` never paints monochrome `◍` or `.notdef` `□` tofu while preserving
+/// exact 1:1 `CCursor` character indices for `paint_galley_color_emojis`.
+pub fn append_text_with_color_emojis(
+    job: &mut egui::text::LayoutJob,
+    text: &str,
+    mut leading_space: f32,
+    base_format: egui::TextFormat,
+) {
+    if !text
+        .chars()
+        .any(|c| is_color_emoji_char(c) || is_emoji_invisible_combiner(c))
+    {
+        job.append(text, leading_space, base_format);
+        return;
+    }
+
+    let base_size = base_format.font_id.size;
+    let mut normal_start = 0usize;
+    for (byte_idx, ch) in text.char_indices() {
+        let ch_len = ch.len_utf8();
+        if is_color_emoji_char(ch) {
+            if normal_start < byte_idx {
+                job.append(
+                    &text[normal_start..byte_idx],
+                    leading_space,
+                    base_format.clone(),
+                );
+                leading_space = 0.0;
+            }
+            let mut emoji_fmt = base_format.clone();
+            emoji_fmt.color = Color32::TRANSPARENT;
+            emoji_fmt.font_id = FontId::new(base_size, FontFamily::Name("EmojiSlot".into()));
+            emoji_fmt.extra_letter_spacing = base_size * 0.42;
+            job.append(&text[byte_idx..byte_idx + ch_len], leading_space, emoji_fmt);
+            leading_space = 0.0;
+            normal_start = byte_idx + ch_len;
+        } else if is_emoji_invisible_combiner(ch) {
+            if normal_start < byte_idx {
+                job.append(
+                    &text[normal_start..byte_idx],
+                    leading_space,
+                    base_format.clone(),
+                );
+                leading_space = 0.0;
+            }
+            let mut comb_fmt = base_format.clone();
+            comb_fmt.color = Color32::TRANSPARENT;
+            comb_fmt.font_id = FontId::new(0.01, FontFamily::Name("EmojiSlot".into()));
+            job.append(&text[byte_idx..byte_idx + ch_len], leading_space, comb_fmt);
+            leading_space = 0.0;
+            normal_start = byte_idx + ch_len;
+        }
+    }
+    if normal_start < text.len() {
+        job.append(&text[normal_start..], leading_space, base_format);
+    }
+}
+
+/// Paints full-color RGBA emoji textures over the transparent emoji character slots in `galley`.
+pub fn paint_galley_color_emojis(
+    ctx: &Context,
+    painter: &Painter,
+    galley: &egui::Galley,
+    galley_pos: Pos2,
+    text: &str,
+    min_char_idx: usize,
+    max_char_idx: usize,
+    default_font_size: f32,
+) {
+    let mut char_idx = 0usize;
+    for ch in text.chars() {
+        if char_idx > max_char_idx {
+            break;
+        }
+        if char_idx >= min_char_idx && is_color_emoji_char(ch) {
+            let r0 = galley.pos_from_ccursor(egui::text::CCursor::new(char_idx));
+            let r1 = galley.pos_from_ccursor(egui::text::CCursor::new(char_idx + 1));
+            let slot_w = (r1.min.x - r0.min.x).abs();
+            // Skip collapsed delimiter slots (where font_size is 0.01pt and slot_w < 2.0px)
+            if slot_w >= 4.0 {
+                if let Some(tex) = get_or_load_color_emoji_texture(ctx, ch) {
+                    let row_h = r0.height().max(default_font_size);
+                    let emoji_h = (slot_w * 0.98)
+                        .clamp(default_font_size * 0.88, (row_h * 0.92).max(default_font_size * 1.05));
+                    let tex_size = tex.size_vec2();
+                    let aspect = if tex_size.y > 0.0 {
+                        (tex_size.x / tex_size.y).clamp(0.85, 1.15)
+                    } else {
+                        1.0
+                    };
+                    let emoji_w = emoji_h * aspect;
+                    let cx = galley_pos.x + r0.min.x + slot_w * 0.5;
+                    let top_y = r0.min.y.min(r0.max.y - emoji_h * 1.10);
+                    let cy = galley_pos.y + (top_y + r0.max.y) * 0.5;
+                    let rect = Rect::from_center_size(Pos2::new(cx, cy), Vec2::new(emoji_w, emoji_h));
+                    painter.image(
+                        tex.id(),
+                        rect,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                }
+            }
+        }
+        char_idx += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1455,5 +1757,41 @@ mod tests {
         assert_eq!(dark.bg_headerbar, Color32::from_rgb(0x2e, 0x2e, 0x32));
         assert_eq!(dark.fg_primary, Color32::from_rgb(0xee, 0xee, 0xee));
         assert_eq!(dark.bg_code_block, Color32::from_rgb(0x3c, 0x3c, 0x42));
+    }
+
+    #[test]
+    fn test_color_emoji_detection_and_rasterization() {
+        for ch in ['🔴', '🟠', '🟡', '🟢', '🔵', '🟣', '🟤', '⚫', '⚪', '🦀', '🚀', '✨', '🔥', '💡', '✅', '⚠'] {
+            assert!(is_color_emoji_char(ch), "Expected {ch} to be detected as color emoji");
+            let img = load_color_emoji_image(ch)
+                .unwrap_or_else(|| panic!("Expected non-empty color image for {ch}"));
+            assert!(img.size[0] >= 32 && img.size[1] >= 32);
+            let non_transparent = img.pixels.iter().filter(|p| p.a() > 0).count();
+            assert!(
+                non_transparent > 100,
+                "Expected visible colored pixels for {ch}, got {non_transparent}"
+            );
+        }
+
+        let sample = "(filtro opzionale per pallino 🔴/🟡/🟢/⚪)";
+        let mut job = egui::text::LayoutJob::default();
+        append_text_with_color_emojis(
+            &mut job,
+            sample,
+            0.0,
+            egui::TextFormat {
+                font_id: FontId::new(17.0, FontFamily::Monospace),
+                color: Color32::WHITE,
+                ..Default::default()
+            },
+        );
+        assert_eq!(job.text, sample);
+        // Verify all 4 emoji circles in the sample are given transparent slots so monochrome/tofu never shows
+        let transparent_sections = job
+            .sections
+            .iter()
+            .filter(|s| s.format.color == Color32::TRANSPARENT)
+            .count();
+        assert_eq!(transparent_sections, 4);
     }
 }

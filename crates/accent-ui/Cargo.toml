@@ -13,6 +13,7 @@ accent-session = { path = "../accent-session" }
 eframe.workspace = true
 egui.workspace = true
 fontdb.workspace = true
+ttf-parser.workspace = true
 image.workspace = true
 serde.workspace = true
 serde_json.workspace = true

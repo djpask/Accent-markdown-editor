@@ -1,6 +1,7 @@
 pub mod ui;
 
 use accent_session::{Action, Session};
+use accent_storage::{IpcRequest, SingleInstanceGuard, SingleInstanceOutcome};
 use eframe::egui;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -14,11 +15,27 @@ pub struct AccentApp {
     pub session: Session,
     frame_count: u32,
     sync_cursor_to_widget: bool,
+    single_instance: Option<SingleInstanceGuard>,
 }
 
 impl AccentApp {
     pub fn new(cc: &eframe::CreationContext<'_>, opts: LaunchOptions) -> Self {
+        Self::with_single_instance(cc, opts, None)
+    }
+
+    pub fn with_single_instance(
+        cc: &eframe::CreationContext<'_>,
+        opts: LaunchOptions,
+        single_instance: Option<SingleInstanceGuard>,
+    ) -> Self {
         ui::theme::configure_fonts(&cc.egui_ctx);
+
+        if let Some(ref guard) = single_instance {
+            let egui_ctx = cc.egui_ctx.clone();
+            guard.set_waker(move || {
+                egui_ctx.request_repaint();
+            });
+        }
 
         let mut session = Session::default();
         if let Some(fp) = opts.file_path {
@@ -29,6 +46,7 @@ impl AccentApp {
             session,
             frame_count: 0,
             sync_cursor_to_widget: true,
+            single_instance,
         }
     }
 }
@@ -36,10 +54,34 @@ impl AccentApp {
 impl eframe::App for AccentApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.frame_count += 1;
+        if self.frame_count <= 3 {
+            ctx.set_cursor_icon(egui::CursorIcon::Default);
+        }
+
+        // Process any incoming single-instance IPC requests from secondary `accent [file.md]` launches
+        if let Some(ref guard) = self.single_instance {
+            let ipc_requests = guard.drain_requests();
+            if !ipc_requests.is_empty() {
+                for req in ipc_requests {
+                    if let IpcRequest::OpenFile(path) = req {
+                        self.session.apply(Action::OpenFile(path));
+                        self.sync_cursor_to_widget = true;
+                    }
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                ctx.request_repaint();
+            }
+        }
 
         // Borrow-Checker Rule (AGENTS.md Section 3):
         // Treat Session as read-only during UI rendering, collect Actions into a frame-local Vec,
         // and drain/apply all actions at the end of update().
+        let rendered_tab_id = self
+            .session
+            .tabs
+            .get(self.session.active_tab_index)
+            .map(|t| t.tab_id);
         let atlas_before = ctx.fonts(|f| f.font_image_size());
         let mut actions = Vec::new();
         ui::render_ui(
@@ -51,6 +93,19 @@ impl eframe::App for AccentApp {
         let atlas_after = ctx.fonts(|f| f.font_image_size());
         let had_actions = !actions.is_empty();
         for action in actions {
+            let current_tab_id = self
+                .session
+                .tabs
+                .get(self.session.active_tab_index)
+                .map(|t| t.tab_id);
+            if matches!(
+                action,
+                Action::UpdateBufferText(_) | Action::SetSelection(_, _) | Action::MoveCursor(_)
+            ) && current_tab_id != rendered_tab_id
+            {
+                // Never apply buffer or cursor mutations from a previous tab's widget onto a newly switched tab
+                continue;
+            }
             if matches!(
                 action,
                 Action::MoveCursor(_)
@@ -98,6 +153,7 @@ impl eframe::App for AccentApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.session.on_clean_exit();
+        self.single_instance = None;
     }
 }
 
@@ -166,6 +222,24 @@ pub fn generate_windows_ico() -> Option<Vec<u8>> {
 }
 
 pub fn run_app(opts: LaunchOptions) -> eframe::Result {
+    // Clear any inherited XDG/X11 startup notification ID so desktop compositors
+    // never leave the mouse pointer in the 15-second spinning "busy" state.
+    unsafe {
+        std::env::remove_var("DESKTOP_STARTUP_ID");
+    }
+
+    // Enforce Single-Instance execution: if another Accent instance is already running,
+    // forward the requested file (or a focus request) to it and exit immediately.
+    let lock_path = accent_storage::default_instance_lock_path();
+    let single_instance =
+        match SingleInstanceGuard::acquire_or_forward(&lock_path, opts.file_path.as_deref()) {
+            Ok(SingleInstanceOutcome::ForwardedToExisting) => {
+                return Ok(());
+            }
+            Ok(SingleInstanceOutcome::Primary(guard)) => Some(guard),
+            Err(_) => None,
+        };
+
     // If DISPLAY=:99 is requested or running headless, force X11 on :99 with software GL
     let want_xvfb_99 = std::env::var("DISPLAY").as_deref() == Ok(":99")
         || (std::env::var("DISPLAY").is_err() && std::env::var("WAYLAND_DISPLAY").is_err());
@@ -198,7 +272,13 @@ pub fn run_app(opts: LaunchOptions) -> eframe::Result {
     eframe::run_native(
         "Accent",
         native_options,
-        Box::new(move |cc| Ok(Box::new(AccentApp::new(cc, opts)))),
+        Box::new(move |cc| {
+            Ok(Box::new(AccentApp::with_single_instance(
+                cc,
+                opts,
+                single_instance,
+            )))
+        }),
     )
 }
 
@@ -286,7 +366,7 @@ mod tests {
 
     #[test]
     fn test_version_system_consistency() {
-        assert_eq!(VERSION, "0.8.3");
+        assert_eq!(VERSION, "0.8.5");
         assert_eq!(accent_core::VERSION, VERSION);
         let version_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../VERSION");
         let file_ver = std::fs::read_to_string(version_file)

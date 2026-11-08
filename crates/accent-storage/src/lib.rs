@@ -1,8 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Record persisted in the Write-Ahead Recovery Journal (`SPECS.md` Pillar 8 / Phase 4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,6 +325,176 @@ pub fn find_recovery_journal_for_path(
         .find(|entry| entry.target_path.as_deref().map(normalize_path) == norm_target)
 }
 
+/// Cross-platform single-instance IPC message sent from a secondary `accent` launch
+/// to the already-running primary Accent instance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IpcRequest {
+    OpenFile(PathBuf),
+    FocusWindow,
+}
+
+/// Result of attempting to acquire the single-instance lock on startup.
+pub enum SingleInstanceOutcome {
+    /// Current process is the primary instance and owns the active IPC listener.
+    Primary(SingleInstanceGuard),
+    /// An instance of Accent is already running and accepted our forwarded request.
+    ForwardedToExisting,
+}
+
+/// Resolves the path to the single-instance endpoint lock file (`instance.lock`),
+/// scoped to the user's state directory (or `ACCENT_INSTANCE_LOCK` if overridden).
+pub fn default_instance_lock_path() -> PathBuf {
+    if let Ok(custom) = std::env::var("ACCENT_INSTANCE_LOCK") {
+        let trimmed = custom.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    let rec_dir = default_recovery_dir();
+    let state_dir = rec_dir.parent().unwrap_or(&rec_dir);
+    state_dir.join("instance.lock")
+}
+
+/// Owns the localhost IPC listener for the running primary Accent instance.
+/// When dropped on exit, stops the listener thread and removes `instance.lock`.
+pub struct SingleInstanceGuard {
+    lock_path: PathBuf,
+    local_addr: SocketAddr,
+    stop_flag: Arc<AtomicBool>,
+    inbox: Arc<Mutex<Vec<IpcRequest>>>,
+    waker: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>,
+}
+
+impl SingleInstanceGuard {
+    /// Attempts to connect to an already-running Accent instance recorded in `lock_path`.
+    /// - If a running instance responds, forwards `initial_file` (or `FocusWindow`) and returns
+    ///   `Ok(SingleInstanceOutcome::ForwardedToExisting)`.
+    /// - Otherwise, binds a new localhost IPC listener, atomically records its address in `lock_path`,
+    ///   and returns `Ok(SingleInstanceOutcome::Primary(guard))`.
+    pub fn acquire_or_forward(
+        lock_path: &Path,
+        initial_file: Option<&Path>,
+    ) -> io::Result<SingleInstanceOutcome> {
+        let req = match initial_file {
+            Some(p) => IpcRequest::OpenFile(normalize_path(p)),
+            None => IpcRequest::FocusWindow,
+        };
+
+        if let Ok(raw) = fs::read_to_string(lock_path) {
+            if let Ok(existing_addr) = raw.trim().parse::<SocketAddr>() {
+                if let Ok(mut stream) =
+                    TcpStream::connect_timeout(&existing_addr, Duration::from_millis(250))
+                {
+                    let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+                    if let Ok(mut payload) = serde_json::to_string(&req) {
+                        payload.push('\n');
+                        if stream.write_all(payload.as_bytes()).is_ok() && stream.flush().is_ok() {
+                            let mut reader = BufReader::new(stream);
+                            let mut ack = String::new();
+                            if reader.read_line(&mut ack).is_ok() && ack.trim() == "OK" {
+                                return Ok(SingleInstanceOutcome::ForwardedToExisting);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(parent) = lock_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let local_addr = listener.local_addr()?;
+        atomic_save(lock_path, &local_addr.to_string())?;
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let inbox = Arc::new(Mutex::new(Vec::new()));
+        let waker: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>> = Arc::new(Mutex::new(None));
+
+        let stop_clone = Arc::clone(&stop_flag);
+        let inbox_clone = Arc::clone(&inbox);
+        let waker_clone = Arc::clone(&waker);
+
+        std::thread::Builder::new()
+            .name("accent-single-instance-ipc".to_string())
+            .spawn(move || {
+                for incoming in listener.incoming() {
+                    if stop_clone.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let Ok(mut stream) = incoming else {
+                        continue;
+                    };
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+                    let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
+                    let mut line = String::new();
+                    {
+                        let mut reader = BufReader::new(&mut stream);
+                        if reader.read_line(&mut line).is_err() {
+                            continue;
+                        }
+                    }
+                    if let Ok(msg) = serde_json::from_str::<IpcRequest>(line.trim()) {
+                        let _ = stream.write_all(b"OK\n");
+                        let _ = stream.flush();
+                        if let Ok(mut queue) = inbox_clone.lock() {
+                            queue.push(msg);
+                        }
+                        if let Ok(w_guard) = waker_clone.lock() {
+                            if let Some(ref cb) = *w_guard {
+                                cb();
+                            }
+                        }
+                    }
+                }
+            })?;
+
+        Ok(SingleInstanceOutcome::Primary(Self {
+            lock_path: lock_path.to_path_buf(),
+            local_addr,
+            stop_flag,
+            inbox,
+            waker,
+        }))
+    }
+
+    /// Registers a wakeup callback (e.g. `egui::Context::request_repaint`) invoked whenever
+    /// a secondary instance forwards a command to this primary instance.
+    pub fn set_waker<F>(&self, callback: F)
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        if let Ok(mut guard) = self.waker.lock() {
+            *guard = Some(Box::new(callback));
+        }
+    }
+
+    /// Drains all pending `IpcRequest` messages received from secondary instances.
+    pub fn drain_requests(&self) -> Vec<IpcRequest> {
+        if let Ok(mut queue) = self.inbox.lock() {
+            std::mem::take(&mut *queue)
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        self.stop_flag.store(true, Ordering::Relaxed);
+        let _ = TcpStream::connect_timeout(&self.local_addr, Duration::from_millis(50));
+        if let Ok(raw) = fs::read_to_string(&self.lock_path) {
+            if raw.trim() == self.local_addr.to_string() {
+                let _ = fs::remove_file(&self.lock_path);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,6 +587,76 @@ mod tests {
         remove_journal_for_target(&recovery_dir, Some(&doc_path)).expect("remove journal");
         assert!(find_recovery_journal_for_path(&recovery_dir, Some(&doc_path)).is_none());
         assert!(scan_recovery_journals(&recovery_dir).is_empty());
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_single_instance_lock_and_ipc_file_forwarding() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "accent_single_instance_test_{}_{}",
+            std::process::id(),
+            current_utc_ms()
+        ));
+        fs::create_dir_all(&test_dir).expect("create test_dir");
+        let lock_path = test_dir.join("instance.lock");
+        let doc_a = test_dir.join("secondo_file.md");
+        atomic_save(&doc_a, "# Secondo File\n").expect("create doc_a");
+
+        // 1. Write a stale unlistening port to lock_path to simulate a crashed previous instance
+        atomic_save(&lock_path, "127.0.0.1:9").expect("write stale lock");
+
+        // 2. First live instance must recover from stale lock and acquire Primary
+        let primary = match SingleInstanceGuard::acquire_or_forward(&lock_path, None)
+            .expect("acquire primary")
+        {
+            SingleInstanceOutcome::Primary(guard) => guard,
+            SingleInstanceOutcome::ForwardedToExisting => {
+                panic!("Expected first live instance to become Primary")
+            }
+        };
+
+        let woke_up = Arc::new(AtomicBool::new(false));
+        let woke_clone = Arc::clone(&woke_up);
+        primary.set_waker(move || {
+            woke_clone.store(true, Ordering::SeqCst);
+        });
+
+        // 3. Second instance launched with `doc_a` must forward to primary and return `ForwardedToExisting`
+        let second = SingleInstanceGuard::acquire_or_forward(&lock_path, Some(&doc_a))
+            .expect("second launch");
+        assert!(matches!(second, SingleInstanceOutcome::ForwardedToExisting));
+
+        // 4. Third instance launched without arguments must forward `FocusWindow` and return `ForwardedToExisting`
+        let third =
+            SingleInstanceGuard::acquire_or_forward(&lock_path, None).expect("third launch");
+        assert!(matches!(third, SingleInstanceOutcome::ForwardedToExisting));
+
+        // Wait briefly for the background IPC thread to process both messages
+        for _ in 0..20 {
+            if woke_up.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(woke_up.load(Ordering::SeqCst));
+
+        let requests = primary.drain_requests();
+        assert_eq!(
+            requests,
+            vec![
+                IpcRequest::OpenFile(normalize_path(&doc_a)),
+                IpcRequest::FocusWindow,
+            ]
+        );
+
+        // 5. Dropping the primary instance cleans up `instance.lock` and allows a new primary instance
+        drop(primary);
+        assert!(!lock_path.exists());
+
+        let new_primary =
+            SingleInstanceGuard::acquire_or_forward(&lock_path, None).expect("re-acquire primary");
+        assert!(matches!(new_primary, SingleInstanceOutcome::Primary(_)));
 
         let _ = fs::remove_dir_all(&test_dir);
     }

@@ -426,12 +426,12 @@ struct DocumentAstCache {
 pub struct DocumentBuffer {
     rope: Rope,
     revision: u64,
-    cached_text: String,
+    cached_text: Arc<str>,
     cached_stats: DocumentStats,
     cursor_char_offset: usize,
     selection_end_char_offset: usize,
-    undo_stack: Vec<(String, usize, usize)>,
-    redo_stack: Vec<(String, usize, usize)>,
+    undo_stack: Vec<(Rope, usize, usize)>,
+    redo_stack: Vec<(Rope, usize, usize)>,
     cache: RefCell<DocumentAstCache>,
 }
 
@@ -448,7 +448,7 @@ impl DocumentBuffer {
             .find("Accent è un editor")
             .map(|b| rope.byte_to_char(b))
             .unwrap_or(0);
-        let cached_text = text.to_string();
+        let cached_text: Arc<str> = Arc::from(text);
         let cached_stats = DocumentStats::compute(&cached_text);
         Self {
             rope,
@@ -468,7 +468,7 @@ impl DocumentBuffer {
             self.undo_stack.remove(0);
         }
         self.undo_stack.push((
-            self.cached_text.clone(),
+            self.rope.clone(),
             self.cursor_char_offset,
             self.selection_end_char_offset,
         ));
@@ -477,15 +477,15 @@ impl DocumentBuffer {
 
     /// Reverts the last text mutation on this buffer, returning `true` if a state was restored.
     pub fn undo(&mut self) -> bool {
-        let Some((prev_text, prev_cur, prev_sel)) = self.undo_stack.pop() else {
+        let Some((prev_rope, prev_cur, prev_sel)) = self.undo_stack.pop() else {
             return false;
         };
         self.redo_stack.push((
-            self.cached_text.clone(),
+            self.rope.clone(),
             self.cursor_char_offset,
             self.selection_end_char_offset,
         ));
-        self.rope = Rope::from_str(&prev_text);
+        self.rope = prev_rope;
         let len = self.rope.len_chars();
         self.cursor_char_offset = prev_cur.min(len);
         self.selection_end_char_offset = prev_sel.min(len);
@@ -495,15 +495,15 @@ impl DocumentBuffer {
 
     /// Re-applies the last undone text mutation on this buffer, returning `true` if a state was restored.
     pub fn redo(&mut self) -> bool {
-        let Some((next_text, next_cur, next_sel)) = self.redo_stack.pop() else {
+        let Some((next_rope, next_cur, next_sel)) = self.redo_stack.pop() else {
             return false;
         };
         self.undo_stack.push((
-            self.cached_text.clone(),
+            self.rope.clone(),
             self.cursor_char_offset,
             self.selection_end_char_offset,
         ));
-        self.rope = Rope::from_str(&next_text);
+        self.rope = next_rope;
         let len = self.rope.len_chars();
         self.cursor_char_offset = next_cur.min(len);
         self.selection_end_char_offset = next_sel.min(len);
@@ -513,7 +513,7 @@ impl DocumentBuffer {
 
     fn sync_after_mutation(&mut self) {
         self.revision = self.revision.wrapping_add(1);
-        self.cached_text = self.rope.to_string();
+        self.cached_text = Arc::from(self.rope.to_string());
         self.cached_stats = DocumentStats::compute(&self.cached_text);
     }
 
@@ -531,7 +531,7 @@ impl DocumentBuffer {
     }
 
     pub fn text(&self) -> String {
-        self.cached_text.clone()
+        self.cached_text.to_string()
     }
 
     pub fn len_bytes(&self) -> usize {
@@ -557,6 +557,10 @@ impl DocumentBuffer {
 
     pub fn cursor(&self) -> usize {
         self.cursor_char_offset
+    }
+
+    pub fn raw_selection(&self) -> (usize, usize) {
+        (self.cursor_char_offset, self.selection_end_char_offset)
     }
 
     pub fn selection_char_range(&self) -> Range<usize> {
@@ -684,7 +688,7 @@ impl DocumentBuffer {
     }
 
     pub fn set_text(&mut self, text: &str) {
-        if self.cached_text == text {
+        if &*self.cached_text == text {
             return;
         }
         self.push_undo_snapshot();

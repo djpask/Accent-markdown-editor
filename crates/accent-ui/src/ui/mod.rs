@@ -12,10 +12,11 @@ use egui::{
 };
 use std::sync::Arc;
 use theme::{
-    apply_theme, draw_chevron_down, draw_chevron_left, draw_chevron_up, draw_hamburger_icon,
-    draw_new_doc_icon, draw_search_icon, draw_toolbar_icon, draw_view_mode_icon,
-    draw_window_button, font_editor_italic, font_editor_regular, font_ui_bold, font_ui_regular,
-    resolve_code_font, resolve_prose_font, AccentPalette,
+    append_text_with_color_emojis, apply_theme, draw_chevron_down, draw_chevron_left,
+    draw_chevron_up, draw_hamburger_icon, draw_new_doc_icon, draw_search_icon, draw_toolbar_icon,
+    draw_view_mode_icon, draw_window_button, font_editor_italic, font_editor_regular, font_ui_bold,
+    font_ui_regular, is_color_emoji_char, paint_galley_color_emojis, resolve_code_font,
+    resolve_prose_font, AccentPalette,
 };
 
 fn trigger_open_file_dialog(session: &Session, actions: &mut Vec<Action>) {
@@ -27,9 +28,9 @@ fn trigger_open_file_dialog(session: &Session, actions: &mut Vec<Action>) {
             .pick_file()
         {
             actions.push(Action::OpenFile(path));
-            actions.push(Action::SetOverlay(ActiveOverlay::None));
-            return;
         }
+        actions.push(Action::SetOverlay(ActiveOverlay::None));
+        return;
     }
     actions.push(Action::SetOverlay(ActiveOverlay::OpenFileDialog));
 }
@@ -44,9 +45,9 @@ fn trigger_save_as_file_dialog(session: &Session, actions: &mut Vec<Action>) {
             .save_file()
         {
             actions.push(Action::SaveAsFile(path));
-            actions.push(Action::SetOverlay(ActiveOverlay::None));
-            return;
         }
+        actions.push(Action::SetOverlay(ActiveOverlay::None));
+        return;
     }
     actions.push(Action::SetOverlay(ActiveOverlay::SaveFileDialog));
 }
@@ -82,8 +83,19 @@ pub fn render_ui(
     if session.chrome_autohidden {
         let wake_up = ctx.input(|i| {
             let mouse_moved = i.pointer.delta().length_sq() > 0.25;
+            let has_ctrl_or_alt_event = i.events.iter().any(|ev| {
+                matches!(
+                    ev,
+                    egui::Event::Key {
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if modifiers.ctrl || modifiers.alt || modifiers.command
+                )
+            });
             let cmd_key = i.modifiers.ctrl
                 || i.modifiers.alt
+                || has_ctrl_or_alt_event
                 || i.key_pressed(egui::Key::F10)
                 || i.key_pressed(egui::Key::Escape)
                 || i.key_pressed(egui::Key::F1);
@@ -119,8 +131,34 @@ pub fn render_ui(
         }
     });
 
-    // Global keyboard shortcuts
-    ctx.input(|i| {
+    // Global keyboard shortcuts (consume app-level Ctrl/Cmd shortcuts so `egui::TextEdit`
+    // does not interpret Ctrl+W as delete-word, Ctrl+H as backspace, or Ctrl+Z via widget undoer)
+    let mut trigger_open = false;
+    let mut trigger_save_as = false;
+    ctx.input_mut(|i| {
+        let key_chord = |i: &egui::InputState,
+                         ctrl: bool,
+                         shift: bool,
+                         alt: bool,
+                         target_key: egui::Key|
+         -> bool {
+            i.events.iter().any(|ev| match ev {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => {
+                    let ev_ctrl =
+                        modifiers.ctrl || modifiers.command || i.modifiers.ctrl || i.modifiers.command;
+                    let ev_shift = modifiers.shift || i.modifiers.shift;
+                    let ev_alt = modifiers.alt || i.modifiers.alt;
+                    *key == target_key && ev_ctrl == ctrl && ev_shift == shift && ev_alt == alt
+                }
+                _ => false,
+            })
+        };
+
         if i.key_pressed(egui::Key::Escape) {
             if session.overlay != ActiveOverlay::None {
                 actions.push(Action::SetOverlay(ActiveOverlay::None));
@@ -134,105 +172,115 @@ pub fn render_ui(
             actions.push(Action::SetOverlay(ActiveOverlay::MainMenu));
         }
         // Text Zoom keyboard shortcuts: Ctrl + '+'/'=', Ctrl + '-', Ctrl + '0'
-        if (i.modifiers.ctrl || i.modifiers.command) && !i.modifiers.alt {
-            if i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals) {
-                actions.push(Action::ZoomIn);
-            }
-            if i.key_pressed(egui::Key::Minus) {
-                actions.push(Action::ZoomOut);
-            }
-            if i.key_pressed(egui::Key::Num0) {
-                actions.push(Action::ZoomReset);
-            }
+        if key_chord(i, true, false, false, egui::Key::Plus)
+            || key_chord(i, true, true, false, egui::Key::Plus)
+            || key_chord(i, true, false, false, egui::Key::Equals)
+            || key_chord(i, true, true, false, egui::Key::Equals)
+        {
+            actions.push(Action::ZoomIn);
+        }
+        if key_chord(i, true, false, false, egui::Key::Minus) {
+            actions.push(Action::ZoomOut);
+        }
+        if key_chord(i, true, false, false, egui::Key::Num0) {
+            actions.push(Action::ZoomReset);
+        }
+        // Per-tab Undo / Redo routed through `Session`'s isolated `DocumentBuffer`
+        if key_chord(i, true, false, false, egui::Key::Z) {
+            actions.push(Action::Undo);
+        } else if key_chord(i, true, true, false, egui::Key::Z)
+            || key_chord(i, true, false, false, egui::Key::Y)
+        {
+            actions.push(Action::Redo);
         }
         // Multi-Tab keyboard shortcuts: Ctrl+W (close active tab), Ctrl+Tab / Ctrl+PageDown (next tab), Ctrl+Shift+Tab / Ctrl+PageUp (prev tab)
-        if i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt && i.key_pressed(egui::Key::W)
-        {
+        if key_chord(i, true, false, false, egui::Key::W) {
             actions.push(Action::SetChromeAutohidden(false));
             actions.push(Action::CloseTab(session.active_tab_index));
         }
-        if i.modifiers.ctrl
-            && !i.modifiers.alt
-            && ((!i.modifiers.shift && i.key_pressed(egui::Key::Tab))
-                || i.key_pressed(egui::Key::PageDown))
+        if key_chord(i, true, false, false, egui::Key::Tab)
+            || key_chord(i, true, false, false, egui::Key::PageDown)
         {
             actions.push(Action::SetChromeAutohidden(false));
             actions.push(Action::NextTab);
         }
-        if i.modifiers.ctrl
-            && !i.modifiers.alt
-            && ((i.modifiers.shift && i.key_pressed(egui::Key::Tab))
-                || i.key_pressed(egui::Key::PageUp))
+        if key_chord(i, true, true, false, egui::Key::Tab)
+            || key_chord(i, true, false, false, egui::Key::PageUp)
+            || key_chord(i, true, true, false, egui::Key::PageUp)
         {
             actions.push(Action::SetChromeAutohidden(false));
             actions.push(Action::PrevTab);
         }
-        if i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt && i.key_pressed(egui::Key::L)
-        {
+        if key_chord(i, true, false, false, egui::Key::L) {
             actions.push(Action::ToggleViewWhileTyping);
         }
-        if i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt && i.key_pressed(egui::Key::E)
-        {
+        if key_chord(i, true, false, false, egui::Key::E) {
             actions.push(Action::SetOverlay(ActiveOverlay::ExportDialog));
         }
-        if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::E) {
+        if key_chord(i, true, true, false, egui::Key::E) {
             actions.push(Action::SetEditorOnlyRaw);
         }
-        if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::P) {
-            let toggle = !(session.preview_active && session.preview_layout == PreviewLayout::HalfWidth);
+        if key_chord(i, true, true, false, egui::Key::P) {
+            let toggle =
+                !(session.preview_active && session.preview_layout == PreviewLayout::HalfWidth);
             actions.push(Action::SetPreviewMode {
                 active: toggle,
                 layout: PreviewLayout::HalfWidth,
             });
         }
-        if i.modifiers.ctrl && i.modifiers.alt && i.key_pressed(egui::Key::P) {
-            let toggle = !(session.preview_active && session.preview_layout == PreviewLayout::FullWidth);
+        if key_chord(i, true, false, true, egui::Key::P) {
+            let toggle =
+                !(session.preview_active && session.preview_layout == PreviewLayout::FullWidth);
             actions.push(Action::SetPreviewMode {
                 active: toggle,
                 layout: PreviewLayout::FullWidth,
             });
         }
-        if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::J) {
-            let toggle = !(session.preview_active && session.preview_layout == PreviewLayout::HalfHeight);
+        if key_chord(i, true, true, false, egui::Key::J) {
+            let toggle =
+                !(session.preview_active && session.preview_layout == PreviewLayout::HalfHeight);
             actions.push(Action::SetPreviewMode {
                 active: toggle,
                 layout: PreviewLayout::HalfHeight,
             });
         }
-        if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::W) {
-            let toggle = !(session.preview_active && session.preview_layout == PreviewLayout::Windowed);
+        if key_chord(i, true, true, false, egui::Key::W) {
+            let toggle =
+                !(session.preview_active && session.preview_layout == PreviewLayout::Windowed);
             actions.push(Action::SetPreviewMode {
                 active: toggle,
                 layout: PreviewLayout::Windowed,
             });
         }
-        if i.modifiers.ctrl && i.key_pressed(egui::Key::Comma) {
+        if key_chord(i, true, false, false, egui::Key::Comma) {
             actions.push(Action::SetOverlay(ActiveOverlay::PreferencesDialog));
         }
-        if i.modifiers.ctrl && i.key_pressed(egui::Key::D) {
+        if key_chord(i, true, false, false, egui::Key::D) {
             actions.push(Action::ToggleFocusMode);
         }
-        if i.modifiers.ctrl && i.key_pressed(egui::Key::T) {
+        if key_chord(i, true, false, false, egui::Key::T) {
             actions.push(Action::ToggleHemingway);
         }
-        if i.modifiers.ctrl && (i.key_pressed(egui::Key::H) || i.key_pressed(egui::Key::F)) {
+        if key_chord(i, true, false, false, egui::Key::H)
+            || key_chord(i, true, false, false, egui::Key::F)
+        {
             actions.push(Action::ToggleSearchBar);
         }
-        if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::S) {
+        if key_chord(i, true, false, false, egui::Key::S) {
             actions.push(Action::SetChromeAutohidden(false));
             actions.push(Action::SaveDocument);
         }
-        if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::S) {
+        if key_chord(i, true, true, false, egui::Key::S) {
             actions.push(Action::SetChromeAutohidden(false));
-            trigger_save_as_file_dialog(session, actions);
+            trigger_save_as = true;
         }
-        if i.modifiers.ctrl && i.key_pressed(egui::Key::N) {
+        if key_chord(i, true, false, false, egui::Key::N) {
             actions.push(Action::SetChromeAutohidden(false));
             actions.push(Action::NewDocument);
         }
-        if i.modifiers.ctrl && i.key_pressed(egui::Key::O) {
+        if key_chord(i, true, false, false, egui::Key::O) {
             actions.push(Action::SetChromeAutohidden(false));
-            trigger_open_file_dialog(session, actions);
+            trigger_open = true;
         }
         if i.key_pressed(egui::Key::Home)
             || i.key_pressed(egui::Key::End)
@@ -241,16 +289,60 @@ pub fn render_ui(
         {
             actions.push(Action::SetChromeAutohidden(false));
         }
-        if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::B) {
+        if key_chord(i, true, false, false, egui::Key::B) {
             actions.push(Action::ApplyFormat(FormatCommand::Bold));
         }
-        if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::I) {
+        if key_chord(i, true, false, false, egui::Key::I) {
             actions.push(Action::ApplyFormat(FormatCommand::Italic));
         }
-        if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::X) {
+        if key_chord(i, true, true, false, egui::Key::X) {
             actions.push(Action::ApplyFormat(FormatCommand::Strikethrough));
         }
+
+        // Remove consumed app-level Ctrl/Cmd key events from `i.events` so `egui::TextEdit`
+        // never mutates the buffer on Ctrl+W (delete word), Ctrl+H (backspace), or Ctrl+Z/Y (widget undoer).
+        i.events.retain(|ev| match ev {
+            egui::Event::Key { key, modifiers, .. }
+                if modifiers.ctrl || modifiers.command =>
+            {
+                if *key == egui::Key::X {
+                    return !modifiers.shift;
+                }
+                !matches!(
+                    key,
+                    egui::Key::W
+                        | egui::Key::H
+                        | egui::Key::F
+                        | egui::Key::D
+                        | egui::Key::T
+                        | egui::Key::L
+                        | egui::Key::E
+                        | egui::Key::P
+                        | egui::Key::J
+                        | egui::Key::N
+                        | egui::Key::O
+                        | egui::Key::S
+                        | egui::Key::B
+                        | egui::Key::I
+                        | egui::Key::Z
+                        | egui::Key::Y
+                        | egui::Key::Tab
+                        | egui::Key::Comma
+                        | egui::Key::Plus
+                        | egui::Key::Equals
+                        | egui::Key::Minus
+                        | egui::Key::Num0
+                )
+            }
+            _ => true,
+        });
     });
+    if trigger_save_as {
+        trigger_save_as_file_dialog(session, actions);
+    }
+    if trigger_open {
+        trigger_open_file_dialog(session, actions);
+    }
 
     let chrome_hidden = session.chrome_autohidden
         && session.overlay == ActiveOverlay::None
@@ -885,15 +977,20 @@ fn render_tab_bar(
             Pos2::new(close_rect.left() - 2.0, tab_rect.bottom()),
         );
 
+        let tab_sense = if session.overlay == ActiveOverlay::None {
+            Sense::click()
+        } else {
+            Sense::hover()
+        };
         let body_hit = ui.interact(
             body_rect,
             ui.id().with(("accent_tab_select", tab.tab_id, idx)),
-            Sense::click(),
+            tab_sense,
         );
         let close_hit = ui.interact(
             close_rect,
             ui.id().with(("accent_tab_close", tab.tab_id, idx)),
-            Sense::click(),
+            tab_sense,
         );
 
         let tab_corners = CornerRadius {
@@ -997,7 +1094,11 @@ fn render_tab_bar(
     let add_hit = ui.interact(
         add_tab_rect,
         ui.id().with("accent_tabbar_new_tab_btn"),
-        Sense::click(),
+        if session.overlay == ActiveOverlay::None {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
     );
     if add_hit.hovered() {
         painter.rect_filled(add_tab_rect, CornerRadius::same(5), pal.bg_pill_button);
@@ -1550,6 +1651,7 @@ fn render_editor_pane(
     struct EditorGalleyCacheKey {
         active_tab_id: u64,
         buf_rev: u64,
+        text_len: usize,
         dialect: accent_core::MarkdownDialect,
         view_while_typing: bool,
         eff_caret_key: Option<std::ops::Range<usize>>,
@@ -1569,7 +1671,7 @@ fn render_editor_pane(
     let mut layouter = move |ui: &Ui, text_str: &str, wrap_width: f32| -> Arc<egui::Galley> {
         let eff_wrap_w = wrap_width.max(col_width + base_indent + 16.0);
         let is_session_buf = text_str == session.buffer.as_str();
-        let cache_id = Id::new("accent_editor_galley_cache");
+        let cache_id = Id::new(("accent_editor_galley_cache", active_tab_id));
         let gen_id = Id::new("accent_editor_atlas_gen");
         let pre_atlas = ui.fonts(|f| f.font_image_size());
         let ppp_bits = ui.ctx().pixels_per_point().to_bits();
@@ -1578,6 +1680,7 @@ fn render_editor_pane(
         let key = EditorGalleyCacheKey {
             active_tab_id,
             buf_rev: if is_session_buf { buf_rev } else { 0 },
+            text_len: text_str.len(),
             dialect,
             view_while_typing,
             eff_caret_key: eff_caret_key.clone(),
@@ -1745,7 +1848,8 @@ fn render_editor_pane(
                 Stroke::NONE
             };
 
-            job.append(
+            append_text_with_color_emojis(
+                &mut job,
                 &seg.text,
                 leading_space,
                 TextFormat {
@@ -1822,7 +1926,18 @@ fn render_editor_pane(
                 let prev_cursor_stroke = ui.visuals().text_cursor.stroke;
                 ui.visuals_mut().text_cursor.stroke = Stroke::NONE;
 
-                let te_id = Id::new("accent_live_markdown_editor");
+                let te_id = Id::new(("accent_live_markdown_editor", active_tab_id));
+                if *sync_cursor_to_widget {
+                    let sel = session.buffer.selection_char_range();
+                    let c_range = egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(sel.start),
+                        egui::text::CCursor::new(sel.end),
+                    );
+                    let mut te_state =
+                        egui::text_edit::TextEditState::load(ui.ctx(), te_id).unwrap_or_default();
+                    te_state.cursor.set_char_range(Some(c_range));
+                    te_state.store(ui.ctx(), te_id);
+                }
                 let mut output = TextEdit::multiline(&mut editable_text)
                     .id(te_id)
                     .frame(false)
@@ -1837,7 +1952,7 @@ fn render_editor_pane(
 
                 // Capture post-TextEdit cursor range immediately so mouse clicks on collapsed spans
                 // convert CCursor char indices to UTF-8 byte offsets and trigger an immediate repaint (<16ms).
-                let click_anchor_id = Id::new("accent_editor_click_anchor");
+                let click_anchor_id = Id::new(("accent_editor_click_anchor", active_tab_id));
                 let (primary_pressed, primary_down, pointer_pos, press_origin) =
                     ui.ctx().input(|i| {
                         (
@@ -1853,18 +1968,31 @@ fn render_editor_pane(
                     .map(|cr| cr.as_ccursor_range())
                     .or_else(|| output.state.cursor.char_range());
 
-                if primary_pressed {
+                let pointer_in_editor = pointer_pos.is_some_and(|p| {
+                    pane_rect.contains(p)
+                        && p.y >= pane_rect.top() + 68.0
+                        && session.overlay == ActiveOverlay::None
+                });
+                let shift_held = ui.ctx().input(|i| i.modifiers.shift);
+                if primary_pressed && pointer_in_editor && !shift_held {
                     if let Some(cr) = active_cursor_range {
-                        ui.ctx().data_mut(|d| {
-                            d.insert_temp(click_anchor_id, (pointer_pos, cr.primary.index));
-                        });
+                        if cr.primary.index == cr.secondary.index {
+                            ui.ctx().data_mut(|d| {
+                                d.insert_temp(click_anchor_id, (pointer_pos, cr.primary.index));
+                            });
+                        } else {
+                            ui.ctx()
+                                .data_mut(|d| d.remove::<(Option<Pos2>, usize)>(click_anchor_id));
+                        }
                     }
-                } else if primary_down {
+                } else if primary_down && pointer_in_editor && !shift_held {
                     let is_stationary_click = match (press_origin, pointer_pos) {
                         (Some(orig), Some(cur)) => orig.distance(cur) < 3.5,
                         _ => false,
                     };
-                    if is_stationary_click {
+                    let is_single_caret = active_cursor_range
+                        .is_none_or(|cr| cr.primary.index == cr.secondary.index);
+                    if is_stationary_click && is_single_caret {
                         if let Some((_, anchored_char)) = ui
                             .ctx()
                             .data_mut(|d| d.get_temp::<(Option<Pos2>, usize)>(click_anchor_id))
@@ -2110,9 +2238,10 @@ fn render_editor_pane(
                                     CornerRadius::same(2),
                                     bar_color,
                                 );
-                                scroll_painter.text(
+                                paint_single_line_with_emojis(
+                                    ui.ctx(),
+                                    &scroll_painter,
                                     Pos2::new(x_body, sy + 9.5),
-                                    Align2::LEFT_CENTER,
                                     label,
                                     font_ui_bold(12.5),
                                     bar_color,
@@ -2280,9 +2409,11 @@ fn render_editor_pane(
                                         Stroke::new(1.0, pal.border_headerbar),
                                         StrokeKind::Middle,
                                     );
-                                    scroll_painter.with_clip_rect(cell_r.shrink(2.0)).text(
+                                    let cell_painter = scroll_painter.with_clip_rect(cell_r.shrink(2.0));
+                                    paint_single_line_with_emojis(
+                                        ui.ctx(),
+                                        &cell_painter,
                                         Pos2::new(cell_r.left() + 10.0, cell_r.center().y),
-                                        Align2::LEFT_CENTER,
                                         cell_text,
                                         if r_idx == 0 {
                                             font_ui_bold(13.5)
@@ -2303,6 +2434,16 @@ fn render_editor_pane(
                     }
                 }
                 scroll_painter.set(code_bg_shape_idx, egui::Shape::Vec(bg_shapes));
+                paint_galley_color_emojis(
+                    ui.ctx(),
+                    &scroll_painter,
+                    &output.galley,
+                    output.galley_pos,
+                    session.buffer.as_str(),
+                    min_vis_char,
+                    max_vis_char,
+                    font_size,
+                );
 
                 if output.response.clicked()
                     && session.overlay != ActiveOverlay::None
@@ -2311,9 +2452,32 @@ fn render_editor_pane(
                     actions.push(Action::SetOverlay(ActiveOverlay::None));
                 }
 
-                if output.response.changed() && editable_text != session.buffer.as_str() {
+                let has_tab_change_action = actions.iter().any(|a| {
+                    matches!(
+                        a,
+                        Action::NewDocument
+                            | Action::NewTab
+                            | Action::SwitchTab(_)
+                            | Action::CloseTab(_)
+                            | Action::NextTab
+                            | Action::PrevTab
+                            | Action::OpenFile(_)
+                            | Action::OpenTutorial
+                            | Action::DiscardRecovery
+                    )
+                });
+
+                let mut hemingway_blocked = false;
+                if !has_tab_change_action
+                    && output.response.changed()
+                    && editable_text != session.buffer.as_str()
+                {
                     let is_deletion = editable_text.len() < session.buffer.len_bytes();
-                    if !(session.hemingway_mode && is_deletion) {
+                    if session.hemingway_mode && is_deletion {
+                        hemingway_blocked = true;
+                        *sync_cursor_to_widget = true;
+                        actions.push(Action::NotifyHemingwayBlocked);
+                    } else {
                         actions.push(Action::UpdateBufferText(editable_text));
                     }
                 }
@@ -2338,31 +2502,34 @@ fn render_editor_pane(
                     if session.overlay == ActiveOverlay::None && !session.search_bar_open {
                         output.response.request_focus();
                     }
-                } else if let Some(c_range) = active_cursor_range {
-                    let p = c_range.primary.index;
-                    let s = c_range.secondary.index;
-                    let new_sel_chars = p.min(s)..p.max(s);
-                    let cur_sel = session.buffer.selection_char_range();
-                    let cursor_moved = p != session.buffer.cursor()
-                        || new_sel_chars != cur_sel
-                        || post_selection_bytes != pre_selection_bytes;
-                    if cursor_moved || output.response.changed() {
-                        actions.push(Action::SetSelection(p, s));
-                        ui.ctx().data_mut(|d| {
-                            d.remove::<(EditorGalleyCacheKey, Arc<egui::Galley>)>(Id::new(
-                                "accent_editor_galley_cache",
-                            ));
-                        });
-                        ui.ctx().request_repaint();
-                    }
-                    if cursor_moved || output.response.changed() {
-                        let cur_local = output
-                            .galley
-                            .pos_from_ccursor(egui::text::CCursor::new(p));
-                        let cur_screen = cur_local
-                            .translate(output.galley_pos.to_vec2())
-                            .expand2(Vec2::new(4.0, 16.0));
-                        ui.scroll_to_rect(cur_screen, None);
+                } else if !has_tab_change_action && !hemingway_blocked {
+                    if let Some(c_range) = active_cursor_range {
+                        let p = c_range.primary.index;
+                        let s = c_range.secondary.index;
+                        let new_sel_chars = p.min(s)..p.max(s);
+                        let cur_sel = session.buffer.selection_char_range();
+                        let cursor_moved = p != session.buffer.cursor()
+                            || new_sel_chars != cur_sel
+                            || post_selection_bytes != pre_selection_bytes;
+                        if cursor_moved || output.response.changed() {
+                            actions.push(Action::SetSelection(p, s));
+                            ui.ctx().data_mut(|d| {
+                                d.remove::<(EditorGalleyCacheKey, Arc<egui::Galley>)>(Id::new((
+                                    "accent_editor_galley_cache",
+                                    active_tab_id,
+                                )));
+                            });
+                            ui.ctx().request_repaint();
+                        }
+                        if cursor_moved || output.response.changed() {
+                            let cur_local = output
+                                .galley
+                                .pos_from_ccursor(egui::text::CCursor::new(p));
+                            let cur_screen = cur_local
+                                .translate(output.galley_pos.to_vec2())
+                                .expand2(Vec2::new(4.0, 16.0));
+                            ui.scroll_to_rect(cur_screen, None);
+                        }
                     }
                 }
 
@@ -2477,7 +2644,7 @@ fn render_preview_pane(
                             pal,
                             avail_w,
                         );
-                        ui.label(job);
+                        render_preview_job_with_emojis(ui, inlines, job, h_size);
                         if *level == 1 {
                             ui.add_space(4.0);
                             let (rule_rect, _) =
@@ -2498,7 +2665,7 @@ fn render_preview_pane(
                             pal,
                             avail_w,
                         );
-                        ui.label(job);
+                        render_preview_job_with_emojis(ui, inlines, job, 14.5 * z);
                         ui.add_space(10.0);
                     }
                     PreviewBlock::List { ordered, items } => {
@@ -2567,7 +2734,7 @@ fn render_preview_pane(
                                     pal,
                                     avail_w - 28.0,
                                 );
-                                ui.label(job);
+                                render_preview_job_with_emojis(ui, &item.inlines, job, 14.5 * z);
                             });
                             ui.add_space(4.0);
                         }
@@ -2624,7 +2791,7 @@ fn render_preview_pane(
                                 pal,
                                 avail_w - 32.0,
                             );
-                            ui.add(egui::Label::new(job).wrap());
+                            render_preview_job_with_emojis(ui, inlines, job, 14.0 * z);
                         });
                         ui.add_space(10.0);
                     }
@@ -2739,9 +2906,11 @@ fn render_preview_pane(
                                     Stroke::new(1.0, pal.border_headerbar),
                                     StrokeKind::Middle,
                                 );
-                                tp.with_clip_rect(cell_r.shrink(2.0)).text(
+                                let cell_painter = tp.with_clip_rect(cell_r.shrink(2.0));
+                                paint_single_line_with_emojis(
+                                    ui.ctx(),
+                                    &cell_painter,
                                     Pos2::new(cell_r.left() + 8.0, cell_r.center().y),
-                                    Align2::LEFT_CENTER,
                                     cell_text,
                                     if r_idx == 0 {
                                         font_ui_bold(13.5 * z)
@@ -2803,7 +2972,8 @@ fn build_preview_inline_job(
         } else {
             Stroke::NONE
         };
-        job.append(
+        append_text_with_color_emojis(
+            &mut job,
             &item.text,
             0.0,
             TextFormat {
@@ -2816,6 +2986,71 @@ fn build_preview_inline_job(
         );
     }
     job
+}
+
+fn render_preview_job_with_emojis(
+    ui: &mut Ui,
+    inlines: &[PreviewInline],
+    job: LayoutJob,
+    font_size: f32,
+) {
+    let galley = ui.fonts(|f| f.layout_job(job));
+    let resp = ui.add(egui::Label::new(Arc::clone(&galley)).wrap());
+    if inlines
+        .iter()
+        .any(|it| it.text.chars().any(is_color_emoji_char))
+    {
+        let joined: String = inlines.iter().map(|it| it.text.as_str()).collect();
+        paint_galley_color_emojis(
+            ui.ctx(),
+            ui.painter(),
+            &galley,
+            resp.rect.min,
+            &joined,
+            0,
+            usize::MAX,
+            font_size,
+        );
+    }
+}
+
+fn paint_single_line_with_emojis(
+    ctx: &Context,
+    painter: &Painter,
+    left_center: Pos2,
+    text: &str,
+    font_id: FontId,
+    color: Color32,
+) {
+    if !text.chars().any(is_color_emoji_char) {
+        painter.text(left_center, Align2::LEFT_CENTER, text, font_id, color);
+        return;
+    }
+    let font_size = font_id.size;
+    let mut job = LayoutJob::default();
+    append_text_with_color_emojis(
+        &mut job,
+        text,
+        0.0,
+        TextFormat {
+            font_id,
+            color,
+            ..Default::default()
+        },
+    );
+    let galley = ctx.fonts(|f| f.layout_job(job));
+    let galley_pos = Pos2::new(left_center.x, left_center.y - galley.size().y * 0.5);
+    painter.galley(galley_pos, Arc::clone(&galley), color);
+    paint_galley_color_emojis(
+        ctx,
+        painter,
+        &galley,
+        galley_pos,
+        text,
+        0,
+        usize::MAX,
+        font_size,
+    );
 }
 
 fn render_bottom_bar(

@@ -7,6 +7,10 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 VERSION="$(tr -d '[:space:]' < "${ROOT_DIR}/VERSION")"
 
 echo "==> Building Accent v${VERSION} Arch Linux package..."
+
+# Ensure Cargo.lock is in sync with Cargo.toml workspace version before `makepkg` runs `cargo build --locked`
+(cd "${ROOT_DIR}" && cargo update --workspace --offline)
+
 cd "${SCRIPT_DIR}"
 
 # Clean previous makepkg build artifacts
