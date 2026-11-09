@@ -173,14 +173,25 @@ pub fn journal_file_path(recovery_dir: &Path, target_path: Option<&Path>) -> Pat
     recovery_dir.join(format!("journal-{sid}.json"))
 }
 
-/// Atomically writes `content` to `path` via `write-temp -> fsync (sync_all) -> atomic rename -> parent dir sync`.
+/// Atomically writes `content` to `path` via `write-temp -> fsync (sync_all) -> atomic rename`.
 /// Guarantees zero file corruption and zero orphan `.accent-tmp-*` files on success.
 pub fn atomic_save(path: &Path, content: &str) -> io::Result<()> {
     atomic_save_bytes(path, content.as_bytes())
 }
 
-/// Atomically writes arbitrary `bytes` to `path` via `write-temp -> fsync (sync_all) -> atomic rename -> parent dir sync`.
+/// Atomically writes `content` to `path` via `write-temp -> flush -> atomic rename` without
+/// blocking the GUI thread on a hardware disk controller `fsync` barrier.
+/// Ideal for high-frequency internal state files (`settings.json` and 200ms debounced WAL journals).
+pub fn atomic_save_fast(path: &Path, content: &str) -> io::Result<()> {
+    atomic_save_bytes_inner(path, content.as_bytes(), false)
+}
+
+/// Atomically writes arbitrary `bytes` to `path` via `write-temp -> fsync (sync_all) -> atomic rename`.
 pub fn atomic_save_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    atomic_save_bytes_inner(path, bytes, true)
+}
+
+fn atomic_save_bytes_inner(path: &Path, bytes: &[u8], sync_data: bool) -> io::Result<()> {
     let parent = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
@@ -199,7 +210,11 @@ pub fn atomic_save_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let write_res = (|| -> io::Result<()> {
         let mut tmp_file = File::create(&tmp_path)?;
         tmp_file.write_all(bytes)?;
-        tmp_file.sync_all()?;
+        if sync_data {
+            tmp_file.sync_all()?;
+        } else {
+            tmp_file.flush()?;
+        }
         Ok(())
     })();
 
@@ -211,13 +226,6 @@ pub fn atomic_save_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Err(err) = fs::rename(&tmp_path, path) {
         let _ = fs::remove_file(&tmp_path);
         return Err(err);
-    }
-
-    #[cfg(unix)]
-    {
-        if let Ok(dir_file) = File::open(parent) {
-            let _ = dir_file.sync_all();
-        }
     }
 
     Ok(())
@@ -232,7 +240,7 @@ pub fn write_journal_entry(
     let jpath = recovery_dir.join(format!("journal-{}.json", entry.session_id));
     let serialized = serde_json::to_string_pretty(entry)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    atomic_save(&jpath, &serialized)?;
+    atomic_save_fast(&jpath, &serialized)?;
     Ok(jpath)
 }
 
@@ -241,9 +249,13 @@ pub fn remove_journal_for_target(
     recovery_dir: &Path,
     target_path: Option<&Path>,
 ) -> io::Result<()> {
+    if !recovery_dir.exists() {
+        return Ok(());
+    }
     let direct_path = journal_file_path(recovery_dir, target_path);
     if direct_path.exists() {
         let _ = fs::remove_file(&direct_path);
+        return Ok(());
     }
     let norm_target = target_path.map(normalize_path);
     if let Ok(entries) = fs::read_dir(recovery_dir) {
@@ -254,8 +266,9 @@ pub fn remove_journal_for_target(
             }
             if let Ok(raw) = fs::read_to_string(&p) {
                 if let Ok(parsed) = serde_json::from_str::<RecoveryJournalEntry>(&raw) {
-                    let parsed_norm = parsed.target_path.as_deref().map(normalize_path);
-                    if parsed_norm == norm_target {
+                    if parsed.target_path.as_deref() == target_path
+                        || parsed.target_path.as_deref().map(normalize_path) == norm_target
+                    {
                         let _ = fs::remove_file(&p);
                     }
                 }
@@ -509,6 +522,7 @@ impl Drop for SingleInstanceGuard {
 pub struct FocusedFileWatcher {
     stop_flag: Arc<AtomicBool>,
     changed_flag: Arc<AtomicBool>,
+    suppress_until_utc_ms: Arc<std::sync::atomic::AtomicU64>,
     watched_path: Arc<Mutex<Option<PathBuf>>>,
     waker: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>,
     #[cfg(target_os = "linux")]
@@ -979,6 +993,7 @@ impl FocusedFileWatcher {
     pub fn new() -> io::Result<Self> {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let changed_flag = Arc::new(AtomicBool::new(false));
+        let suppress_until_utc_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let watched_path = Arc::new(Mutex::new(None));
         let waker: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>> = Arc::new(Mutex::new(None));
 
@@ -1001,6 +1016,7 @@ impl FocusedFileWatcher {
         Ok(Self {
             stop_flag,
             changed_flag,
+            suppress_until_utc_ms,
             watched_path,
             waker,
             #[cfg(target_os = "linux")]
@@ -1008,6 +1024,14 @@ impl FocusedFileWatcher {
             #[cfg(target_os = "windows")]
             wake_event_handle,
         })
+    }
+
+    /// Suppresses self-triggered file watcher notifications for `duration_ms` milliseconds
+    /// (called right when Accent saves the currently watched file to disk).
+    pub fn suppress_notifications_for(&self, duration_ms: u64) {
+        let until = current_utc_ms().saturating_add(duration_ms);
+        self.suppress_until_utc_ms.store(until, Ordering::SeqCst);
+        self.changed_flag.store(false, Ordering::SeqCst);
     }
 
     /// Registers a wakeup callback (e.g. `egui::Context::request_repaint`) invoked whenever
@@ -1041,7 +1065,14 @@ impl FocusedFileWatcher {
     /// Returns `true` (and clears the notification flag) if the operating system reported a
     /// modification event on the watched file since the last check.
     pub fn take_change_notification(&self) -> bool {
-        self.changed_flag.swap(false, Ordering::SeqCst)
+        let had = self.changed_flag.swap(false, Ordering::SeqCst);
+        if !had {
+            return false;
+        }
+        if current_utc_ms() < self.suppress_until_utc_ms.load(Ordering::SeqCst) {
+            return false;
+        }
+        true
     }
 }
 

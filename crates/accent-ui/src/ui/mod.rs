@@ -10,7 +10,10 @@ use egui::{
     Margin, Order, Painter, Pos2, Rect, ScrollArea, Sense, Stroke, TextEdit, TextFormat, Ui, Vec2,
     ViewportId,
 };
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, OnceLock,
+};
 use theme::{
     append_text_with_color_emojis, apply_theme, draw_chevron_down, draw_chevron_left,
     draw_chevron_up, draw_hamburger_icon, draw_new_doc_icon, draw_search_icon, draw_toolbar_icon,
@@ -19,34 +22,88 @@ use theme::{
     resolve_prose_font, AccentPalette,
 };
 
-fn trigger_open_file_dialog(session: &Session, actions: &mut Vec<Action>) {
+struct AsyncNativeDialogState {
+    in_flight: AtomicBool,
+    completed_actions: Mutex<Vec<Action>>,
+}
+
+fn async_dialog_state() -> &'static AsyncNativeDialogState {
+    static STATE: OnceLock<AsyncNativeDialogState> = OnceLock::new();
+    STATE.get_or_init(|| AsyncNativeDialogState {
+        in_flight: AtomicBool::new(false),
+        completed_actions: Mutex::new(Vec::new()),
+    })
+}
+
+fn drain_async_dialog_actions(actions: &mut Vec<Action>) {
+    if let Ok(mut guard) = async_dialog_state().completed_actions.lock() {
+        actions.append(&mut *guard);
+    }
+}
+
+fn trigger_open_file_dialog(ctx: &Context, session: &Session, actions: &mut Vec<Action>) {
     let is_headless_xvfb = std::env::var("DISPLAY").as_deref() == Ok(":99");
     if !is_headless_xvfb {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Markdown", &["md", "markdown", "txt"])
-            .set_directory(&session.file_dialog_dir)
-            .pick_file()
-        {
-            actions.push(Action::OpenFile(path));
-        }
         actions.push(Action::SetOverlay(ActiveOverlay::None));
+        let state = async_dialog_state();
+        if state
+            .in_flight
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            let dir = session.file_dialog_dir.clone();
+            let egui_ctx = ctx.clone();
+            let _ = std::thread::Builder::new()
+                .name("accent-open-dialog".to_string())
+                .spawn(move || {
+                    let picked = rfd::FileDialog::new()
+                        .add_filter("Markdown", &["md", "markdown", "txt"])
+                        .set_directory(&dir)
+                        .pick_file();
+                    if let Some(path) = picked {
+                        if let Ok(mut q) = async_dialog_state().completed_actions.lock() {
+                            q.push(Action::OpenFile(path));
+                        }
+                    }
+                    async_dialog_state().in_flight.store(false, Ordering::SeqCst);
+                    egui_ctx.request_repaint();
+                });
+        }
         return;
     }
     actions.push(Action::SetOverlay(ActiveOverlay::OpenFileDialog));
 }
 
-fn trigger_save_as_file_dialog(session: &Session, actions: &mut Vec<Action>) {
+fn trigger_save_as_file_dialog(ctx: &Context, session: &Session, actions: &mut Vec<Action>) {
     let is_headless_xvfb = std::env::var("DISPLAY").as_deref() == Ok(":99");
     if !is_headless_xvfb {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Markdown", &["md", "markdown"])
-            .set_directory(&session.file_dialog_dir)
-            .set_file_name(&session.document_title)
-            .save_file()
-        {
-            actions.push(Action::SaveAsFile(path));
-        }
         actions.push(Action::SetOverlay(ActiveOverlay::None));
+        let state = async_dialog_state();
+        if state
+            .in_flight
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            let dir = session.file_dialog_dir.clone();
+            let file_name = session.document_title.clone();
+            let egui_ctx = ctx.clone();
+            let _ = std::thread::Builder::new()
+                .name("accent-save-dialog".to_string())
+                .spawn(move || {
+                    let saved = rfd::FileDialog::new()
+                        .add_filter("Markdown", &["md", "markdown"])
+                        .set_directory(&dir)
+                        .set_file_name(&file_name)
+                        .save_file();
+                    if let Some(path) = saved {
+                        if let Ok(mut q) = async_dialog_state().completed_actions.lock() {
+                            q.push(Action::SaveAsFile(path));
+                        }
+                    }
+                    async_dialog_state().in_flight.store(false, Ordering::SeqCst);
+                    egui_ctx.request_repaint();
+                });
+        }
         return;
     }
     actions.push(Action::SetOverlay(ActiveOverlay::SaveFileDialog));
@@ -75,6 +132,9 @@ pub fn render_ui(
     sync_cursor_to_widget: &mut bool,
 ) {
     let pal = apply_theme(ctx, session.palette_preset, session.theme);
+
+    // Drain any file Open/SaveAs actions completed by the background native dialog thread
+    drain_async_dialog_actions(actions);
 
     // Disable egui's global UI scaling on Ctrl+Plus/Minus/0/Wheel so we drive pure document text zoom
     ctx.options_mut(|o| o.zoom_with_keyboard = false);
@@ -221,7 +281,11 @@ pub fn render_ui(
         }
         if key_chord(i, true, false, false, egui::Key::S) {
             actions.push(Action::SetChromeAutohidden(false));
-            actions.push(Action::SaveDocument);
+            if session.current_file_path.is_some() {
+                actions.push(Action::SaveDocument);
+            } else {
+                trigger_save_as = true;
+            }
         }
         if key_chord(i, true, true, false, egui::Key::S) {
             actions.push(Action::SetChromeAutohidden(false));
@@ -285,10 +349,10 @@ pub fn render_ui(
         });
     });
     if trigger_save_as {
-        trigger_save_as_file_dialog(session, actions);
+        trigger_save_as_file_dialog(ctx, session, actions);
     }
     if trigger_open {
-        trigger_open_file_dialog(session, actions);
+        trigger_open_file_dialog(ctx, session, actions);
     }
 
     let chrome_hidden = session.chrome_autohidden
@@ -737,7 +801,11 @@ fn render_headerbar(
     );
     draw_chevron_down(painter, Pos2::new(180.0, y_mid + 0.5), fg);
     if save_hit.clicked() {
-        actions.push(Action::SaveDocument);
+        if session.current_file_path.is_some() {
+            actions.push(Action::SaveDocument);
+        } else {
+            trigger_save_as_file_dialog(ctx, session, actions);
+        }
     }
     if save_menu_hit.clicked() {
         actions.push(Action::SetOverlay(ActiveOverlay::SaveMenu));
@@ -915,16 +983,31 @@ fn render_tab_bar(
         Stroke::new(1.0, border_col),
     );
 
-    let n_tabs = session.tabs.len().max(1);
-    let avail_w = (win_rect.width() - 68.0).max(160.0);
-    let tab_w = (avail_w / (n_tabs as f32)).clamp(96.0, 196.0).floor();
-    let max_vis = ((avail_w + 4.0) / (tab_w + 4.0)).floor().max(1.0) as usize;
-    let start_idx = if session.active_tab_index >= max_vis {
-        (session.active_tab_index + 1 - max_vis).min(n_tabs.saturating_sub(max_vis))
-    } else {
-        0
-    };
-    let end_idx = (start_idx + max_vis).min(n_tabs);
+    let avail_w = (win_rect.width() - 56.0).max(160.0);
+    let layout = session.compute_tab_bar_layout(avail_w);
+    if session.tab_bar_max_vis != layout.max_vis {
+        actions.push(Action::SetTabBarMaxVisible(layout.max_vis));
+    }
+    let tab_w = layout.tab_w;
+    let start_idx = layout.start_idx;
+    let end_idx = layout.end_idx;
+
+    // Support mouse-wheel scrolling over the tab bar when overflow is active
+    if layout.has_overflow && ui.rect_contains_pointer(tb_rect) {
+        let scroll_delta = ui.ctx().input(|i| {
+            if i.raw_scroll_delta.x.abs() > 0.1 {
+                i.raw_scroll_delta.x
+            } else {
+                i.raw_scroll_delta.y
+            }
+        });
+        if scroll_delta < -0.5 && layout.can_scroll_right {
+            actions.push(Action::ScrollTabsBy(1));
+        } else if scroll_delta > 0.5 && layout.can_scroll_left {
+            actions.push(Action::ScrollTabsBy(-1));
+        }
+    }
+
     let mut cur_x = win_rect.left() + 12.0;
 
     for idx in start_idx..end_idx {
@@ -945,32 +1028,48 @@ fn render_tab_bar(
             Pos2::new(cur_x, tb_top + 3.0),
             Pos2::new(cur_x + tab_w, if is_active { tb_bot + 1.0 } else { tb_bot - 1.0 }),
         );
+        let ptr_in_tab = ui.rect_contains_pointer(tab_rect);
+        let show_close_btn = is_active || tab_w >= 92.0 || ptr_in_tab;
+
         let close_rect = Rect::from_center_size(
             Pos2::new(tab_rect.right() - 13.0, (tb_top + 3.0 + tb_bot) * 0.5),
             Vec2::new(18.0, 18.0),
         );
-        let body_rect = Rect::from_min_max(
-            tab_rect.left_top(),
-            Pos2::new(close_rect.left() - 2.0, tab_rect.bottom()),
-        );
+        let body_rect = if show_close_btn {
+            Rect::from_min_max(
+                tab_rect.left_top(),
+                Pos2::new(close_rect.left() - 2.0, tab_rect.bottom()),
+            )
+        } else {
+            tab_rect
+        };
 
         let tab_sense = if session.overlay == ActiveOverlay::None {
             Sense::click()
         } else {
             Sense::hover()
         };
-        let body_hit = ui.interact(
-            body_rect,
-            ui.id().with(("accent_tab_select", tab.tab_id, idx)),
-            tab_sense,
-        );
-        let close_hit = ui
+        let body_hit = ui
             .interact(
-                close_rect,
-                ui.id().with(("accent_tab_close", tab.tab_id, idx)),
+                body_rect,
+                ui.id().with(("accent_tab_select", tab.tab_id, idx)),
                 tab_sense,
             )
-            .on_hover_text(I18n::tr(session.locale, "tooltip_close_tab"));
+            .on_hover_text(title_str);
+        let close_hit = if show_close_btn {
+            Some(
+                ui.interact(
+                    close_rect,
+                    ui.id().with(("accent_tab_close", tab.tab_id, idx)),
+                    tab_sense,
+                )
+                .on_hover_text(I18n::tr(session.locale, "tooltip_close_tab")),
+            )
+        } else {
+            None
+        };
+        let close_hovered = close_hit.as_ref().is_some_and(|h| h.hovered());
+        let close_clicked = close_hit.as_ref().is_some_and(|h| h.clicked());
 
         let tab_corners = CornerRadius {
             nw: 7,
@@ -1021,7 +1120,7 @@ fn render_tab_bar(
             );
         } else {
             // Inactive tab: recessed into the trough at rest, soft highlight only on hover
-            if body_hit.hovered() || close_hit.hovered() {
+            if body_hit.hovered() || close_hovered {
                 painter.rect_filled(
                     tab_rect,
                     tab_corners,
@@ -1041,7 +1140,7 @@ fn render_tab_bar(
         }
 
         let center_y = (tb_top + 3.0 + tb_bot) * 0.5;
-        let mut text_x = tab_rect.left() + 10.0;
+        let mut text_x = tab_rect.left() + 9.0;
         if is_dirty {
             painter.circle_filled(
                 Pos2::new(text_x + 2.0, center_y),
@@ -1052,10 +1151,12 @@ fn render_tab_bar(
                     pal.fg_muted
                 },
             );
-            text_x += 10.0;
+            text_x += 9.0;
         }
 
-        let max_chars = ((tab_w - 38.0) / 7.2).max(5.0) as usize;
+        let right_pad = if show_close_btn { 26.0 } else { 8.0 };
+        let avail_text_w = (tab_rect.right() - right_pad - text_x).max(16.0);
+        let max_chars = (avail_text_w / 7.0).floor().max(3.0) as usize;
         let display_label = if title_str.chars().count() > max_chars {
             let truncated: String = title_str.chars().take(max_chars.saturating_sub(1)).collect();
             format!("{truncated}…")
@@ -1079,40 +1180,104 @@ fn render_tab_bar(
             },
         );
 
-        // Tab close button `×`
-        if close_hit.hovered() {
-            painter.circle_filled(close_rect.center(), 7.5, pal.bg_pill_button);
+        // Tab close button `×` (always visible on active/wide tabs, and on hover for compact tabs)
+        if show_close_btn {
+            if close_hovered {
+                painter.circle_filled(close_rect.center(), 7.5, pal.bg_pill_button);
+            }
+            let cd = 2.8;
+            let c_fg = if close_hovered {
+                pal.fg_primary
+            } else if is_active {
+                pal.fg_primary.gamma_multiply(0.75)
+            } else {
+                pal.fg_muted.gamma_multiply(0.65)
+            };
+            painter.line_segment(
+                [
+                    Pos2::new(close_rect.center().x - cd, close_rect.center().y - cd),
+                    Pos2::new(close_rect.center().x + cd, close_rect.center().y + cd),
+                ],
+                Stroke::new(1.3, c_fg),
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(close_rect.center().x + cd, close_rect.center().y - cd),
+                    Pos2::new(close_rect.center().x - cd, close_rect.center().y + cd),
+                ],
+                Stroke::new(1.3, c_fg),
+            );
         }
-        let cd = 2.8;
-        let c_fg = if close_hit.hovered() {
-            pal.fg_primary
-        } else if is_active {
-            pal.fg_primary.gamma_multiply(0.75)
-        } else {
-            pal.fg_muted.gamma_multiply(0.65)
-        };
-        painter.line_segment(
-            [
-                Pos2::new(close_rect.center().x - cd, close_rect.center().y - cd),
-                Pos2::new(close_rect.center().x + cd, close_rect.center().y + cd),
-            ],
-            Stroke::new(1.3, c_fg),
-        );
-        painter.line_segment(
-            [
-                Pos2::new(close_rect.center().x + cd, close_rect.center().y - cd),
-                Pos2::new(close_rect.center().x - cd, close_rect.center().y + cd),
-            ],
-            Stroke::new(1.3, c_fg),
-        );
 
-        if close_hit.clicked() || body_hit.middle_clicked() {
+        if close_clicked || body_hit.middle_clicked() {
             actions.push(Action::CloseTab(idx));
         } else if body_hit.clicked() {
             actions.push(Action::SwitchTab(idx));
         }
 
         cur_x += tab_w + 4.0;
+    }
+
+    // Overflow scroll buttons `‹` and `›` when more tabs are open than fit at minimum width
+    if layout.has_overflow {
+        let prev_rect =
+            Rect::from_center_size(Pos2::new(cur_x + 10.0, tb_top + 16.0), Vec2::new(20.0, 22.0));
+        let prev_hit = ui.interact(
+            prev_rect,
+            ui.id().with("accent_tabbar_scroll_prev"),
+            if session.overlay == ActiveOverlay::None && layout.can_scroll_left {
+                Sense::click()
+            } else {
+                Sense::hover()
+            },
+        );
+        if prev_hit.hovered() && layout.can_scroll_left {
+            painter.rect_filled(prev_rect, CornerRadius::same(5), pal.bg_pill_button);
+        }
+        painter.text(
+            prev_rect.center(),
+            Align2::CENTER_CENTER,
+            "‹",
+            font_ui_bold(15.0),
+            if layout.can_scroll_left {
+                pal.fg_primary
+            } else {
+                pal.fg_muted.gamma_multiply(0.35)
+            },
+        );
+        if prev_hit.clicked() && layout.can_scroll_left {
+            actions.push(Action::ScrollTabsBy(-1));
+        }
+
+        let next_rect =
+            Rect::from_center_size(Pos2::new(cur_x + 32.0, tb_top + 16.0), Vec2::new(20.0, 22.0));
+        let next_hit = ui.interact(
+            next_rect,
+            ui.id().with("accent_tabbar_scroll_next"),
+            if session.overlay == ActiveOverlay::None && layout.can_scroll_right {
+                Sense::click()
+            } else {
+                Sense::hover()
+            },
+        );
+        if next_hit.hovered() && layout.can_scroll_right {
+            painter.rect_filled(next_rect, CornerRadius::same(5), pal.bg_pill_button);
+        }
+        painter.text(
+            next_rect.center(),
+            Align2::CENTER_CENTER,
+            "›",
+            font_ui_bold(15.0),
+            if layout.can_scroll_right {
+                pal.fg_primary
+            } else {
+                pal.fg_muted.gamma_multiply(0.35)
+            },
+        );
+        if next_hit.clicked() && layout.can_scroll_right {
+            actions.push(Action::ScrollTabsBy(1));
+        }
+        cur_x += 46.0;
     }
 
     // `+` button right after the tabs to open a new tab
@@ -3339,7 +3504,7 @@ fn render_bottom_bar(
 }
 
 fn render_popovers(
-    _ctx: &Context,
+    ctx: &Context,
     ui: &mut Ui,
     painter: &Painter,
     win_rect: Rect,
@@ -3475,7 +3640,7 @@ fn render_popovers(
                 pal.fg_primary,
             );
             if h_browse.clicked() {
-                trigger_open_file_dialog(session, actions);
+                trigger_open_file_dialog(ctx, session, actions);
             }
         }
         ActiveOverlay::PreviewMenu => {
@@ -4017,7 +4182,7 @@ fn render_popovers(
                 );
                 if hit.clicked() {
                     match idx {
-                        0 => trigger_save_as_file_dialog(session, actions),
+                        0 => trigger_save_as_file_dialog(ctx, session, actions),
                         1 => actions.push(Action::ExportDocument("pdf".to_string())),
                         2 => actions.push(Action::ExportDocument("docx".to_string())),
                         3 => actions.push(Action::ExportDocument("odt".to_string())),

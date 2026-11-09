@@ -17,11 +17,12 @@ VERSION="$(tr -d '[:space:]' < "${ROOT_DIR}/VERSION")"
 
 # 2. Crea il bundle ZIP completo per Windows 11 (con Setup .exe, binario e script PowerShell User-Mode)
 mkdir -p "${DIST_DIR}"
+rm -rf "${DIST_DIR}"/Accent-*-win11-x64-user*
 STAGING_DIR="${DIST_DIR}/Accent-${VERSION}-win11-x64-user"
-rm -rf "${STAGING_DIR}"
 mkdir -p "${STAGING_DIR}"
 
 cp "${WIN_DIR}/Accent-Setup-${VERSION}-x86_64.exe" "${STAGING_DIR}/"
+cp "${WIN_DIR}/accent-${VERSION}-x86_64.exe" "${STAGING_DIR}/"
 cp "${WIN_DIR}/accent.exe" "${STAGING_DIR}/"
 cp "${ROOT_DIR}/img/brand/accent_logo.ico" "${STAGING_DIR}/"
 cp "${ROOT_DIR}/img/brand/accent_logo.png" "${STAGING_DIR}/"
@@ -40,8 +41,9 @@ elif command -v bsdtar >/dev/null 2>&1; then
 fi
 
 echo "==> Artefatti Windows 11 (User-Mode + Disinstallatore integrato) pronti:"
-echo "    Setup .exe autonomo: ${WIN_DIR}/Accent-Setup-${VERSION}-x86_64.exe"
-echo "    Binario standalone:  ${WIN_DIR}/accent.exe"
+echo "    Setup .exe autonomo:             ${WIN_DIR}/Accent-Setup-${VERSION}-x86_64.exe"
+echo "    Binario standalone (versionato): ${WIN_DIR}/accent-${VERSION}-x86_64.exe"
+echo "    Binario standalone:              ${WIN_DIR}/accent.exe"
 if [[ -f "${ZIP_FILE}" ]]; then
-    echo "    Archivio ZIP:        ${ZIP_FILE}"
+    echo "    Archivio ZIP:                    ${ZIP_FILE}"
 fi

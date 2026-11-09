@@ -12,14 +12,14 @@ VERSION="$(tr -d '[:space:]' < "${REPO_ROOT}/VERSION")"
 echo "==> Building Accent v${VERSION} for Windows 11 (x86_64-pc-windows-gnu)..."
 
 SYSROOT_DIR="/tmp/mingw-sysroot"
-if [[ ! -f "${SYSROOT_DIR}/usr/x86_64-w64-mingw32/lib/crt2.o" ]] || [[ ! -f "${SYSROOT_DIR}/usr/bin/x86_64-w64-mingw32-dlltool" ]]; then
+if [[ ! -f "${SYSROOT_DIR}/usr/x86_64-w64-mingw32/lib/crt2.o" ]] || [[ ! -f "${SYSROOT_DIR}/usr/bin/x86_64-w64-mingw32-dlltool" ]] || [[ ! -f "${SYSROOT_DIR}/usr/x86_64-w64-mingw32/lib/libgcc.a" ]]; then
     echo "    Downloading mingw-w64 sysroot components into ${SYSROOT_DIR}..."
     mkdir -p "${SYSROOT_DIR}"
     for pkg in mingw-w64-crt mingw-w64-winpthreads mingw-w64-binutils; do
-        url="$(pacman -Sp "$pkg")"
+        url="$(pacman -Sp "$pkg" | tail -n 1)"
         curl -sL "$url" | tar -C "${SYSROOT_DIR}" --zstd -xf -
     done
-    gcc_url="$(pacman -Sp mingw-w64-gcc)"
+    gcc_url="$(pacman -Sp mingw-w64-gcc | tail -n 1)"
     curl -sL "$gcc_url" | tar -C "${SYSROOT_DIR}" --zstd -xf - --wildcards 'usr/lib/gcc/x86_64-w64-mingw32/*/libgcc*.a'
     cp "${SYSROOT_DIR}"/usr/lib/gcc/x86_64-w64-mingw32/*/libgcc*.a "${SYSROOT_DIR}/usr/x86_64-w64-mingw32/lib/"
 fi
@@ -73,7 +73,9 @@ CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${LINKER_WRAPPER}" \
     cargo build --release --target x86_64-pc-windows-gnu -p accent-ui
 
 x86_64-w64-mingw32-strip "${REPO_ROOT}/target/x86_64-pc-windows-gnu/release/accent-ui.exe"
+rm -f "${SCRIPT_DIR}"/Accent-Setup-*.exe "${SCRIPT_DIR}"/accent-*-x86_64.exe
 cp "${REPO_ROOT}/target/x86_64-pc-windows-gnu/release/accent-ui.exe" "${SCRIPT_DIR}/accent.exe"
+cp "${REPO_ROOT}/target/x86_64-pc-windows-gnu/release/accent-ui.exe" "${SCRIPT_DIR}/accent-${VERSION}-x86_64.exe"
 
 SETUP_EXE="${SCRIPT_DIR}/Accent-Setup-${VERSION}-x86_64.exe"
 ACCENT_VERSION="${VERSION}" rustc --edition 2024 -O \
@@ -84,5 +86,6 @@ ACCENT_VERSION="${VERSION}" rustc --edition 2024 -O \
 x86_64-w64-mingw32-strip "${SETUP_EXE}"
 
 echo "==> Build Windows 11 completata:"
-echo "    Binario standalone:      ${SCRIPT_DIR}/accent.exe"
-echo "    Setup & Disinstallatore: ${SETUP_EXE}"
+echo "    Binario standalone (versionato): ${SCRIPT_DIR}/accent-${VERSION}-x86_64.exe"
+echo "    Binario standalone:              ${SCRIPT_DIR}/accent.exe"
+echo "    Setup & Disinstallatore:         ${SETUP_EXE}"

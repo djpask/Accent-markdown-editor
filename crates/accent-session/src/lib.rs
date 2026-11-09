@@ -767,6 +767,8 @@ pub enum Action {
     CloseTab(usize),
     NextTab,
     PrevTab,
+    ScrollTabsBy(isize),
+    SetTabBarMaxVisible(usize),
     Undo,
     Redo,
     OpenFile(PathBuf),
@@ -863,10 +865,33 @@ pub struct DocumentTab {
     pub buffer: DocumentBuffer,
 }
 
+/// Horizontal gap in pixels between adjacent tab cards in the tab bar.
+pub const TAB_GAP: f32 = 4.0;
+/// Minimum width in pixels of a single tab before overflow scrolling (`‹` / `›`) activates.
+pub const MIN_TAB_W: f32 = 56.0;
+/// Maximum width in pixels of a single tab when few tabs are open.
+pub const MAX_TAB_W: f32 = 196.0;
+/// Width reserved on the right side of the tab bar for the `‹` and `›` scroll buttons when overflow occurs.
+pub const TAB_SCROLL_CONTROLS_W: f32 = 52.0;
+
+/// Computed layout and visible index range for the multi-tab bar at a given available width.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TabBarLayout {
+    pub tab_w: f32,
+    pub max_vis: usize,
+    pub start_idx: usize,
+    pub end_idx: usize,
+    pub has_overflow: bool,
+    pub can_scroll_left: bool,
+    pub can_scroll_right: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct Session {
     pub tabs: Vec<DocumentTab>,
     pub active_tab_index: usize,
+    pub tab_scroll_offset: usize,
+    pub tab_bar_max_vis: usize,
     pub next_tab_id: u64,
     pub document_title: String,
     pub current_file_path: Option<PathBuf>,
@@ -979,6 +1004,8 @@ impl Session {
         let mut session = Self {
             tabs: vec![initial_tab],
             active_tab_index: 0,
+            tab_scroll_offset: 0,
+            tab_bar_max_vis: 16,
             next_tab_id: 2,
             document_title: "esempio_accent.md".to_string(),
             current_file_path: Some(sample_path),
@@ -1160,6 +1187,73 @@ impl Session {
         ((self.typography.font_size / DEFAULT_FONT_SIZE) * 100.0).round() as u32
     }
 
+    /// Computes the horizontal geometry and visible slice (`start_idx..end_idx`) for the multi-tab bar.
+    ///
+    /// - Subtracting `(n_tabs - 1) * TAB_GAP` before dividing `avail_w` by `n_tabs` ensures that
+    ///   tabs shrink elastically down to `MIN_TAB_W` (`56.0 px`) without premature clipping at 5–6 tabs.
+    /// - When `n_tabs` exceeds what can fit even at `MIN_TAB_W`, overflow mode activates using the
+    ///   persistent `self.tab_scroll_offset` so clicking a visible tab never makes other tabs vanish.
+    pub fn compute_tab_bar_layout(&self, avail_w: f32) -> TabBarLayout {
+        let n_tabs = self.tabs.len().max(1);
+        let safe_avail_w = avail_w.max(160.0);
+        let total_gaps = (n_tabs.saturating_sub(1) as f32) * TAB_GAP;
+        let ideal_tab_w = ((safe_avail_w - total_gaps) / (n_tabs as f32)).floor();
+
+        if ideal_tab_w >= MIN_TAB_W {
+            let tab_w = ideal_tab_w.min(MAX_TAB_W);
+            return TabBarLayout {
+                tab_w,
+                max_vis: n_tabs,
+                start_idx: 0,
+                end_idx: n_tabs,
+                has_overflow: false,
+                can_scroll_left: false,
+                can_scroll_right: false,
+            };
+        }
+
+        let scroll_avail_w = (safe_avail_w - TAB_SCROLL_CONTROLS_W).max(MIN_TAB_W);
+        let max_vis = ((scroll_avail_w + TAB_GAP) / (MIN_TAB_W + TAB_GAP))
+            .floor()
+            .max(1.0) as usize;
+        let vis_gaps = (max_vis.saturating_sub(1) as f32) * TAB_GAP;
+        let tab_w = ((scroll_avail_w - vis_gaps) / (max_vis as f32))
+            .clamp(MIN_TAB_W, MAX_TAB_W)
+            .floor();
+        let max_offset = n_tabs.saturating_sub(max_vis);
+        let start_idx = self.tab_scroll_offset.min(max_offset);
+        let end_idx = (start_idx + max_vis).min(n_tabs);
+
+        TabBarLayout {
+            tab_w,
+            max_vis,
+            start_idx,
+            end_idx,
+            has_overflow: true,
+            can_scroll_left: start_idx > 0,
+            can_scroll_right: end_idx < n_tabs,
+        }
+    }
+
+    /// Adjusts `self.tab_scroll_offset` by the minimum amount required to keep `self.active_tab_index`
+    /// inside the visible window of size `self.tab_bar_max_vis`.
+    /// Never modifies `self.tab_scroll_offset` when `self.active_tab_index` is already visible.
+    pub fn ensure_active_tab_visible(&mut self) {
+        let n_tabs = self.tabs.len().max(1);
+        let max_vis = self.tab_bar_max_vis.max(1);
+        if n_tabs <= max_vis {
+            self.tab_scroll_offset = 0;
+            return;
+        }
+        let max_offset = n_tabs.saturating_sub(max_vis);
+        self.tab_scroll_offset = self.tab_scroll_offset.min(max_offset);
+        if self.active_tab_index < self.tab_scroll_offset {
+            self.tab_scroll_offset = self.active_tab_index;
+        } else if self.active_tab_index >= self.tab_scroll_offset + max_vis {
+            self.tab_scroll_offset = (self.active_tab_index + 1 - max_vis).min(max_offset);
+        }
+    }
+
     fn next_untitled_name(&self) -> String {
         if !self.tabs.iter().any(|t| t.document_title == "untitled.md") {
             return "untitled.md".to_string();
@@ -1260,7 +1354,7 @@ impl Session {
         let settings = self.to_persisted_settings();
         let json = serde_json::to_string_pretty(&settings)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        accent_storage::atomic_save(&self.config_path, &json)
+        accent_storage::atomic_save_fast(&self.config_path, &json)
     }
 
     /// Loads persisted settings, open tabs, and last opened directory/file from `self.config_path` if present.
@@ -1679,6 +1773,7 @@ impl Session {
 
     pub fn apply(&mut self, action: Action) {
         let prev_overlay = self.overlay;
+        let had_file_path_before = self.current_file_path.is_some();
         let should_persist_settings = matches!(
             action,
             Action::SetTheme(_)
@@ -1712,14 +1807,13 @@ impl Session {
                 | Action::NextTab
                 | Action::PrevTab
                 | Action::OpenFile(_)
-                | Action::SaveDocument
                 | Action::ConfirmRecoverySave
                 | Action::SaveAsFile(_)
                 | Action::SetFileDialogDir(_)
                 | Action::SelectExportFormat(_)
                 | Action::ToggleExportSyntaxHighlight
                 | Action::ExecuteExport
-        );
+        ) || (matches!(action, Action::SaveDocument) && !had_file_path_before);
         match action {
             Action::SetTheme(theme) => self.theme = theme,
             Action::SetPalettePreset(preset) => self.palette_preset = preset,
@@ -1982,6 +2076,7 @@ impl Session {
                 };
                 self.tabs.push(new_tab);
                 self.active_tab_index = self.tabs.len() - 1;
+                self.ensure_active_tab_visible();
                 self.load_active_tab_from_slot();
                 self.status_message = None;
                 self.chrome_autohidden = false;
@@ -1992,6 +2087,7 @@ impl Session {
                 if idx < self.tabs.len() && idx != self.active_tab_index {
                     self.sync_active_tab_to_slot();
                     self.active_tab_index = idx;
+                    self.ensure_active_tab_visible();
                     self.load_active_tab_from_slot();
                     self.check_active_tab_disk_modification();
                     self.status_message = if self.recovery_banner_active {
@@ -2014,6 +2110,7 @@ impl Session {
                 if self.tabs.len() > 1 {
                     self.sync_active_tab_to_slot();
                     self.active_tab_index = (self.active_tab_index + 1) % self.tabs.len();
+                    self.ensure_active_tab_visible();
                     self.load_active_tab_from_slot();
                     self.check_active_tab_disk_modification();
                     self.status_message = if self.recovery_banner_active {
@@ -2037,6 +2134,7 @@ impl Session {
                     self.sync_active_tab_to_slot();
                     self.active_tab_index =
                         (self.active_tab_index + self.tabs.len() - 1) % self.tabs.len();
+                    self.ensure_active_tab_visible();
                     self.load_active_tab_from_slot();
                     self.check_active_tab_disk_modification();
                     self.status_message = if self.recovery_banner_active {
@@ -2053,6 +2151,30 @@ impl Session {
                     };
                     self.chrome_autohidden = false;
                     self.overlay = ActiveOverlay::None;
+                }
+            }
+            Action::ScrollTabsBy(delta) => {
+                let n_tabs = self.tabs.len().max(1);
+                let max_vis = self.tab_bar_max_vis.max(1);
+                let max_offset = n_tabs.saturating_sub(max_vis);
+                if delta < 0 {
+                    self.tab_scroll_offset = self
+                        .tab_scroll_offset
+                        .min(max_offset)
+                        .saturating_sub(delta.unsigned_abs());
+                } else if delta > 0 {
+                    self.tab_scroll_offset =
+                        (self.tab_scroll_offset + (delta as usize)).min(max_offset);
+                }
+            }
+            Action::SetTabBarMaxVisible(max_vis) => {
+                let clamped = max_vis.max(1);
+                if self.tab_bar_max_vis != clamped {
+                    self.tab_bar_max_vis = clamped;
+                    let max_offset = self.tabs.len().max(1).saturating_sub(clamped);
+                    if self.tab_scroll_offset > max_offset {
+                        self.tab_scroll_offset = max_offset;
+                    }
                 }
             }
             Action::CloseTab(idx) => {
@@ -2086,6 +2208,7 @@ impl Session {
                             buffer: new_buf,
                         };
                         self.active_tab_index = 0;
+                        self.tab_scroll_offset = 0;
                     } else {
                         self.tabs.remove(idx);
                         if idx < self.active_tab_index {
@@ -2093,6 +2216,14 @@ impl Session {
                         } else if self.active_tab_index >= self.tabs.len() {
                             self.active_tab_index = self.tabs.len() - 1;
                         }
+                        if idx < self.tab_scroll_offset {
+                            self.tab_scroll_offset = self.tab_scroll_offset.saturating_sub(1);
+                        }
+                        let max_offset = self
+                            .tabs
+                            .len()
+                            .saturating_sub(self.tab_bar_max_vis.max(1));
+                        self.tab_scroll_offset = self.tab_scroll_offset.min(max_offset);
                     }
                     self.load_active_tab_from_slot();
                     self.check_active_tab_disk_modification();
@@ -2156,6 +2287,7 @@ impl Session {
                         .is_some_and(|p| Self::paths_match(p, &path))
                 }) {
                     self.active_tab_index = existing_idx;
+                    self.ensure_active_tab_visible();
                     self.load_active_tab_from_slot();
                     if let Some(parent) = path.parent() {
                         if parent.is_dir() {
@@ -2231,6 +2363,7 @@ impl Session {
                             });
                             self.active_tab_index = self.tabs.len() - 1;
                         }
+                        self.ensure_active_tab_visible();
                         self.disk_modified_banner_active = false;
                         self.dismissed_disk_hash = None;
                         self.restore_from_journal_entry(entry);
@@ -2268,6 +2401,7 @@ impl Session {
                             });
                             self.active_tab_index = self.tabs.len() - 1;
                         }
+                        self.ensure_active_tab_visible();
                         self.document_title = title.clone();
                         self.file_dialog_input = title;
                         if let Some(parent) = path.parent() {
@@ -2329,10 +2463,12 @@ impl Session {
                     .unwrap_or_else(|| PathBuf::from("/tmp/accent_autosave.md"));
                 let text = self.buffer.text();
                 if accent_storage::atomic_save(&target, &text).is_ok() {
-                    let _ = accent_storage::remove_journal_for_target(
-                        &self.recovery_dir,
-                        self.current_file_path.as_deref(),
-                    );
+                    if self.current_file_path.as_deref() != Some(target.as_path()) {
+                        let _ = accent_storage::remove_journal_for_target(
+                            &self.recovery_dir,
+                            self.current_file_path.as_deref(),
+                        );
+                    }
                     let _ = accent_storage::remove_journal_for_target(
                         &self.recovery_dir,
                         Some(&target),
@@ -3509,5 +3645,80 @@ mod tests {
         assert!(!session.fullscreen);
         session.apply(Action::SetFullscreen(true));
         assert!(session.fullscreen);
+    }
+
+    #[test]
+    fn test_tab_bar_layout_elastic_compression_no_disappearing_tabs_at_5_to_15_tabs() {
+        let mut session = Session::default();
+        let avail_w = 900.0;
+
+        // Open tabs from 1 up to 15 and verify that every single tab remains visible (`0..n_tabs`)
+        // regardless of which tab has focus!
+        for target_count in 2..=15 {
+            session.apply(Action::NewTab);
+            assert_eq!(session.tabs.len(), target_count);
+
+            let layout_on_last = session.compute_tab_bar_layout(avail_w);
+            assert!(!layout_on_last.has_overflow);
+            assert_eq!(layout_on_last.start_idx, 0);
+            assert_eq!(layout_on_last.end_idx, target_count);
+            let total_used = (target_count as f32) * layout_on_last.tab_w
+                + ((target_count - 1) as f32) * TAB_GAP;
+            assert!(
+                total_used <= avail_w,
+                "total_used {total_used} exceeded avail_w {avail_w} for {target_count} tabs"
+            );
+
+            // Switch focus to the first tab (Tab 0) and verify the last tab NEVER disappears!
+            session.apply(Action::SwitchTab(0));
+            let layout_on_first = session.compute_tab_bar_layout(avail_w);
+            assert_eq!(layout_on_first.start_idx, 0);
+            assert_eq!(layout_on_first.end_idx, target_count);
+
+            // Switch back to the last tab
+            session.apply(Action::SwitchTab(target_count - 1));
+        }
+    }
+
+    #[test]
+    fn test_tab_bar_layout_overflow_persistent_scroll_offset_never_hides_last_tab_on_focus_switch() {
+        let mut session = Session::default();
+        let avail_w = 900.0;
+
+        // Open 22 tabs total so overflow mode activates (`ideal_tab_w < MIN_TAB_W`)
+        for _ in 1..22 {
+            let cur_layout = session.compute_tab_bar_layout(avail_w);
+            session.apply(Action::SetTabBarMaxVisible(cur_layout.max_vis));
+            session.apply(Action::NewTab);
+        }
+        let layout = session.compute_tab_bar_layout(avail_w);
+        session.apply(Action::SetTabBarMaxVisible(layout.max_vis));
+        session.ensure_active_tab_visible();
+
+        let layout = session.compute_tab_bar_layout(avail_w);
+        assert!(layout.has_overflow);
+        assert_eq!(session.active_tab_index, 21);
+        assert_eq!(layout.end_idx, 22);
+        let initial_start = layout.start_idx;
+        assert!(initial_start > 0);
+
+        // Now switch focus to an earlier visible tab (e.g. `initial_start + 1`):
+        // The last tab (index 21, `end_idx == 22`) MUST remain visible and `start_idx` must NOT jump to 0!
+        session.apply(Action::SwitchTab(initial_start + 1));
+        let after_switch = session.compute_tab_bar_layout(avail_w);
+        assert_eq!(after_switch.start_idx, initial_start);
+        assert_eq!(after_switch.end_idx, 22);
+
+        // Explicit scroll left via `‹` button or mouse wheel (`ScrollTabsBy(-2)`)
+        session.apply(Action::ScrollTabsBy(-2));
+        let after_scroll_left = session.compute_tab_bar_layout(avail_w);
+        assert_eq!(after_scroll_left.start_idx, initial_start - 2);
+        assert!(after_scroll_left.can_scroll_right);
+
+        // Explicit scroll right via `›` button (`ScrollTabsBy(2)`)
+        session.apply(Action::ScrollTabsBy(2));
+        let after_scroll_right = session.compute_tab_bar_layout(avail_w);
+        assert_eq!(after_scroll_right.start_idx, initial_start);
+        assert_eq!(after_scroll_right.end_idx, 22);
     }
 }
