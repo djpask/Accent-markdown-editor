@@ -1,7 +1,9 @@
 use resvg::{tiny_skia, usvg};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, OnceLock};
+
+const MAX_MERMAID_CACHE_ENTRIES: usize = 8;
 
 /// Visual theme for Mermaid diagram rendering, matching Accent's 3 themes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -114,8 +116,73 @@ fn shared_fontdb() -> Arc<usvg::fontdb::Database> {
     SHARED_FONTDB
         .get_or_init(|| {
             let mut db = usvg::fontdb::Database::new();
-            db.load_system_fonts();
+            let sans_pairs = [
+                (
+                    r"C:\Windows\Fonts\segoeui.ttf",
+                    r"C:\Windows\Fonts\segoeuib.ttf",
+                ),
+                (
+                    r"C:\Windows\Fonts\arial.ttf",
+                    r"C:\Windows\Fonts\arialbd.ttf",
+                ),
+                (
+                    "/usr/share/fonts/gnu-free/FreeSans.otf",
+                    "/usr/share/fonts/gnu-free/FreeSansBold.otf",
+                ),
+                (
+                    "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+                    "/usr/share/fonts/liberation/LiberationSans-Bold.ttf",
+                ),
+                (
+                    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+                ),
+                (
+                    "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
+                    "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
+                ),
+                (
+                    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                    "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+                ),
+                (
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                ),
+                (
+                    "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+                    "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+                ),
+            ];
+            for (reg, bold) in sans_pairs {
+                let pr = std::path::Path::new(reg);
+                if pr.is_file() {
+                    let _ = db.load_font_file(pr);
+                    if bold != reg {
+                        let pb = std::path::Path::new(bold);
+                        if pb.is_file() {
+                            let _ = db.load_font_file(pb);
+                        }
+                    }
+                    break;
+                }
+            }
+            for mono_path in [
+                r"C:\Windows\Fonts\consola.ttf",
+                "/usr/share/fonts/gsfonts/NimbusMonoPS-Regular.otf",
+                "/usr/share/fonts/gnu-free/FreeMono.otf",
+            ] {
+                let pm = std::path::Path::new(mono_path);
+                if pm.is_file() {
+                    let _ = db.load_font_file(pm);
+                    break;
+                }
+            }
+            if db.is_empty() {
+                db.load_system_fonts();
+            }
             for candidate in [
+                "Segoe UI",
                 "Adwaita Sans",
                 "FreeSans",
                 "Nimbus Sans",
@@ -123,6 +190,7 @@ fn shared_fontdb() -> Arc<usvg::fontdb::Database> {
                 "Noto Sans",
                 "DejaVu Sans",
                 "Liberation Sans",
+                "Arial",
             ] {
                 let exists = db.faces().any(|f| {
                     f.families
@@ -135,7 +203,17 @@ fn shared_fontdb() -> Arc<usvg::fontdb::Database> {
                     break;
                 }
             }
-            db.set_monospace_family("Nimbus Mono PS");
+            for mono in ["Nimbus Mono PS", "Consolas", "DejaVu Sans Mono"] {
+                let exists = db.faces().any(|f| {
+                    f.families
+                        .iter()
+                        .any(|(name, _)| name.eq_ignore_ascii_case(mono))
+                });
+                if exists {
+                    db.set_monospace_family(mono);
+                    break;
+                }
+            }
             Arc::new(db)
         })
         .clone()
@@ -410,7 +488,7 @@ fn render_sequence_svg(source: &str, theme: MermaidTheme) -> (String, u32, u32) 
                 pal.node_fill, pal.node_stroke
             ));
             svg.push_str(&format!(
-                r#"<text x="{cx}" y="{}" font-family="FreeSans, Adwaita Sans, Nimbus Sans, Cantarell, DejaVu Sans, sans-serif" font-size="13" font-weight="bold" fill="{}" text-anchor="middle">{esc}</text>"#,
+                r#"<text x="{cx}" y="{}" font-family="Segoe UI, FreeSans, Adwaita Sans, Nimbus Sans, Cantarell, DejaVu Sans, Arial, sans-serif" font-size="13" font-weight="bold" fill="{}" text-anchor="middle">{esc}</text>"#,
                 by + 24,
                 pal.text_fg
             ));
@@ -436,7 +514,7 @@ fn render_sequence_svg(source: &str, theme: MermaidTheme) -> (String, u32, u32) 
             pal.edge_stroke
         ));
         svg.push_str(&format!(
-            r#"<text x="{mid_x}" y="{}" font-family="FreeSans, Adwaita Sans, Nimbus Sans, Cantarell, DejaVu Sans, sans-serif" font-size="12" fill="{}" text-anchor="middle">{esc_txt}</text>"#,
+            r#"<text x="{mid_x}" y="{}" font-family="Segoe UI, FreeSans, Adwaita Sans, Nimbus Sans, Cantarell, DejaVu Sans, Arial, sans-serif" font-size="12" fill="{}" text-anchor="middle">{esc_txt}</text>"#,
             y - 8,
             pal.text_fg
         ));
@@ -656,7 +734,7 @@ pub fn render_mermaid_to_svg(source: &str, theme: MermaidTheme) -> (String, u32,
                 pal.node_stroke
             ));
             svg.push_str(&format!(
-                r#"<text x="{mx:.1}" y="{:.1}" font-family="FreeSans, Adwaita Sans, Nimbus Sans, Cantarell, DejaVu Sans, sans-serif" font-size="11" font-weight="bold" fill="{}" text-anchor="middle">{esc}</text>"#,
+                r#"<text x="{mx:.1}" y="{:.1}" font-family="Segoe UI, FreeSans, Adwaita Sans, Nimbus Sans, Cantarell, DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="bold" fill="{}" text-anchor="middle">{esc}</text>"#,
                 my + 4.0,
                 pal.text_fg
             ));
@@ -706,7 +784,7 @@ pub fn render_mermaid_to_svg(source: &str, theme: MermaidTheme) -> (String, u32,
         }
 
         svg.push_str(&format!(
-            r#"<text x="{cx:.1}" y="{:.1}" font-family="FreeSans, Adwaita Sans, Nimbus Sans, Cantarell, DejaVu Sans, sans-serif" font-size="13" font-weight="bold" fill="{}" text-anchor="middle">{esc_label}</text>"#,
+            r#"<text x="{cx:.1}" y="{:.1}" font-family="Segoe UI, FreeSans, Adwaita Sans, Nimbus Sans, Cantarell, DejaVu Sans, Arial, sans-serif" font-size="13" font-weight="bold" fill="{}" text-anchor="middle">{esc_label}</text>"#,
             cy + 4.5,
             pal.text_fg
         ));
@@ -716,10 +794,11 @@ pub fn render_mermaid_to_svg(source: &str, theme: MermaidTheme) -> (String, u32,
     (svg, width, height)
 }
 
-/// Rasterizes an SVG string into unpremultiplied RGBA8 pixels and encoded PNG bytes via `resvg`.
-pub fn rasterize_svg(svg: &str, scale: f32) -> Option<(u32, u32, Vec<u8>, Vec<u8>)> {
+fn render_svg_to_pixmap(svg: &str, scale: f32) -> Option<(u32, u32, tiny_skia::Pixmap)> {
     let mut opts = usvg::Options::default();
-    opts.fontdb = shared_fontdb();
+    if svg.contains("<text") {
+        opts.fontdb = shared_fontdb();
+    }
     let tree = usvg::Tree::from_str(svg, &opts).ok()?;
     let size = tree.size().to_int_size();
     let px_w = ((size.width() as f32) * scale).round().max(1.0) as u32;
@@ -728,9 +807,10 @@ pub fn rasterize_svg(svg: &str, scale: f32) -> Option<(u32, u32, Vec<u8>, Vec<u8
     let mut pixmap = tiny_skia::Pixmap::new(px_w, px_h)?;
     let transform = tiny_skia::Transform::from_scale(scale, scale);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
+    Some((px_w, px_h, pixmap))
+}
 
-    let png_bytes = pixmap.encode_png().ok()?;
-    // Convert premultiplied RGBA from tiny-skia to unpremultiplied RGBA for egui::ColorImage
+fn demultiply_pixmap_rgba(pixmap: &tiny_skia::Pixmap, px_w: u32, px_h: u32) -> Vec<u8> {
     let mut rgba = Vec::with_capacity((px_w * px_h * 4) as usize);
     for px in pixmap.pixels() {
         let c = px.demultiply();
@@ -739,13 +819,29 @@ pub fn rasterize_svg(svg: &str, scale: f32) -> Option<(u32, u32, Vec<u8>, Vec<u8
         rgba.push(c.blue());
         rgba.push(c.alpha());
     }
+    rgba
+}
 
+/// Rasterizes an SVG string into unpremultiplied RGBA8 pixels without PNG compression overhead.
+/// If `svg` contains no `<text>` elements (e.g. `icon.svg`), system font loading is skipped completely.
+pub fn rasterize_svg_rgba(svg: &str, scale: f32) -> Option<(u32, u32, Vec<u8>)> {
+    let (px_w, px_h, pixmap) = render_svg_to_pixmap(svg, scale)?;
+    let rgba = demultiply_pixmap_rgba(&pixmap, px_w, px_h);
+    Some((px_w, px_h, rgba))
+}
+
+/// Rasterizes an SVG string into unpremultiplied RGBA8 pixels and encoded PNG bytes via `resvg`.
+pub fn rasterize_svg(svg: &str, scale: f32) -> Option<(u32, u32, Vec<u8>, Vec<u8>)> {
+    let (px_w, px_h, pixmap) = render_svg_to_pixmap(svg, scale)?;
+    let png_bytes = pixmap.encode_png().ok()?;
+    let rgba = demultiply_pixmap_rgba(&pixmap, px_w, px_h);
     Some((px_w, px_h, rgba, png_bytes))
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct MermaidCache {
     entries: HashMap<(u64, MermaidTheme), Arc<RenderedMermaidDiagram>>,
+    lru_order: VecDeque<(u64, MermaidTheme)>,
 }
 
 impl MermaidCache {
@@ -762,10 +858,57 @@ impl MermaidCache {
         h
     }
 
+    fn touch_lru(&mut self, key: (u64, MermaidTheme)) {
+        if let Some(pos) = self.lru_order.iter().position(|&k| k == key) {
+            self.lru_order.remove(pos);
+        }
+        self.lru_order.push_back(key);
+        while self.lru_order.len() > MAX_MERMAID_CACHE_ENTRIES {
+            if let Some(oldest) = self.lru_order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+
     pub fn get_or_render(&mut self, source: &str) -> RenderedMermaidDiagram {
         self.get_or_render_themed(source, MermaidTheme::Sepia)
             .as_ref()
             .clone()
+    }
+
+    /// Screen-optimized Mermaid renderer: skips PNG compression (`png_bytes` stays empty unless
+    /// later requested by an exporter) and enforces a bounded 16-entry LRU cache.
+    pub fn get_or_render_screen_themed(
+        &mut self,
+        source: &str,
+        theme: MermaidTheme,
+    ) -> Arc<RenderedMermaidDiagram> {
+        let key = (Self::hash_source(source), theme);
+        if let Some(existing) = self.entries.get(&key).cloned() {
+            self.touch_lru(key);
+            return existing;
+        }
+        let (svg, logical_w, logical_h) = render_mermaid_to_svg(source, theme);
+        let (width, height, rgba_pixels) =
+            rasterize_svg_rgba(&svg, 1.5).unwrap_or_else(|| {
+                (
+                    logical_w,
+                    logical_h,
+                    vec![240; (logical_w * logical_h * 4) as usize],
+                )
+            });
+        let arc = Arc::new(RenderedMermaidDiagram {
+            content_hash: key.0,
+            theme,
+            svg,
+            width,
+            height,
+            rgba_pixels,
+            png_bytes: Vec::new(),
+        });
+        self.entries.insert(key, arc.clone());
+        self.touch_lru(key);
+        arc
     }
 
     pub fn get_or_render_themed(
@@ -774,30 +917,35 @@ impl MermaidCache {
         theme: MermaidTheme,
     ) -> Arc<RenderedMermaidDiagram> {
         let key = (Self::hash_source(source), theme);
-        self.entries
-            .entry(key)
-            .or_insert_with(|| {
-                let (svg, logical_w, logical_h) = render_mermaid_to_svg(source, theme);
-                let (width, height, rgba_pixels, png_bytes) =
-                    rasterize_svg(&svg, 1.5).unwrap_or_else(|| {
-                        (
-                            logical_w,
-                            logical_h,
-                            vec![240; (logical_w * logical_h * 4) as usize],
-                            Vec::new(),
-                        )
-                    });
-                Arc::new(RenderedMermaidDiagram {
-                    content_hash: key.0,
-                    theme,
-                    svg,
-                    width,
-                    height,
-                    rgba_pixels,
-                    png_bytes,
-                })
-            })
-            .clone()
+        if let Some(existing) = self.entries.get(&key) {
+            if !existing.png_bytes.is_empty() {
+                let cloned = existing.clone();
+                self.touch_lru(key);
+                return cloned;
+            }
+        }
+        let (svg, logical_w, logical_h) = render_mermaid_to_svg(source, theme);
+        let (width, height, rgba_pixels, png_bytes) =
+            rasterize_svg(&svg, 1.5).unwrap_or_else(|| {
+                (
+                    logical_w,
+                    logical_h,
+                    vec![240; (logical_w * logical_h * 4) as usize],
+                    Vec::new(),
+                )
+            });
+        let arc = Arc::new(RenderedMermaidDiagram {
+            content_hash: key.0,
+            theme,
+            svg,
+            width,
+            height,
+            rgba_pixels,
+            png_bytes,
+        });
+        self.entries.insert(key, arc.clone());
+        self.touch_lru(key);
+        arc
     }
 }
 

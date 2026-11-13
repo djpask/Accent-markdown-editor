@@ -18,8 +18,8 @@ use theme::{
     append_text_with_color_emojis, apply_theme, draw_chevron_down, draw_chevron_left,
     draw_chevron_up, draw_hamburger_icon, draw_new_doc_icon, draw_search_icon, draw_toolbar_icon,
     draw_view_mode_icon, draw_window_button, font_editor_italic, font_editor_regular, font_ui_bold,
-    font_ui_regular, is_color_emoji_char, paint_galley_color_emojis, resolve_code_font,
-    resolve_prose_font, AccentPalette,
+    font_ui_regular, is_color_emoji_char, paint_galley_color_emojis,
+    paint_galley_color_emojis_from, resolve_code_font, resolve_prose_font, AccentPalette,
 };
 
 struct AsyncNativeDialogState {
@@ -1351,25 +1351,54 @@ fn render_search_bar(
         Locale::En => "Replace with...",
     };
 
-    // Compute match counter ("1 di 4")
+    // Compute match counter ("1 di 4") with O(1) cache + O(log M) binary search on cursor move
     let (cur_match, total_matches) = if session.search_query.is_empty() {
         (0usize, 0usize)
     } else {
-        let text_lower = session.buffer.as_str().to_lowercase();
-        let q_lower = session.search_query.to_lowercase();
-        let cur_b = session.buffer.cursor_byte();
-        let mut total = 0usize;
-        let mut current = 1usize;
-        for (byte_pos, _) in text_lower.match_indices(&q_lower) {
-            total += 1;
-            if byte_pos <= cur_b {
-                current = total;
-            }
-        }
-        if total == 0 {
+        let active_tab_id = session
+            .tabs
+            .get(session.active_tab_index)
+            .map_or(0, |t| t.tab_id);
+        let buf_rev = session.buffer.revision();
+        let search_cache_id = Id::new("accent_search_match_cache");
+        let cached_positions = ui.ctx().data_mut(|d| {
+            d.get_temp::<(u64, u64, String, Arc<Vec<usize>>)>(search_cache_id)
+                .and_then(|(cid, crev, cq, positions)| {
+                    if cid == active_tab_id && crev == buf_rev && cq == session.search_query {
+                        Some(positions)
+                    } else {
+                        None
+                    }
+                })
+        });
+        let positions = cached_positions.unwrap_or_else(|| {
+            let text_lower = session.buffer.as_str().to_lowercase();
+            let q_lower = session.search_query.to_lowercase();
+            let found: Arc<Vec<usize>> = Arc::new(
+                text_lower
+                    .match_indices(&q_lower)
+                    .map(|(byte_pos, _)| byte_pos)
+                    .collect(),
+            );
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(
+                    search_cache_id,
+                    (
+                        active_tab_id,
+                        buf_rev,
+                        session.search_query.clone(),
+                        Arc::clone(&found),
+                    ),
+                );
+            });
+            found
+        });
+        if positions.is_empty() {
             (0, 0)
         } else {
-            (current, total)
+            let cur_b = session.buffer.cursor_byte();
+            let idx = positions.partition_point(|&pos| pos <= cur_b).max(1);
+            (idx, positions.len())
         }
     };
     let counter_str = match session.locale {
@@ -1918,12 +1947,24 @@ fn render_editor_pane(
             .layout(egui::Layout::top_down(egui::Align::Min)),
     );
 
-    let mut editable_text = session.buffer.as_str().to_owned();
     let active_tab_id = session
         .tabs
         .get(session.active_tab_index)
         .map_or(0, |t| t.tab_id);
     let buf_rev = session.buffer.revision();
+    let edit_buf_cache_id = Id::new(("accent_editable_text_buf", active_tab_id));
+    let mut editable_text = pane_ui
+        .ctx()
+        .data_mut(|d| {
+            let slot = d.get_temp_mut_or_default::<(u64, String)>(edit_buf_cache_id);
+            let (cached_rev, s) = std::mem::take(slot);
+            if cached_rev == buf_rev && s.len() == session.buffer.len_bytes() {
+                Some(s)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| session.buffer.as_str().to_owned());
     let dialect = session.dialect;
     let view_while_typing = session.view_while_typing;
     let focus_mode = session.focus_mode;
@@ -1933,10 +1974,14 @@ fn render_editor_pane(
     let code_family = session.typography.code_font_family.clone();
     let selection_bytes = session.buffer.selection_byte_range();
     let pre_selection_bytes = selection_bytes.clone();
-    let eff_caret_key = if view_while_typing {
-        Some(selection_bytes.clone())
+    let vis_sig = if view_while_typing {
+        session.buffer.live_visibility_signature(
+            dialect,
+            view_while_typing,
+            selection_bytes.clone(),
+        )
     } else {
-        None
+        0
     };
     let active_cursor_line = if focus_mode {
         session.buffer.cursor_line()
@@ -1952,7 +1997,7 @@ fn render_editor_pane(
         text_len: usize,
         dialect: accent_core::MarkdownDialect,
         view_while_typing: bool,
-        eff_caret_key: Option<std::ops::Range<usize>>,
+        vis_sig: u64,
         focus_mode: bool,
         active_cursor_line: usize,
         theme_variant: ThemeMode,
@@ -1968,7 +2013,8 @@ fn render_editor_pane(
 
     let mut layouter = move |ui: &Ui, text_str: &str, wrap_width: f32| -> Arc<egui::Galley> {
         let eff_wrap_w = wrap_width.max(col_width + base_indent + 16.0);
-        let is_session_buf = text_str == session.buffer.as_str();
+        let session_str = session.buffer.as_str();
+        let is_session_buf = text_str.len() == session_str.len() && text_str == session_str;
         let cache_id = Id::new(("accent_editor_galley_cache", active_tab_id));
         let gen_id = Id::new("accent_editor_atlas_gen");
         let pre_atlas = ui.fonts(|f| f.font_image_size());
@@ -1981,7 +2027,7 @@ fn render_editor_pane(
             text_len: text_str.len(),
             dialect,
             view_while_typing,
-            eff_caret_key: eff_caret_key.clone(),
+            vis_sig,
             focus_mode,
             active_cursor_line,
             theme_variant,
@@ -2043,7 +2089,7 @@ fn render_editor_pane(
                     seg_line_step
                 };
                 job.append(
-                    &seg.text,
+                    seg.as_str(text_str),
                     leading_space,
                     TextFormat {
                         font_id: FontId::new(0.01, egui::FontFamily::Monospace),
@@ -2148,7 +2194,7 @@ fn render_editor_pane(
 
             append_text_with_color_emojis(
                 &mut job,
-                &seg.text,
+                seg.as_str(text_str),
                 leading_space,
                 TextFormat {
                     font_id,
@@ -2174,12 +2220,7 @@ fn render_editor_pane(
         }
 
         let caret_jitter = if view_while_typing {
-            ((selection_bytes
-                .start
-                .wrapping_mul(31)
-                .wrapping_add(selection_bytes.end))
-                % 17) as f32
-                * 0.0002
+            ((vis_sig % 17) as f32) * 0.0002
         } else {
             0.0
         };
@@ -2348,9 +2389,10 @@ fn render_editor_pane(
 
                 let mut bg_shapes = Vec::new();
                 for ls in live_spans.iter() {
-                    if ls.span.char_range.end < min_vis_char
-                        || ls.span.char_range.start > max_vis_char
-                    {
+                    if ls.span.char_range.start > max_vis_char {
+                        break;
+                    }
+                    if ls.span.char_range.end < min_vis_char {
                         continue;
                     }
                     let is_collapsed =
@@ -2437,28 +2479,11 @@ fn render_editor_pane(
                                 if is_collapsed && is_mermaid {
                                     let full_slice =
                                         &session.buffer.as_str()[ls.span.byte_range.clone()];
-                                    let mut inner_lines: Vec<&str> = full_slice.lines().collect();
-                                    if !inner_lines.is_empty()
-                                        && (inner_lines[0].trim_start().starts_with("```")
-                                            || inner_lines[0].trim_start().starts_with("~~~"))
-                                    {
-                                        inner_lines.remove(0);
-                                    }
-                                    if !inner_lines.is_empty()
-                                        && (inner_lines.last().unwrap().trim_start().starts_with("```")
-                                            || inner_lines
-                                                .last()
-                                                .unwrap()
-                                                .trim_start()
-                                                .starts_with("~~~"))
-                                    {
-                                        inner_lines.pop();
-                                    }
-                                    let mermaid_code = inner_lines.join("\n");
+                                    let mermaid_code = extract_fenced_code_inner(full_slice);
                                     let (tex, mw, mh) = get_or_load_mermaid_texture(
                                         ui.ctx(),
                                         session,
-                                        &mermaid_code,
+                                        mermaid_code,
                                     );
                                     let avail_box = Rect::from_min_max(
                                         Pos2::new(x_body + 8.0, sy + 6.0),
@@ -2740,16 +2765,20 @@ fn render_editor_pane(
                     }
                 }
                 scroll_painter.set(code_bg_shape_idx, egui::Shape::Vec(bg_shapes));
-                paint_galley_color_emojis(
-                    ui.ctx(),
-                    &scroll_painter,
-                    &output.galley,
-                    output.galley_pos,
-                    session.buffer.as_str(),
-                    min_vis_char,
-                    max_vis_char,
-                    font_size,
-                );
+                if session.buffer.has_color_emojis() {
+                    let emoji_start_byte = session.buffer.char_to_byte(min_vis_char);
+                    paint_galley_color_emojis_from(
+                        ui.ctx(),
+                        &scroll_painter,
+                        &output.galley,
+                        output.galley_pos,
+                        &session.buffer.as_str()[emoji_start_byte..],
+                        min_vis_char,
+                        min_vis_char,
+                        max_vis_char,
+                        font_size,
+                    );
+                }
 
                 if output.response.clicked()
                     && session.overlay != ActiveOverlay::None
@@ -2786,6 +2815,10 @@ fn render_editor_pane(
                     } else {
                         actions.push(Action::UpdateBufferText(editable_text));
                     }
+                } else {
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(edit_buf_cache_id, (buf_rev, editable_text));
+                    });
                 }
 
                 // Sync programmatic cursor/selection updates into TextEdit and auto-scroll to keep cursor in view
@@ -2820,15 +2853,26 @@ fn render_editor_pane(
                             || post_selection_bytes != pre_selection_bytes;
                         if cursor_moved || output.response.changed() {
                             actions.push(Action::SetSelection(p, s));
-                            ui.ctx().data_mut(|d| {
-                                d.remove::<(EditorGalleyCacheKey, Arc<egui::Galley>)>(Id::new((
-                                    "accent_editor_galley_cache",
-                                    active_tab_id,
-                                )));
-                            });
-                            ui.ctx().request_repaint();
-                        }
-                        if cursor_moved || output.response.changed() {
+                            let new_vis_sig = if view_while_typing {
+                                session.buffer.live_visibility_signature(
+                                    dialect,
+                                    view_while_typing,
+                                    post_selection_bytes.clone(),
+                                )
+                            } else {
+                                0
+                            };
+                            let selection_active =
+                                new_sel_chars.start != new_sel_chars.end
+                                    || cur_sel.start != cur_sel.end;
+                            if output.response.changed()
+                                || new_vis_sig != vis_sig
+                                || focus_mode
+                                || session.search_bar_open
+                                || selection_active
+                            {
+                                ui.ctx().request_repaint();
+                            }
                             let cur_local = output
                                 .galley
                                 .pos_from_ccursor(egui::text::CCursor::new(p));
@@ -2853,15 +2897,17 @@ fn render_editor_pane(
                         .pos_from_ccursor(egui::text::CCursor::new(caret_char_idx));
                     let cur_line = session.buffer.cursor_line();
                     let caret_font_size = if session.view_while_typing {
-                        let h_lvl = live_spans.iter().find_map(|ls| match ls.span.kind {
-                            accent_core::AstSpanKind::Heading { level }
-                                if ls.span.start_line <= cur_line
-                                    && cur_line <= ls.span.end_line =>
-                            {
-                                Some(level)
-                            }
-                            _ => None,
-                        });
+                        let h_lvl = live_spans
+                            .iter()
+                            .take_while(|ls| ls.span.start_line <= cur_line)
+                            .find_map(|ls| match ls.span.kind {
+                                accent_core::AstSpanKind::Heading { level }
+                                    if cur_line <= ls.span.end_line =>
+                                {
+                                    Some(level)
+                                }
+                                _ => None,
+                            });
                         match h_lvl {
                             Some(1) => font_size * 1.42,
                             Some(2) => font_size * 1.24,
@@ -2890,6 +2936,93 @@ fn render_editor_pane(
         });
 }
 
+fn extract_fenced_code_inner(full_slice: &str) -> &str {
+    let mut inner = full_slice;
+    if let Some(first_nl) = inner.find('\n') {
+        let first_line = inner[..first_nl].trim_start();
+        if first_line.starts_with("```") || first_line.starts_with("~~~") {
+            inner = &inner[first_nl + 1..];
+        }
+    }
+    let trimmed_end = inner.trim_end_matches(&['\r', '\n'][..]);
+    if let Some(last_nl) = trimmed_end.rfind('\n') {
+        let last_line = trimmed_end[last_nl + 1..].trim_start();
+        if last_line.starts_with("```") || last_line.starts_with("~~~") {
+            inner = &trimmed_end[..last_nl];
+        } else {
+            inner = trimmed_end;
+        }
+    } else {
+        let only_line = trimmed_end.trim_start();
+        if only_line.starts_with("```") || only_line.starts_with("~~~") {
+            inner = "";
+        } else {
+            inner = trimmed_end;
+        }
+    }
+    inner
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct PreviewGalleyCacheKey {
+    active_tab_id: u64,
+    buf_rev: u64,
+    dialect: MarkdownDialect,
+    avail_w_bits: u32,
+    zoom_bits: u32,
+    theme: ThemeMode,
+    palette_preset: ColorPalettePreset,
+    atlas_size: [usize; 2],
+}
+
+fn build_cached_preview_inline_entry(
+    ui: &Ui,
+    inlines: &[PreviewInline],
+    font_size: f32,
+    base_bold: bool,
+    base_color: Color32,
+    pal: &AccentPalette,
+    wrap_width: f32,
+) -> (Arc<egui::Galley>, Option<String>) {
+    let job = build_preview_inline_job(inlines, font_size, base_bold, base_color, pal, wrap_width);
+    let galley = ui.fonts(|f| f.layout_job(job));
+    let has_emoji = inlines.iter().any(|it| {
+        it.text.as_bytes().iter().any(|&b| b >= 0xE2)
+            && it.text.chars().any(is_color_emoji_char)
+    });
+    let joined = if has_emoji {
+        Some(inlines.iter().map(|it| it.text.as_str()).collect())
+    } else {
+        None
+    };
+    (galley, joined)
+}
+
+fn render_cached_preview_entry(
+    ui: &mut Ui,
+    entry: &(Arc<egui::Galley>, Option<String>),
+    font_size: f32,
+) {
+    let (galley, joined_emoji_text) = entry;
+    let (rect, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.painter()
+            .galley(rect.min, Arc::clone(galley), Color32::TRANSPARENT);
+        if let Some(joined) = joined_emoji_text {
+            paint_galley_color_emojis(
+                ui.ctx(),
+                ui.painter(),
+                galley,
+                rect.min,
+                joined,
+                0,
+                usize::MAX,
+                font_size,
+            );
+        }
+    }
+}
+
 fn render_preview_pane(
     ui: &mut Ui,
     painter: &Painter,
@@ -2906,6 +3039,11 @@ fn render_preview_pane(
         72.0
     };
     let blocks = session.buffer.parse_preview_blocks_arc(session.dialect);
+    let active_tab_id = session
+        .tabs
+        .get(session.active_tab_index)
+        .map_or(0, |t| t.tab_id);
+    let buf_rev = session.buffer.revision();
     let inner_rect = Rect::from_min_max(
         Pos2::new(pane_rect.left() + 18.0, pane_rect.top() + top_pad),
         Pos2::new(pane_rect.right() - 18.0, pane_rect.bottom() - 8.0),
@@ -2922,13 +3060,104 @@ fn render_preview_pane(
         .auto_shrink([false, false])
         .show(&mut preview_ui, |ui| {
             let avail_w = ui.available_width();
+            let cache_id = Id::new(("accent_preview_galleys_cache", active_tab_id));
+            let atlas_size = ui.fonts(|f| f.font_image_size());
+            let key = PreviewGalleyCacheKey {
+                active_tab_id,
+                buf_rev,
+                dialect: session.dialect,
+                avail_w_bits: avail_w.to_bits(),
+                zoom_bits: z.to_bits(),
+                theme: session.theme,
+                palette_preset: session.palette_preset,
+                atlas_size,
+            };
+            let cached_entries = ui
+                .ctx()
+                .data_mut(|d| {
+                    d.get_temp::<(
+                        PreviewGalleyCacheKey,
+                        Arc<Vec<(Arc<egui::Galley>, Option<String>)>>,
+                    )>(cache_id)
+                    .and_then(|(k, v)| if k == key { Some(v) } else { None })
+                })
+                .unwrap_or_else(|| {
+                    let mut built = Vec::with_capacity(blocks.len());
+                    for block in blocks.iter() {
+                        match block {
+                            PreviewBlock::Heading {
+                                level,
+                                inlines,
+                                is_link_heading,
+                            } => {
+                                let h_size = match level {
+                                    1 => 25.0 * z,
+                                    2 => 20.0 * z,
+                                    3 => 16.5 * z,
+                                    _ => 14.5 * z,
+                                };
+                                let h_color = if *is_link_heading {
+                                    pal.accent_link
+                                } else if *level <= 2 {
+                                    pal.fg_heading
+                                } else {
+                                    pal.fg_subheading
+                                };
+                                built.push(build_cached_preview_inline_entry(
+                                    ui, inlines, h_size, true, h_color, pal, avail_w,
+                                ));
+                            }
+                            PreviewBlock::Paragraph { inlines } => {
+                                built.push(build_cached_preview_inline_entry(
+                                    ui,
+                                    inlines,
+                                    14.5 * z,
+                                    false,
+                                    pal.fg_primary,
+                                    pal,
+                                    avail_w,
+                                ));
+                            }
+                            PreviewBlock::List { items, .. } => {
+                                for item in items {
+                                    built.push(build_cached_preview_inline_entry(
+                                        ui,
+                                        &item.inlines,
+                                        14.5 * z,
+                                        false,
+                                        pal.fg_primary,
+                                        pal,
+                                        (avail_w - 28.0).max(40.0),
+                                    ));
+                                }
+                            }
+                            PreviewBlock::BlockQuote { inlines } => {
+                                built.push(build_cached_preview_inline_entry(
+                                    ui,
+                                    inlines,
+                                    14.0 * z,
+                                    false,
+                                    pal.markup_quote_fg,
+                                    pal,
+                                    (avail_w - 32.0).max(40.0),
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                    let post_atlas = ui.fonts(|f| f.font_image_size());
+                    let arc_built = Arc::new(built);
+                    if post_atlas == atlas_size {
+                        ui.ctx()
+                            .data_mut(|d| d.insert_temp(cache_id, (key, Arc::clone(&arc_built))));
+                    }
+                    arc_built
+                });
+
+            let mut entry_idx = 0usize;
             for block in blocks.iter() {
                 match block {
-                    PreviewBlock::Heading {
-                        level,
-                        inlines,
-                        is_link_heading,
-                    } => {
+                    PreviewBlock::Heading { level, .. } => {
                         ui.add_space(if *level == 1 { 14.0 } else { 8.0 });
                         let h_size = match level {
                             1 => 25.0 * z,
@@ -2936,89 +3165,81 @@ fn render_preview_pane(
                             3 => 16.5 * z,
                             _ => 14.5 * z,
                         };
-                        let h_color = if *is_link_heading {
-                            pal.accent_link
-                        } else if *level <= 2 {
-                            pal.fg_heading
-                        } else {
-                            pal.fg_subheading
-                        };
-                        let job = build_preview_inline_job(
-                            inlines,
-                            h_size,
-                            true,
-                            h_color,
-                            pal,
-                            avail_w,
-                        );
-                        render_preview_job_with_emojis(ui, inlines, job, h_size);
+                        if let Some(entry) = cached_entries.get(entry_idx) {
+                            render_cached_preview_entry(ui, entry, h_size);
+                        }
+                        entry_idx += 1;
                         if *level == 1 {
                             ui.add_space(4.0);
                             let (rule_rect, _) =
                                 ui.allocate_exact_size(Vec2::new(avail_w, 2.0), Sense::hover());
-                            ui.painter().line_segment(
-                                [rule_rect.left_center(), rule_rect.right_center()],
-                                Stroke::new(1.2, pal.fg_heading.gamma_multiply(0.38)),
-                            );
+                            if ui.is_rect_visible(rule_rect) {
+                                ui.painter().line_segment(
+                                    [rule_rect.left_center(), rule_rect.right_center()],
+                                    Stroke::new(1.2, pal.fg_heading.gamma_multiply(0.38)),
+                                );
+                            }
                         }
                         ui.add_space(6.0);
                     }
-                    PreviewBlock::Paragraph { inlines } => {
-                        let job = build_preview_inline_job(
-                            inlines,
-                            14.5 * z,
-                            false,
-                            pal.fg_primary,
-                            pal,
-                            avail_w,
-                        );
-                        render_preview_job_with_emojis(ui, inlines, job, 14.5 * z);
+                    PreviewBlock::Paragraph { .. } => {
+                        if let Some(entry) = cached_entries.get(entry_idx) {
+                            render_cached_preview_entry(ui, entry, 14.5 * z);
+                        }
+                        entry_idx += 1;
                         ui.add_space(10.0);
                     }
                     PreviewBlock::List { ordered, items } => {
                         for (idx, item) in items.iter().enumerate() {
+                            let item_entry = cached_entries.get(entry_idx);
+                            entry_idx += 1;
                             ui.horizontal(|ui| {
                                 if let Some(checked) = item.task {
                                     let (cb_rect, _) = ui.allocate_exact_size(
                                         Vec2::new(14.0, 14.0),
                                         Sense::hover(),
                                     );
-                                    if checked {
-                                        ui.painter().rect_filled(
-                                            cb_rect,
-                                            CornerRadius::same(3),
-                                            pal.markup_task_done,
-                                        );
-                                        ui.painter().line_segment(
-                                            [
-                                                Pos2::new(cb_rect.left() + 3.0, cb_rect.center().y),
-                                                Pos2::new(
-                                                    cb_rect.center().x - 0.5,
-                                                    cb_rect.bottom() - 3.5,
-                                                ),
-                                            ],
-                                            Stroke::new(1.6, Color32::WHITE),
-                                        );
-                                        ui.painter().line_segment(
-                                            [
-                                                Pos2::new(
-                                                    cb_rect.center().x - 0.5,
-                                                    cb_rect.bottom() - 3.5,
-                                                ),
-                                                Pos2::new(
-                                                    cb_rect.right() - 2.8,
-                                                    cb_rect.top() + 3.2,
-                                                ),
-                                            ],
-                                            Stroke::new(1.6, Color32::WHITE),
-                                        );
-                                    } else {
-                                        ui.painter().rect_stroke(
-                                            cb_rect,
-                                            CornerRadius::same(3),
-                                            Stroke::new(1.2, pal.fg_muted),
-                                            StrokeKind::Middle,
-                                        );
+                                    if ui.is_rect_visible(cb_rect) {
+                                        if checked {
+                                            ui.painter().rect_filled(
+                                                cb_rect,
+                                                CornerRadius::same(3),
+                                                pal.markup_task_done,
+                                            );
+                                            ui.painter().line_segment(
+                                                [
+                                                    Pos2::new(
+                                                        cb_rect.left() + 3.0,
+                                                        cb_rect.center().y,
+                                                    ),
+                                                    Pos2::new(
+                                                        cb_rect.center().x - 0.5,
+                                                        cb_rect.bottom() - 3.5,
+                                                    ),
+                                                ],
+                                                Stroke::new(1.6, Color32::WHITE),
+                                            );
+                                            ui.painter().line_segment(
+                                                [
+                                                    Pos2::new(
+                                                        cb_rect.center().x - 0.5,
+                                                        cb_rect.bottom() - 3.5,
+                                                    ),
+                                                    Pos2::new(
+                                                        cb_rect.right() - 2.8,
+                                                        cb_rect.top() + 3.2,
+                                                    ),
+                                                ],
+                                                Stroke::new(1.6, Color32::WHITE),
+                                            );
+                                        } else {
+                                            ui.painter().rect_stroke(
+                                                cb_rect,
+                                                CornerRadius::same(3),
+                                                Stroke::new(1.2, pal.fg_muted),
+                                                StrokeKind::Middle,
+                                            );
+                                        }
                                     }
                                 } else if *ordered {
                                     ui.label(
@@ -3033,15 +3254,9 @@ fn render_preview_pane(
                                             .color(pal.markup_list_marker),
                                     );
                                 }
-                                let job = build_preview_inline_job(
-                                    &item.inlines,
-                                    14.5 * z,
-                                    false,
-                                    pal.fg_primary,
-                                    pal,
-                                    avail_w - 28.0,
-                                );
-                                render_preview_job_with_emojis(ui, &item.inlines, job, 14.5 * z);
+                                if let Some(entry) = item_entry {
+                                    render_cached_preview_entry(ui, entry, 14.5 * z);
+                                }
                             });
                             ui.add_space(4.0);
                         }
@@ -3051,54 +3266,58 @@ fn render_preview_pane(
                         ui.add_space(6.0);
                         let (img_rect, _) =
                             ui.allocate_exact_size(Vec2::new(140.0, 44.0), Sense::hover());
-                        let box_r = Rect::from_min_max(
-                            Pos2::new(img_rect.left() + 32.0, img_rect.top()),
-                            Pos2::new(img_rect.left() + 114.0, img_rect.top() + 20.0),
-                        );
-                        ui.painter().rect_stroke(
-                            box_r,
-                            CornerRadius::same(2),
-                            Stroke::new(1.2, pal.fg_muted),
-                            StrokeKind::Middle,
-                        );
-                        let badge = Rect::from_center_size(box_r.center(), Vec2::new(13.0, 13.0));
-                        ui.painter()
-                            .rect_filled(badge, CornerRadius::same(2), pal.accent_link);
-                        ui.painter().text(
-                            badge.center(),
-                            Align2::CENTER_CENTER,
-                            "?",
-                            font_ui_bold(10.0),
-                            Color32::WHITE,
-                        );
-                        ui.painter().text(
-                            Pos2::new(box_r.center().x, box_r.bottom() + 12.0),
-                            Align2::CENTER_CENTER,
-                            alt,
-                            font_ui_regular(14.0 * z),
-                            pal.fg_primary,
-                        );
+                        if ui.is_rect_visible(img_rect) {
+                            let box_r = Rect::from_min_max(
+                                Pos2::new(img_rect.left() + 32.0, img_rect.top()),
+                                Pos2::new(img_rect.left() + 114.0, img_rect.top() + 20.0),
+                            );
+                            ui.painter().rect_stroke(
+                                box_r,
+                                CornerRadius::same(2),
+                                Stroke::new(1.2, pal.fg_muted),
+                                StrokeKind::Middle,
+                            );
+                            let badge =
+                                Rect::from_center_size(box_r.center(), Vec2::new(13.0, 13.0));
+                            ui.painter()
+                                .rect_filled(badge, CornerRadius::same(2), pal.accent_link);
+                            ui.painter().text(
+                                badge.center(),
+                                Align2::CENTER_CENTER,
+                                "?",
+                                font_ui_bold(10.0),
+                                Color32::WHITE,
+                            );
+                            ui.painter().text(
+                                Pos2::new(box_r.center().x, box_r.bottom() + 12.0),
+                                Align2::CENTER_CENTER,
+                                alt,
+                                font_ui_regular(14.0 * z),
+                                pal.fg_primary,
+                            );
+                        }
                         ui.add_space(8.0);
                     }
-                    PreviewBlock::BlockQuote { inlines } => {
+                    PreviewBlock::BlockQuote { .. } => {
+                        let quote_entry = cached_entries.get(entry_idx);
+                        entry_idx += 1;
                         ui.horizontal(|ui| {
+                            let bar_h = quote_entry
+                                .map(|(g, _)| g.size().y.max(24.0 * z))
+                                .unwrap_or(34.0 * z);
                             let (bar_r, _) =
-                                ui.allocate_exact_size(Vec2::new(4.0, 34.0 * z), Sense::hover());
-                            ui.painter().rect_filled(
-                                bar_r,
-                                CornerRadius::same(1),
-                                pal.markup_quote_bar,
-                            );
+                                ui.allocate_exact_size(Vec2::new(4.0, bar_h), Sense::hover());
+                            if ui.is_rect_visible(bar_r) {
+                                ui.painter().rect_filled(
+                                    bar_r,
+                                    CornerRadius::same(1),
+                                    pal.markup_quote_bar,
+                                );
+                            }
                             ui.add_space(6.0);
-                            let job = build_preview_inline_job(
-                                inlines,
-                                14.0 * z,
-                                false,
-                                pal.markup_quote_fg,
-                                pal,
-                                avail_w - 32.0,
-                            );
-                            render_preview_job_with_emojis(ui, inlines, job, 14.0 * z);
+                            if let Some(entry) = quote_entry {
+                                render_cached_preview_entry(ui, entry, 14.0 * z);
+                            }
                         });
                         ui.add_space(10.0);
                     }
@@ -3112,31 +3331,43 @@ fn render_preview_pane(
                             let box_h = draw_h + 18.0;
                             let (cb_rect, _) =
                                 ui.allocate_exact_size(Vec2::new(avail_w, box_h), Sense::hover());
-                            ui.painter()
-                                .rect_filled(cb_rect, CornerRadius::same(6), pal.bg_code_block);
-                            let img_rect =
-                                Rect::from_center_size(cb_rect.center(), Vec2::new(draw_w, draw_h));
-                            ui.painter().image(
-                                tex.id(),
-                                img_rect,
-                                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                                Color32::WHITE,
-                            );
+                            if ui.is_rect_visible(cb_rect) {
+                                ui.painter().rect_filled(
+                                    cb_rect,
+                                    CornerRadius::same(6),
+                                    pal.bg_code_block,
+                                );
+                                let img_rect = Rect::from_center_size(
+                                    cb_rect.center(),
+                                    Vec2::new(draw_w, draw_h),
+                                );
+                                ui.painter().image(
+                                    tex.id(),
+                                    img_rect,
+                                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                    Color32::WHITE,
+                                );
+                            }
                             ui.add_space(10.0);
                         } else {
                             let lines_count = code.lines().count().max(1);
                             let box_h = (lines_count as f32) * (20.0 * z) + 22.0;
                             let (cb_rect, _) =
                                 ui.allocate_exact_size(Vec2::new(avail_w, box_h), Sense::hover());
-                            ui.painter()
-                                .rect_filled(cb_rect, CornerRadius::same(4), pal.bg_code_block);
-                            ui.painter().text(
-                                Pos2::new(cb_rect.left() + 12.0, cb_rect.top() + 10.0),
-                                Align2::LEFT_TOP,
-                                code,
-                                font_editor_regular(13.0 * z),
-                                pal.markup_codeblock_fg,
-                            );
+                            if ui.is_rect_visible(cb_rect) {
+                                ui.painter().rect_filled(
+                                    cb_rect,
+                                    CornerRadius::same(4),
+                                    pal.bg_code_block,
+                                );
+                                ui.painter().text(
+                                    Pos2::new(cb_rect.left() + 12.0, cb_rect.top() + 10.0),
+                                    Align2::LEFT_TOP,
+                                    code,
+                                    font_editor_regular(13.0 * z),
+                                    pal.markup_codeblock_fg,
+                                );
+                            }
                             ui.add_space(10.0);
                         }
                     }
@@ -3147,90 +3378,93 @@ fn render_preview_pane(
                         let total_rows = 1 + rows.len();
                         let table_w = avail_w.max(200.0);
                         let table_h = (total_rows as f32) * row_h;
-
-                        let mut col_weights: Vec<f32> = headers
-                            .iter()
-                            .map(|h| (h.chars().count().max(6) + 4) as f32)
-                            .collect();
-                        for row in rows {
-                            for (c_idx, cell) in row.iter().enumerate() {
-                                if c_idx < col_weights.len() {
-                                    let w = (cell.chars().count().max(6) + 4) as f32;
-                                    if w > col_weights[c_idx] {
-                                        col_weights[c_idx] = w;
+                        let (t_rect, _) =
+                            ui.allocate_exact_size(Vec2::new(table_w, table_h), Sense::hover());
+                        if ui.is_rect_visible(t_rect) {
+                            let mut col_weights: Vec<f32> = headers
+                                .iter()
+                                .map(|h| (h.chars().count().max(6) + 4) as f32)
+                                .collect();
+                            for row in rows {
+                                for (c_idx, cell) in row.iter().enumerate() {
+                                    if c_idx < col_weights.len() {
+                                        let w = (cell.chars().count().max(6) + 4) as f32;
+                                        if w > col_weights[c_idx] {
+                                            col_weights[c_idx] = w;
+                                        }
                                     }
                                 }
                             }
-                        }
-                        let weight_sum: f32 = col_weights.iter().sum::<f32>().max(1.0);
-                        let col_widths: Vec<f32> = if col_weights.is_empty() {
-                            vec![table_w / (cols as f32); cols]
-                        } else {
-                            col_weights
-                                .iter()
-                                .map(|w| table_w * (*w / weight_sum))
-                                .collect()
-                        };
-
-                        let (t_rect, _) =
-                            ui.allocate_exact_size(Vec2::new(table_w, table_h), Sense::hover());
-                        let tp = ui.painter();
-
-                        // Header row + body rows
-                        for r_idx in 0..total_rows {
-                            let ry = t_rect.top() + (r_idx as f32) * row_h;
-                            let r_rect = Rect::from_min_max(
-                                Pos2::new(t_rect.left(), ry),
-                                Pos2::new(t_rect.right(), ry + row_h),
-                            );
-                            if r_idx == 0 {
-                                tp.rect_filled(r_rect, CornerRadius::ZERO, pal.bg_table_header);
-                            } else if r_idx % 2 == 1 {
-                                tp.rect_filled(
-                                    r_rect,
-                                    CornerRadius::ZERO,
-                                    pal.bg_code_block.gamma_multiply(0.45),
-                                );
-                            }
-                            let cells = if r_idx == 0 {
-                                headers.as_slice()
+                            let weight_sum: f32 = col_weights.iter().sum::<f32>().max(1.0);
+                            let col_widths: Vec<f32> = if col_weights.is_empty() {
+                                vec![table_w / (cols as f32); cols]
                             } else {
-                                rows[r_idx - 1].as_slice()
+                                col_weights
+                                    .iter()
+                                    .map(|w| table_w * (*w / weight_sum))
+                                    .collect()
                             };
-                            let mut cx = t_rect.left();
-                            for (c_idx, cell_text) in cells.iter().enumerate() {
-                                let cw = col_widths
-                                    .get(c_idx)
-                                    .copied()
-                                    .unwrap_or(table_w / (cols as f32));
-                                let cell_r = Rect::from_min_max(
-                                    Pos2::new(cx, ry),
-                                    Pos2::new(cx + cw, ry + row_h),
+                            let tp = ui.painter();
+
+                            // Header row + body rows
+                            for r_idx in 0..total_rows {
+                                let ry = t_rect.top() + (r_idx as f32) * row_h;
+                                let r_rect = Rect::from_min_max(
+                                    Pos2::new(t_rect.left(), ry),
+                                    Pos2::new(t_rect.right(), ry + row_h),
                                 );
-                                tp.rect_stroke(
-                                    cell_r,
-                                    CornerRadius::ZERO,
-                                    Stroke::new(1.0, pal.border_headerbar),
-                                    StrokeKind::Middle,
-                                );
-                                let cell_painter = tp.with_clip_rect(cell_r.shrink(2.0));
-                                paint_single_line_with_emojis(
-                                    ui.ctx(),
-                                    &cell_painter,
-                                    Pos2::new(cell_r.left() + 8.0, cell_r.center().y),
-                                    cell_text,
-                                    if r_idx == 0 {
-                                        font_ui_bold(13.5 * z)
-                                    } else {
-                                        font_ui_regular(13.5 * z)
-                                    },
-                                    if r_idx == 0 {
-                                        pal.markup_emphasis_fg
-                                    } else {
-                                        pal.fg_primary
-                                    },
-                                );
-                                cx += cw;
+                                if !ui.is_rect_visible(r_rect) {
+                                    continue;
+                                }
+                                if r_idx == 0 {
+                                    tp.rect_filled(r_rect, CornerRadius::ZERO, pal.bg_table_header);
+                                } else if r_idx % 2 == 1 {
+                                    tp.rect_filled(
+                                        r_rect,
+                                        CornerRadius::ZERO,
+                                        pal.bg_code_block.gamma_multiply(0.45),
+                                    );
+                                }
+                                let cells = if r_idx == 0 {
+                                    headers.as_slice()
+                                } else {
+                                    rows[r_idx - 1].as_slice()
+                                };
+                                let mut cx = t_rect.left();
+                                for (c_idx, cell_text) in cells.iter().enumerate() {
+                                    let cw = col_widths
+                                        .get(c_idx)
+                                        .copied()
+                                        .unwrap_or(table_w / (cols as f32));
+                                    let cell_r = Rect::from_min_max(
+                                        Pos2::new(cx, ry),
+                                        Pos2::new(cx + cw, ry + row_h),
+                                    );
+                                    tp.rect_stroke(
+                                        cell_r,
+                                        CornerRadius::ZERO,
+                                        Stroke::new(1.0, pal.border_headerbar),
+                                        StrokeKind::Middle,
+                                    );
+                                    let cell_painter = tp.with_clip_rect(cell_r.shrink(2.0));
+                                    paint_single_line_with_emojis(
+                                        ui.ctx(),
+                                        &cell_painter,
+                                        Pos2::new(cell_r.left() + 8.0, cell_r.center().y),
+                                        cell_text,
+                                        if r_idx == 0 {
+                                            font_ui_bold(13.5 * z)
+                                        } else {
+                                            font_ui_regular(13.5 * z)
+                                        },
+                                        if r_idx == 0 {
+                                            pal.markup_emphasis_fg
+                                        } else {
+                                            pal.fg_primary
+                                        },
+                                    );
+                                    cx += cw;
+                                }
                             }
                         }
                         ui.add_space(12.0);
@@ -3293,32 +3527,6 @@ fn build_preview_inline_job(
         );
     }
     job
-}
-
-fn render_preview_job_with_emojis(
-    ui: &mut Ui,
-    inlines: &[PreviewInline],
-    job: LayoutJob,
-    font_size: f32,
-) {
-    let galley = ui.fonts(|f| f.layout_job(job));
-    let resp = ui.add(egui::Label::new(Arc::clone(&galley)).wrap());
-    if inlines
-        .iter()
-        .any(|it| it.text.chars().any(is_color_emoji_char))
-    {
-        let joined: String = inlines.iter().map(|it| it.text.as_str()).collect();
-        paint_galley_color_emojis(
-            ui.ctx(),
-            ui.painter(),
-            &galley,
-            resp.rect.min,
-            &joined,
-            0,
-            usize::MAX,
-            font_size,
-        );
-    }
 }
 
 fn paint_single_line_with_emojis(
@@ -4394,31 +4602,66 @@ fn render_file_browser_dialog(
         StrokeKind::Middle,
     );
 
-    let mut dirs = Vec::new();
-    let mut files = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(&session.file_dialog_dir) {
-        for entry in rd.flatten() {
-            let p = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') {
-                continue;
-            }
-            if p.is_dir() {
-                dirs.push((name, p));
-            } else {
-                let ext = p
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                if matches!(ext.as_str(), "md" | "markdown" | "txt") {
-                    files.push((name, p));
+    type CachedDirEntries = Arc<(
+        Vec<(String, std::path::PathBuf)>,
+        Vec<(String, std::path::PathBuf)>,
+    )>;
+    let dir_cache_id = Id::new("accent_file_browser_dir_cache");
+    let now_inst = std::time::Instant::now();
+    let entries_arc: CachedDirEntries = ui
+        .ctx()
+        .data_mut(|d| {
+            d.get_temp::<(std::path::PathBuf, std::time::Instant, CachedDirEntries)>(dir_cache_id)
+                .and_then(|(cached_dir, ts, arc)| {
+                    if cached_dir == session.file_dialog_dir
+                        && now_inst.duration_since(ts) < std::time::Duration::from_millis(1500)
+                    {
+                        Some(arc)
+                    } else {
+                        None
+                    }
+                })
+        })
+        .unwrap_or_else(|| {
+            let mut dirs = Vec::new();
+            let mut files = Vec::new();
+            if let Ok(rd) = std::fs::read_dir(&session.file_dialog_dir) {
+                for entry in rd.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with('.') {
+                        continue;
+                    }
+                    let is_dir = entry
+                        .file_type()
+                        .map(|ft| ft.is_dir())
+                        .unwrap_or_else(|_| entry.path().is_dir());
+                    let p = entry.path();
+                    if is_dir {
+                        dirs.push((name, p));
+                    } else {
+                        let ext = p
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("")
+                            .to_ascii_lowercase();
+                        if matches!(ext.as_str(), "md" | "markdown" | "txt") {
+                            files.push((name, p));
+                        }
+                    }
                 }
             }
-        }
-    }
-    dirs.sort_by(|a, b| a.0.cmp(&b.0));
-    files.sort_by(|a, b| a.0.cmp(&b.0));
+            dirs.sort_by(|a, b| a.0.cmp(&b.0));
+            files.sort_by(|a, b| a.0.cmp(&b.0));
+            let arc = Arc::new((dirs, files));
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(
+                    dir_cache_id,
+                    (session.file_dialog_dir.clone(), now_inst, Arc::clone(&arc)),
+                );
+            });
+            arc
+        });
+    let (dirs, files) = (&entries_arc.0, &entries_arc.1);
 
     let mut list_ui = ui.new_child(
         egui::UiBuilder::new()
@@ -4531,17 +4774,34 @@ fn get_or_load_mermaid_texture(
     session: &Session,
     code: &str,
 ) -> (egui::TextureHandle, u32, u32) {
+    type GpuMermaidEntry = (
+        (u64, accent_session::MermaidTheme),
+        (egui::TextureHandle, u32, u32),
+    );
+    type GpuMermaidLru = Arc<Mutex<Vec<GpuMermaidEntry>>>;
+    const MAX_GPU_MERMAID_TEXTURES: usize = 16;
+
     let diagram = session.render_mermaid(code);
-    let cache_id = Id::new("accent_mermaid_gpu_textures");
+    let cache_id = Id::new("accent_mermaid_gpu_textures_lru");
     let key = (diagram.content_hash, diagram.theme);
-    if let Some(cached) = ctx.data_mut(|d| {
-        d.get_temp::<std::collections::HashMap<
-            (u64, accent_session::MermaidTheme),
-            (egui::TextureHandle, u32, u32),
-        >>(cache_id)
-        .and_then(|m| m.get(&key).cloned())
-    }) {
-        return cached;
+
+    let lru_arc: GpuMermaidLru = ctx.data_mut(|d| {
+        if let Some(existing) = d.get_temp::<GpuMermaidLru>(cache_id) {
+            existing
+        } else {
+            let created: GpuMermaidLru = Arc::new(Mutex::new(Vec::with_capacity(MAX_GPU_MERMAID_TEXTURES)));
+            d.insert_temp(cache_id, Arc::clone(&created));
+            created
+        }
+    });
+
+    if let Ok(mut lru) = lru_arc.lock() {
+        if let Some(pos) = lru.iter().position(|(k, _)| *k == key) {
+            let item = lru.remove(pos);
+            let val = item.1.clone();
+            lru.push(item);
+            return val;
+        }
     }
 
     let color_image = egui::ColorImage::from_rgba_unmultiplied(
@@ -4554,16 +4814,14 @@ fn get_or_load_mermaid_texture(
         egui::TextureOptions::LINEAR,
     );
     let entry = (tex, diagram.width, diagram.height);
-    ctx.data_mut(|d| {
-        let mut map = d
-            .get_temp::<std::collections::HashMap<
-                (u64, accent_session::MermaidTheme),
-                (egui::TextureHandle, u32, u32),
-            >>(cache_id)
-            .unwrap_or_default();
-        map.insert(key, entry.clone());
-        d.insert_temp(cache_id, map);
-    });
+    if let Ok(mut lru) = lru_arc.lock() {
+        if let Some(pos) = lru.iter().position(|(k, _)| *k == key) {
+            let _ = lru.remove(pos);
+        } else if lru.len() >= MAX_GPU_MERMAID_TEXTURES {
+            let _ = lru.remove(0);
+        }
+        lru.push((key, entry.clone()));
+    }
     entry
 }
 

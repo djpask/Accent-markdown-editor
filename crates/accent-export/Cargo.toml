@@ -8,6 +8,7 @@ license.workspace = true
 accent-core = { path = "../accent-core" }
 accent-mermaid = { path = "../accent-mermaid" }
 docx-rs.workspace = true
+flate2.workspace = true
 pulldown-cmark.workspace = true
 serde.workspace = true
 zip.workspace = true

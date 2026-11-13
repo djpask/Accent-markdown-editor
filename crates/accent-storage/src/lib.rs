@@ -56,6 +56,47 @@ pub fn current_utc_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Lightweight OS metadata fingerprint (`stat` / `GetFileAttributesExW`) used to detect whether
+/// a specific target file changed without reading or hashing its entire byte payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileMetaStamp {
+    pub exists: bool,
+    pub len: u64,
+    pub modified: Option<SystemTime>,
+    pub created: Option<SystemTime>,
+    pub inode: u64,
+}
+
+/// Probes `path` metadata in `O(1)` without opening or reading file contents.
+pub fn probe_file_meta(path: &Path) -> FileMetaStamp {
+    match fs::metadata(path) {
+        Ok(m) => {
+            #[cfg(unix)]
+            let inode = {
+                use std::os::unix::fs::MetadataExt;
+                m.ino()
+            };
+            #[cfg(not(unix))]
+            let inode = 0u64;
+
+            FileMetaStamp {
+                exists: true,
+                len: m.len(),
+                modified: m.modified().ok(),
+                created: m.created().ok(),
+                inode,
+            }
+        }
+        Err(_) => FileMetaStamp {
+            exists: false,
+            len: 0,
+            modified: None,
+            created: None,
+            inode: 0,
+        },
+    }
+}
+
 /// Computes a deterministic 128-bit (dual-64-bit FNV-1a + Sip-mix) hex digest of `content`.
 pub fn compute_content_hash(content: &str) -> String {
     let mut h1: u64 = 0xcbf2_9ce4_8422_2325;
@@ -238,8 +279,8 @@ pub fn write_journal_entry(
 ) -> io::Result<PathBuf> {
     fs::create_dir_all(recovery_dir)?;
     let jpath = recovery_dir.join(format!("journal-{}.json", entry.session_id));
-    let serialized = serde_json::to_string_pretty(entry)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let serialized =
+        serde_json::to_string(entry).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     atomic_save_fast(&jpath, &serialized)?;
     Ok(jpath)
 }
@@ -912,6 +953,8 @@ mod windows_watcher {
                 if let Ok(g) = watched_path.lock() {
                     active_target = g.clone();
                 }
+                let mut baseline_meta: Option<crate::FileMetaStamp> =
+                    active_target.as_deref().map(crate::probe_file_meta);
                 rearm_win32(&mut change_handle, &active_target);
                 let mut coalesce_pending = false;
 
@@ -933,10 +976,14 @@ mod windows_watcher {
                     }
                     if wait_rc == WAIT_TIMEOUT && coalesce_pending {
                         coalesce_pending = false;
-                        changed_flag.store(true, Ordering::SeqCst);
-                        if let Ok(w_guard) = waker.lock() {
-                            if let Some(ref cb) = *w_guard {
-                                cb();
+                        let cur_meta = active_target.as_deref().map(crate::probe_file_meta);
+                        if cur_meta != baseline_meta {
+                            baseline_meta = cur_meta;
+                            changed_flag.store(true, Ordering::SeqCst);
+                            if let Ok(w_guard) = waker.lock() {
+                                if let Some(ref cb) = *w_guard {
+                                    cb();
+                                }
                             }
                         }
                         continue;
@@ -951,6 +998,7 @@ mod windows_watcher {
                         let new_target = watched_path.lock().ok().and_then(|g| g.clone());
                         if new_target != active_target {
                             active_target = new_target;
+                            baseline_meta = active_target.as_deref().map(crate::probe_file_meta);
                             coalesce_pending = false;
                             rearm_win32(&mut change_handle, &active_target);
                         }
@@ -960,7 +1008,10 @@ mod windows_watcher {
                                 FindNextChangeNotification(change_handle);
                             }
                         }
-                        coalesce_pending = true;
+                        let cur_meta = active_target.as_deref().map(crate::probe_file_meta);
+                        if cur_meta != baseline_meta {
+                            coalesce_pending = true;
+                        }
                     } else {
                         break;
                     }

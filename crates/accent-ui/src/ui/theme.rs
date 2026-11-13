@@ -560,20 +560,51 @@ impl AccentPalette {
     }
 }
 
+static FAM_EDITOR_REG: std::sync::LazyLock<FontFamily> =
+    std::sync::LazyLock::new(|| FontFamily::Name("EditorRegular".into()));
+static FAM_EDITOR_BOLD: std::sync::LazyLock<FontFamily> =
+    std::sync::LazyLock::new(|| FontFamily::Name("EditorBold".into()));
+static FAM_EDITOR_ITALIC: std::sync::LazyLock<FontFamily> =
+    std::sync::LazyLock::new(|| FontFamily::Name("EditorItalic".into()));
+static FAM_EDITOR_BOLD_ITALIC: std::sync::LazyLock<FontFamily> =
+    std::sync::LazyLock::new(|| FontFamily::Name("EditorBoldItalic".into()));
+static FAM_UI_BOLD: std::sync::LazyLock<FontFamily> =
+    std::sync::LazyLock::new(|| FontFamily::Name("UiBold".into()));
+static FAM_PROSE_SERIF: std::sync::LazyLock<FontFamily> =
+    std::sync::LazyLock::new(|| FontFamily::Name("ProseSerif".into()));
+static FAM_PROSE_SERIF_BOLD: std::sync::LazyLock<FontFamily> =
+    std::sync::LazyLock::new(|| FontFamily::Name("ProseSerifBold".into()));
+static FAM_EMOJI_SLOT: std::sync::LazyLock<FontFamily> =
+    std::sync::LazyLock::new(|| FontFamily::Name("EmojiSlot".into()));
+
+#[inline]
+fn contains_ascii_icase(haystack: &str, needle_lower: &str) -> bool {
+    let hb = haystack.as_bytes();
+    let nb = needle_lower.as_bytes();
+    if nb.is_empty() {
+        return true;
+    }
+    if hb.len() < nb.len() {
+        return false;
+    }
+    hb.windows(nb.len())
+        .any(|w| w.iter().zip(nb.iter()).all(|(a, b)| a.to_ascii_lowercase() == *b))
+}
+
 pub fn font_editor_regular(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name("EditorRegular".into()))
+    FontId::new(size, FAM_EDITOR_REG.clone())
 }
 
 pub fn font_editor_bold(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name("EditorBold".into()))
+    FontId::new(size, FAM_EDITOR_BOLD.clone())
 }
 
 pub fn font_editor_italic(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name("EditorItalic".into()))
+    FontId::new(size, FAM_EDITOR_ITALIC.clone())
 }
 
 pub fn font_editor_bold_italic(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name("EditorBoldItalic".into()))
+    FontId::new(size, FAM_EDITOR_BOLD_ITALIC.clone())
 }
 
 pub fn font_ui_regular(size: f32) -> FontId {
@@ -581,18 +612,26 @@ pub fn font_ui_regular(size: f32) -> FontId {
 }
 
 pub fn font_ui_bold(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name("UiBold".into()))
+    FontId::new(size, FAM_UI_BOLD.clone())
 }
 
 pub fn resolve_prose_font(family: &str, size: f32, bold: bool, italic: bool) -> FontId {
-    let lower = family.to_ascii_lowercase();
-    if lower.contains("serif") || lower.contains("literata") || lower.contains("charter") || lower.contains("roman") {
+    if contains_ascii_icase(family, "serif")
+        || contains_ascii_icase(family, "literata")
+        || contains_ascii_icase(family, "charter")
+        || contains_ascii_icase(family, "roman")
+        || contains_ascii_icase(family, "georgia")
+    {
         if bold {
-            return FontId::new(size, FontFamily::Name("ProseSerifBold".into()));
+            return FontId::new(size, FAM_PROSE_SERIF_BOLD.clone());
         }
-        return FontId::new(size, FontFamily::Name("ProseSerif".into()));
+        return FontId::new(size, FAM_PROSE_SERIF.clone());
     }
-    if lower.contains("sans") || lower.contains("inter") || lower.contains("cantarell") {
+    if contains_ascii_icase(family, "sans")
+        || contains_ascii_icase(family, "inter")
+        || contains_ascii_icase(family, "cantarell")
+        || contains_ascii_icase(family, "segoe")
+    {
         if bold {
             return font_ui_bold(size);
         }
@@ -636,6 +675,7 @@ pub fn configure_fonts(ctx: &Context) {
             "/usr/share/fonts/gsfonts/NimbusMonoPS-Regular.otf",
             "/usr/share/fonts/gnu-free/FreeMono.otf",
             "/usr/share/fonts/Adwaita/AdwaitaMono-Regular.ttf",
+            "C:\\Windows\\Fonts\\consola.ttf",
         ],
     );
     let has_mono_bold = try_load_font(
@@ -645,6 +685,7 @@ pub fn configure_fonts(ctx: &Context) {
             "/usr/share/fonts/gsfonts/NimbusMonoPS-Bold.otf",
             "/usr/share/fonts/gnu-free/FreeMonoBold.otf",
             "/usr/share/fonts/Adwaita/AdwaitaMono-Bold.ttf",
+            "C:\\Windows\\Fonts\\consolab.ttf",
         ],
     );
     let has_mono_italic = try_load_font(
@@ -654,6 +695,7 @@ pub fn configure_fonts(ctx: &Context) {
             "/usr/share/fonts/gsfonts/NimbusMonoPS-Italic.otf",
             "/usr/share/fonts/gnu-free/FreeMonoOblique.otf",
             "/usr/share/fonts/Adwaita/AdwaitaMono-Italic.ttf",
+            "C:\\Windows\\Fonts\\consolai.ttf",
         ],
     );
     let has_mono_bold_italic = try_load_font(
@@ -663,6 +705,7 @@ pub fn configure_fonts(ctx: &Context) {
             "/usr/share/fonts/gsfonts/NimbusMonoPS-BoldItalic.otf",
             "/usr/share/fonts/gnu-free/FreeMonoBoldOblique.otf",
             "/usr/share/fonts/Adwaita/AdwaitaMono-BoldItalic.ttf",
+            "C:\\Windows\\Fonts\\consolaz.ttf",
         ],
     );
 
@@ -673,6 +716,7 @@ pub fn configure_fonts(ctx: &Context) {
             "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
             "/usr/share/fonts/gnu-free/FreeSans.otf",
             "/usr/share/fonts/gsfonts/NimbusSans-Regular.otf",
+            "C:\\Windows\\Fonts\\segoeui.ttf",
         ],
     );
     let has_ui_bold = try_load_font(
@@ -682,9 +726,12 @@ pub fn configure_fonts(ctx: &Context) {
             "/usr/share/fonts/gnu-free/FreeSansBold.otf",
             "/usr/share/fonts/gsfonts/NimbusSans-Bold.otf",
             "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
+            "C:\\Windows\\Fonts\\segoeuib.ttf",
         ],
     );
 
+    // Note: Do NOT load C:\Windows\Fonts\seguiemj.ttf (~20 MB COLR/CPAL font) into ab_glyph,
+    // because color emojis are masked as transparent slots and painted via RGBA textures.
     let has_sys_emoji = try_load_font(
         &mut defs,
         "sys_emoji_vec",
@@ -692,7 +739,6 @@ pub fn configure_fonts(ctx: &Context) {
             "/usr/share/fonts/noto/NotoEmoji-Regular.ttf",
             "/usr/share/fonts/TTF/NotoEmoji-Regular.ttf",
             "/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf",
-            "C:\\Windows\\Fonts\\seguiemj.ttf",
         ],
     );
     let has_sys_symbols = try_load_font(
@@ -745,10 +791,10 @@ pub fn configure_fonts(ctx: &Context) {
         fallback_mono.clone()
     };
     defs.families
-        .insert(FontFamily::Name("EmojiSlot".into()), emoji_slot_vec);
+        .insert(FAM_EMOJI_SLOT.clone(), emoji_slot_vec);
     reg_vec.extend(fallback_mono.clone());
     defs.families
-        .insert(FontFamily::Name("EditorRegular".into()), reg_vec.clone());
+        .insert(FAM_EDITOR_REG.clone(), reg_vec.clone());
     defs.families.insert(FontFamily::Monospace, reg_vec);
 
     let mut bold_vec = Vec::new();
@@ -758,8 +804,7 @@ pub fn configure_fonts(ctx: &Context) {
         bold_vec.push("editor_reg".to_string());
     }
     bold_vec.extend(fallback_mono.clone());
-    defs.families
-        .insert(FontFamily::Name("EditorBold".into()), bold_vec);
+    defs.families.insert(FAM_EDITOR_BOLD.clone(), bold_vec);
 
     let mut italic_vec = Vec::new();
     if has_mono_italic {
@@ -768,8 +813,7 @@ pub fn configure_fonts(ctx: &Context) {
         italic_vec.push("editor_reg".to_string());
     }
     italic_vec.extend(fallback_mono.clone());
-    defs.families
-        .insert(FontFamily::Name("EditorItalic".into()), italic_vec);
+    defs.families.insert(FAM_EDITOR_ITALIC.clone(), italic_vec);
 
     let mut bi_vec = Vec::new();
     if has_mono_bold_italic {
@@ -778,8 +822,7 @@ pub fn configure_fonts(ctx: &Context) {
         bi_vec.push("editor_bold".to_string());
     }
     bi_vec.extend(fallback_mono);
-    defs.families
-        .insert(FontFamily::Name("EditorBoldItalic".into()), bi_vec);
+    defs.families.insert(FAM_EDITOR_BOLD_ITALIC.clone(), bi_vec);
 
     if has_ui_reg {
         if let Some(prop) = defs.families.get_mut(&FontFamily::Proportional) {
@@ -793,6 +836,7 @@ pub fn configure_fonts(ctx: &Context) {
         &[
             "/usr/share/fonts/gnu-free/FreeSerif.otf",
             "/usr/share/fonts/gsfonts/NimbusRoman-Regular.otf",
+            "C:\\Windows\\Fonts\\georgia.ttf",
         ],
     );
     let has_serif_bold = try_load_font(
@@ -801,6 +845,7 @@ pub fn configure_fonts(ctx: &Context) {
         &[
             "/usr/share/fonts/gnu-free/FreeSerifBold.otf",
             "/usr/share/fonts/gsfonts/NimbusRoman-Bold.otf",
+            "C:\\Windows\\Fonts\\georgiab.ttf",
         ],
     );
 
@@ -811,16 +856,14 @@ pub fn configure_fonts(ctx: &Context) {
         ui_bold_vec.push("ui_reg".to_string());
     }
     ui_bold_vec.extend(fallback_prop.clone());
-    defs.families
-        .insert(FontFamily::Name("UiBold".into()), ui_bold_vec);
+    defs.families.insert(FAM_UI_BOLD.clone(), ui_bold_vec);
 
     let mut serif_vec = Vec::new();
     if has_serif_reg {
         serif_vec.push("serif_reg".to_string());
     }
     serif_vec.extend(fallback_prop.clone());
-    defs.families
-        .insert(FontFamily::Name("ProseSerif".into()), serif_vec);
+    defs.families.insert(FAM_PROSE_SERIF.clone(), serif_vec);
 
     let mut serif_bold_vec = Vec::new();
     if has_serif_bold {
@@ -830,18 +873,27 @@ pub fn configure_fonts(ctx: &Context) {
     }
     serif_bold_vec.extend(fallback_prop);
     defs.families
-        .insert(FontFamily::Name("ProseSerifBold".into()), serif_bold_vec);
+        .insert(FAM_PROSE_SERIF_BOLD.clone(), serif_bold_vec);
 
     ctx.set_fonts(defs);
 }
 
 pub fn apply_theme(ctx: &Context, preset: ColorPalettePreset, mode: ThemeMode) -> AccentPalette {
     let pal = AccentPalette::for_preset(preset, mode);
+    let theme_state_id = egui::Id::new("accent_applied_theme_state");
+    let already_applied = ctx.data_mut(|d| {
+        d.get_temp::<(ColorPalettePreset, ThemeMode)>(theme_state_id) == Some((preset, mode))
+    });
+    if already_applied {
+        return pal;
+    }
+
     let mut visuals = match mode {
         ThemeMode::Dark => Visuals::dark(),
         ThemeMode::Light | ThemeMode::Sepia => Visuals::light(),
     };
 
+    visuals.text_cursor.blink = false;
     visuals.panel_fill = pal.bg_canvas;
     visuals.window_fill = pal.bg_popover;
     visuals.extreme_bg_color = pal.bg_canvas;
@@ -859,6 +911,7 @@ pub fn apply_theme(ctx: &Context, preset: ColorPalettePreset, mode: ThemeMode) -
     visuals.selection.stroke = Stroke::new(1.5, pal.accent_orange);
 
     ctx.set_visuals(visuals);
+    ctx.data_mut(|d| d.insert_temp(theme_state_id, (preset, mode)));
     pal
 }
 
@@ -1441,49 +1494,7 @@ pub fn draw_toolbar_icon(painter: &Painter, center: Pos2, fg: Color32, idx: usiz
     }
 }
 
-/// Returns `true` if `ch` is a Unicode color emoji codepoint that should be rendered
-/// with full-color RGBA bitmap/vector graphics rather than `ab_glyph`'s monochrome outline.
-pub fn is_color_emoji_char(ch: char) -> bool {
-    let u = ch as u32;
-    if (0x1F3FB..=0x1F3FF).contains(&u) {
-        return false;
-    }
-    matches!(
-        u,
-        0x1F000..=0x1FAFF
-            | 0x2600..=0x27BF
-            | 0x231A..=0x231B
-            | 0x2328
-            | 0x23CF
-            | 0x23E9..=0x23F3
-            | 0x23F8..=0x23FA
-            | 0x25AA..=0x25AB
-            | 0x25B6
-            | 0x25C0
-            | 0x25FB..=0x25FE
-            | 0x2B05..=0x2B07
-            | 0x2B1B..=0x2B1C
-            | 0x2B50
-            | 0x2B55
-            | 0x203C
-            | 0x2049
-            | 0x2139
-            | 0x2934..=0x2935
-            | 0x3030
-            | 0x303D
-            | 0x3297
-            | 0x3299
-    )
-}
-
-/// Returns `true` if `ch` is an invisible emoji variation selector, ZWJ, or skin-tone combiner
-/// that should occupy zero visual width while preserving 1:1 character indices in `LayoutJob`.
-pub fn is_emoji_invisible_combiner(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0xFE0E | 0xFE0F | 0x200D | 0x20E3 | 0x1F3FB..=0x1F3FF
-    )
-}
+pub use accent_core::{is_color_emoji_char, is_emoji_invisible_combiner};
 
 fn system_color_emoji_font_bytes() -> Option<&'static [u8]> {
     static BYTES: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
@@ -1505,6 +1516,15 @@ fn system_color_emoji_font_bytes() -> Option<&'static [u8]> {
         .as_deref()
 }
 
+fn system_color_emoji_face() -> Option<&'static ttf_parser::Face<'static>> {
+    static FACE: std::sync::OnceLock<Option<ttf_parser::Face<'static>>> = std::sync::OnceLock::new();
+    FACE.get_or_init(|| {
+        let bytes = system_color_emoji_font_bytes()?;
+        ttf_parser::Face::parse(bytes, 0).ok()
+    })
+    .as_ref()
+}
+
 fn synthesize_fallback_emoji_image(ch: char) -> Option<egui::ColorImage> {
     let size = 64usize;
     let mut pixels = vec![Color32::TRANSPARENT; size * size];
@@ -1513,10 +1533,10 @@ fn synthesize_fallback_emoji_image(ch: char) -> Option<egui::ColorImage> {
     // Colored circles: 🔴 🟠 🟡 🟢 🔵 🟣 🟤 ⚫ ⚪
     let circle_colors: Option<([u8; 3], [u8; 3])> = match ch {
         '🔴' => Some(([0xEF, 0x44, 0x44], [0xB9, 0x1C, 0x1C])),
-        '🟠' => Some(([0xF9, 0x73, 0x16], [0xC2, 0x41, 0x0C])),
-        '🟡' => Some(([0xFA, 0xCC, 0x15], [0xCA, 0x8A, 0x04])),
+        '🟠' | '🦀' | '🔥' => Some(([0xF9, 0x73, 0x16], [0xC2, 0x41, 0x0C])),
+        '🟡' | '💡' => Some(([0xFA, 0xCC, 0x15], [0xCA, 0x8A, 0x04])),
         '🟢' => Some(([0x22, 0xC5, 0x5E], [0x15, 0x80, 0x3D])),
-        '🔵' => Some(([0x3B, 0x82, 0xF6], [0x1D, 0x4E, 0xD8])),
+        '🔵' | '🚀' => Some(([0x3B, 0x82, 0xF6], [0x1D, 0x4E, 0xD8])),
         '🟣' => Some(([0xA8, 0x55, 0xF7], [0x7E, 0x22, 0xCE])),
         '🟤' => Some(([0xA1, 0x62, 0x07], [0x71, 0x3F, 0x12])),
         '⚫' => Some(([0x37, 0x41, 0x51], [0x11, 0x18, 0x27])),
@@ -1524,7 +1544,27 @@ fn synthesize_fallback_emoji_image(ch: char) -> Option<egui::ColorImage> {
         _ => None,
     };
 
-    if let Some((fill, border)) = circle_colors {
+    let effective_circle = circle_colors.or_else(|| {
+        if !matches!(
+            ch,
+            '🟥' | '🟧' | '🟨' | '🟩' | '🟦' | '🟪' | '🟫' | '⬛' | '◼' | '▪' | '⬜' | '◻' | '▫' | '✅' | '❌' | '⚠' | '⭐' | '✨'
+        ) && is_color_emoji_char(ch)
+        {
+            let palette: [([u8; 3], [u8; 3]); 6] = [
+                ([0x3B, 0x82, 0xF6], [0x1D, 0x4E, 0xD8]),
+                ([0xF9, 0x73, 0x16], [0xC2, 0x41, 0x0C]),
+                ([0x22, 0xC5, 0x5E], [0x15, 0x80, 0x3D]),
+                ([0xFA, 0xCC, 0x15], [0xCA, 0x8A, 0x04]),
+                ([0xA8, 0x55, 0xF7], [0x7E, 0x22, 0xCE]),
+                ([0xEC, 0x48, 0x99], [0xBE, 0x18, 0x5D]),
+            ];
+            Some(palette[(ch as usize) % palette.len()])
+        } else {
+            None
+        }
+    });
+
+    if let Some((fill, border)) = effective_circle {
         let radius = 26.5_f32;
         for y in 0..size {
             for x in 0..size {
@@ -1588,20 +1628,18 @@ fn synthesize_fallback_emoji_image(ch: char) -> Option<egui::ColorImage> {
 /// Extracts a full-color RGBA emoji image from the system `NotoColorEmoji.ttf` (`CBDT`/`CBLC`
 /// bitmap tables via `ttf-parser`) or falls back to the built-in procedural RGBA renderer.
 pub fn load_color_emoji_image(ch: char) -> Option<egui::ColorImage> {
-    if let Some(font_bytes) = system_color_emoji_font_bytes() {
-        if let Ok(face) = ttf_parser::Face::parse(font_bytes, 0) {
-            if let Some(glyph_id) = face.glyph_index(ch) {
-                if let Some(raster) = face.glyph_raster_image(glyph_id, 128) {
-                    if let Ok(dyn_img) = image::load_from_memory(raster.data) {
-                        let rgba = dyn_img.to_rgba8();
-                        let w = rgba.width() as usize;
-                        let h = rgba.height() as usize;
-                        if w > 0 && h > 0 {
-                            return Some(egui::ColorImage::from_rgba_unmultiplied(
-                                [w, h],
-                                rgba.as_raw(),
-                            ));
-                        }
+    if let Some(face) = system_color_emoji_face() {
+        if let Some(glyph_id) = face.glyph_index(ch) {
+            if let Some(raster) = face.glyph_raster_image(glyph_id, 128) {
+                if let Ok(dyn_img) = image::load_from_memory(raster.data) {
+                    let rgba = dyn_img.to_rgba8();
+                    let w = rgba.width() as usize;
+                    let h = rgba.height() as usize;
+                    if w > 0 && h > 0 {
+                        return Some(egui::ColorImage::from_rgba_unmultiplied(
+                            [w, h],
+                            rgba.as_raw(),
+                        ));
                     }
                 }
             }
@@ -1636,9 +1674,11 @@ pub fn append_text_with_color_emojis(
     mut leading_space: f32,
     base_format: egui::TextFormat,
 ) {
-    if !text
-        .chars()
-        .any(|c| is_color_emoji_char(c) || is_emoji_invisible_combiner(c))
+    // Fast byte scan: all emoji & invisible emoji combiners (>= U+200D) start with UTF-8 lead byte >= 0xE2
+    if !text.as_bytes().iter().any(|&b| b >= 0xE2)
+        || !text
+            .chars()
+            .any(|c| is_color_emoji_char(c) || is_emoji_invisible_combiner(c))
     {
         job.append(text, leading_space, base_format);
         return;
@@ -1659,7 +1699,7 @@ pub fn append_text_with_color_emojis(
             }
             let mut emoji_fmt = base_format.clone();
             emoji_fmt.color = Color32::TRANSPARENT;
-            emoji_fmt.font_id = FontId::new(base_size, FontFamily::Name("EmojiSlot".into()));
+            emoji_fmt.font_id = FontId::new(base_size, FAM_EMOJI_SLOT.clone());
             emoji_fmt.extra_letter_spacing = base_size * 0.42;
             job.append(&text[byte_idx..byte_idx + ch_len], leading_space, emoji_fmt);
             leading_space = 0.0;
@@ -1675,7 +1715,7 @@ pub fn append_text_with_color_emojis(
             }
             let mut comb_fmt = base_format.clone();
             comb_fmt.color = Color32::TRANSPARENT;
-            comb_fmt.font_id = FontId::new(0.01, FontFamily::Name("EmojiSlot".into()));
+            comb_fmt.font_id = FontId::new(0.01, FAM_EMOJI_SLOT.clone());
             job.append(&text[byte_idx..byte_idx + ch_len], leading_space, comb_fmt);
             leading_space = 0.0;
             normal_start = byte_idx + ch_len;
@@ -1686,19 +1726,21 @@ pub fn append_text_with_color_emojis(
     }
 }
 
-/// Paints full-color RGBA emoji textures over the transparent emoji character slots in `galley`.
-pub fn paint_galley_color_emojis(
+/// Paints full-color RGBA emoji textures over the transparent emoji character slots in `galley`,
+/// starting at `text_from_start` which corresponds to character offset `start_char_idx`.
+pub fn paint_galley_color_emojis_from(
     ctx: &Context,
     painter: &Painter,
     galley: &egui::Galley,
     galley_pos: Pos2,
-    text: &str,
+    text_from_start: &str,
+    start_char_idx: usize,
     min_char_idx: usize,
     max_char_idx: usize,
     default_font_size: f32,
 ) {
-    let mut char_idx = 0usize;
-    for ch in text.chars() {
+    let mut char_idx = start_char_idx;
+    for ch in text_from_start.chars() {
         if char_idx > max_char_idx {
             break;
         }
@@ -1734,6 +1776,30 @@ pub fn paint_galley_color_emojis(
         }
         char_idx += 1;
     }
+}
+
+/// Paints full-color RGBA emoji textures over the transparent emoji character slots in `galley`.
+pub fn paint_galley_color_emojis(
+    ctx: &Context,
+    painter: &Painter,
+    galley: &egui::Galley,
+    galley_pos: Pos2,
+    text: &str,
+    min_char_idx: usize,
+    max_char_idx: usize,
+    default_font_size: f32,
+) {
+    paint_galley_color_emojis_from(
+        ctx,
+        painter,
+        galley,
+        galley_pos,
+        text,
+        0,
+        min_char_idx,
+        max_char_idx,
+        default_font_size,
+    );
 }
 
 #[cfg(test)]

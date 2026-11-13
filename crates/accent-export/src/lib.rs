@@ -1095,7 +1095,8 @@ pub fn export_to_pdf(blocks: &[PreviewBlock], title: &str) -> Vec<u8> {
             PreviewBlock::CodeBlock { info, code } => {
                 let lang = info.split_whitespace().next().unwrap_or("");
                 if lang.eq_ignore_ascii_case("mermaid") {
-                    let rendered = mermaid_cache.get_or_render_themed(code, MermaidTheme::Light);
+                    let rendered =
+                        mermaid_cache.get_or_render_screen_themed(code, MermaidTheme::Light);
                     if rendered.width > 0 && rendered.height > 0 && !rendered.rgba_pixels.is_empty()
                     {
                         let img_idx = embedded_images.len() + 1;
@@ -1239,19 +1240,31 @@ pub fn export_to_pdf(blocks: &[PreviewBlock], title: &str) -> Vec<u8> {
     objects.push(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Oblique /Encoding /WinAnsiEncoding >>".to_vec());
     objects.push(b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>".to_vec());
 
-    // Image XObjects
+    // Image XObjects (FlateDecode zlib-compressed RGB24 stream)
     let mut xobj_dict = String::new();
     for (idx, img) in embedded_images.iter().enumerate() {
         let obj_id = img_start_obj + idx;
         xobj_dict.push_str(&format!("/{} {} 0 R ", img.name, obj_id));
+        let compressed_rgb = {
+            let mut enc =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+            let _ = enc.write_all(&img.rgb_bytes);
+            enc.finish().unwrap_or_default()
+        };
+        let use_flate = !compressed_rgb.is_empty() && compressed_rgb.len() < img.rgb_bytes.len();
+        let (filter_clause, payload): (&str, &[u8]) = if use_flate {
+            (" /Filter /FlateDecode", &compressed_rgb)
+        } else {
+            ("", &img.rgb_bytes)
+        };
         let mut obj_bytes = format!(
-            "<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length {} >>\nstream\n",
+            "<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB /BitsPerComponent 8{filter_clause} /Length {} >>\nstream\n",
             img.width,
             img.height,
-            img.rgb_bytes.len()
+            payload.len()
         )
         .into_bytes();
-        obj_bytes.extend_from_slice(&img.rgb_bytes);
+        obj_bytes.extend_from_slice(payload);
         obj_bytes.extend_from_slice(b"\nendstream");
         objects.push(obj_bytes);
     }

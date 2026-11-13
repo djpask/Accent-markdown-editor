@@ -36,6 +36,7 @@ dependencies = [
  "accent-core",
  "accent-mermaid",
  "docx-rs",
+ "flate2",
  "pulldown-cmark",
  "serde",
  "zip 2.6.1",

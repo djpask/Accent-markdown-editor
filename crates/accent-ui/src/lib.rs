@@ -124,7 +124,9 @@ impl eframe::App for AccentApp {
             &mut self.sync_cursor_to_widget,
         );
         let atlas_after = ctx.fonts(|f| f.font_image_size());
-        let had_actions = !actions.is_empty();
+        let had_non_cursor_actions = actions
+            .iter()
+            .any(|a| !matches!(a, Action::SetSelection(_, _)));
         for action in actions {
             let current_tab_id = self
                 .session
@@ -188,17 +190,27 @@ impl eframe::App for AccentApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.session.fullscreen));
         }
 
-        // Phase 4: Poll < 300ms debounced Write-Ahead Recovery Journal (WAL) flush
+        // Phase 4: Poll < 300ms debounced Write-Ahead Recovery Journal (WAL) and settings flushes
         let now = Instant::now();
         let _ = self.session.poll_journal_flush(now);
-        if let Some(wait) = self.session.time_until_next_journal_flush(now) {
+        self.session.poll_settings_flush(now);
+        let next_wait = match (
+            self.session.time_until_next_journal_flush(now),
+            self.session.time_until_next_settings_flush(now),
+        ) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        if let Some(wait) = next_wait {
             ctx.request_repaint_after(
                 wait.max(Duration::from_millis(16))
-                    .min(Duration::from_millis(250)),
+                    .min(Duration::from_millis(300)),
             );
         }
 
-        if had_actions || atlas_before != atlas_after || self.frame_count <= 3 {
+        if had_non_cursor_actions || atlas_before != atlas_after || self.frame_count <= 3 {
             ctx.request_repaint();
         }
     }
@@ -228,7 +240,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const OFFICIAL_ICON_SVG: &str = include_str!("../resources/icon.svg");
 
 pub fn load_app_icon() -> Option<egui::IconData> {
-    let (width, height, rgba, _png) = accent_mermaid::rasterize_svg(OFFICIAL_ICON_SVG, 0.25)?;
+    let (width, height, rgba) = accent_mermaid::rasterize_svg_rgba(OFFICIAL_ICON_SVG, 0.25)?;
     Some(egui::IconData {
         rgba,
         width,

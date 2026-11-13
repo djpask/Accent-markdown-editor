@@ -20,8 +20,9 @@ comrak = { version = "0.35", default-features = false }
 fontdb = "0.23"
 ttf-parser = "0.25"
 pulldown-cmark = "0.12"
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
 egui = "0.31"
 image = { version = "0.25", default-features = false, features = ["png"] }

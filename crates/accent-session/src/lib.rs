@@ -576,6 +576,41 @@ impl Default for SystemFontCatalog {
 }
 
 impl SystemFontCatalog {
+    /// Instant zero-I/O font catalog populated at cold startup so `Session::default()` never
+    /// scans hundreds of OS font files synchronously before the window maps.
+    /// Full system font enumeration runs lazily via [`SystemFontCatalog::discover`] when the
+    /// Preferences dialog is opened.
+    pub fn default_curated() -> Self {
+        let prose_presets = vec![
+            "Nimbus Mono PS".to_string(),
+            "Segoe UI".to_string(),
+            "Inter".to_string(),
+            "Literata".to_string(),
+            "Georgia".to_string(),
+            "Adwaita Sans".to_string(),
+            "Cantarell".to_string(),
+            "FreeSans".to_string(),
+        ];
+        let code_presets = vec![
+            "Nimbus Mono PS".to_string(),
+            "Consolas".to_string(),
+            "JetBrains Mono".to_string(),
+            "Cascadia Mono".to_string(),
+            "Adwaita Mono".to_string(),
+            "DejaVu Sans Mono".to_string(),
+            "Courier New".to_string(),
+        ];
+        let mut set = BTreeSet::new();
+        for f in prose_presets.iter().chain(code_presets.iter()) {
+            set.insert(f.clone());
+        }
+        Self {
+            families: set.into_iter().collect(),
+            prose_presets,
+            code_presets,
+        }
+    }
+
     pub fn discover() -> Self {
         static CATALOG_CACHE: std::sync::OnceLock<SystemFontCatalog> = std::sync::OnceLock::new();
         CATALOG_CACHE.get_or_init(Self::discover_uncached).clone()
@@ -597,20 +632,26 @@ impl SystemFontCatalog {
 
         let prose_curated = [
             "Nimbus Mono PS",
+            "Segoe UI",
             "Adwaita Sans",
             "Cantarell",
             "Inter",
             "Literata",
+            "Georgia",
+            "Calibri",
             "Charter",
             "FreeSerif",
             "FreeSans",
         ];
         let code_curated = [
             "Nimbus Mono PS",
+            "Consolas",
+            "Cascadia Mono",
             "JetBrains Mono",
             "Adwaita Mono",
             "FreeMono",
             "DejaVu Sans Mono",
+            "Courier New",
         ];
 
         let mut prose_presets = Vec::new();
@@ -633,7 +674,10 @@ impl SystemFontCatalog {
         }
         for fam in set.iter().filter(|f| {
             let l = f.to_ascii_lowercase();
-            l.contains("mono") || l.contains("code") || l.contains("courier")
+            l.contains("mono")
+                || l.contains("code")
+                || l.contains("consolas")
+                || l.contains("courier")
         }) {
             if !code_presets.contains(fam) {
                 code_presets.push(fam.clone());
@@ -643,6 +687,8 @@ impl SystemFontCatalog {
         let families: Vec<String> = if set.is_empty() {
             vec![
                 "Nimbus Mono PS".to_string(),
+                "Segoe UI".to_string(),
+                "Consolas".to_string(),
                 "Adwaita Sans".to_string(),
                 "FreeSans".to_string(),
                 "FreeMono".to_string(),
@@ -846,6 +892,12 @@ impl Default for PersistedSettings {
 
 /// Debounce threshold for *Save-while-typing* WAL journaling (`< 300ms` per `SPECS.md` Pillar 8).
 pub const JOURNAL_DEBOUNCE_MS: u64 = 200;
+/// Debounce threshold for rapid settings mutations (zoom wheel, slider drags, tab cycling).
+pub const SETTINGS_DEBOUNCE_MS: u64 = 250;
+
+fn default_sample_file_path() -> PathBuf {
+    std::env::temp_dir().join("esempio_accent.md")
+}
 
 /// Represents an open document tab with its own isolated buffer, undo/redo stack, cursor, dirty state, and WAL metadata.
 #[derive(Debug, Clone)]
@@ -855,6 +907,8 @@ pub struct DocumentTab {
     pub current_file_path: Option<PathBuf>,
     pub is_dirty: bool,
     pub original_file_hash: Option<String>,
+    pub original_file_len: Option<usize>,
+    pub last_checked_disk_meta: Option<accent_storage::FileMetaStamp>,
     pub last_edit_instant: Option<std::time::Instant>,
     pub last_edit_utc_ms: u64,
     pub journal_pending_flush: bool,
@@ -899,9 +953,13 @@ pub struct Session {
     pub config_path: PathBuf,
     pub recovery_dir: PathBuf,
     pub original_file_hash: Option<String>,
+    pub original_file_len: Option<usize>,
+    pub last_checked_disk_meta: Option<accent_storage::FileMetaStamp>,
     pub last_edit_instant: Option<std::time::Instant>,
     pub last_edit_utc_ms: u64,
     pub journal_pending_flush: bool,
+    pub settings_pending_flush: bool,
+    pub last_settings_change: Option<std::time::Instant>,
     pub recovered_from_crash: bool,
     pub recovery_banner_active: bool,
     pub disk_modified_banner_active: bool,
@@ -922,6 +980,7 @@ pub struct Session {
     pub line_width: LineWidthMode,
     pub typography: TypographyConfig,
     pub font_catalog: SystemFontCatalog,
+    pub font_catalog_loaded: bool,
     pub preview_active: bool,
     pub preview_layout: PreviewLayout,
     pub view_while_typing: bool,
@@ -937,6 +996,15 @@ pub struct Session {
     pub overlay: ActiveOverlay,
     /// Optional word count override for legacy snapshot harness only (`None` in interactive runtime)
     pub display_word_count_override: Option<usize>,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        if self.settings_pending_flush {
+            let _ = self.save_settings();
+            self.settings_pending_flush = false;
+        }
+    }
 }
 
 impl Default for Session {
@@ -970,7 +1038,7 @@ impl Session {
 
     pub fn with_config_and_recovery(config_path: PathBuf, recovery_dir: PathBuf) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let sample_path = PathBuf::from("/tmp/esempio_accent.md");
+        let sample_path = default_sample_file_path();
         if !sample_path.exists() {
             let _ = std::fs::write(&sample_path, DEFAULT_SAMPLE_MARKDOWN);
         }
@@ -985,13 +1053,21 @@ impl Session {
             }
         }
         let default_buf = DocumentBuffer::default();
-        let initial_hash = Some(accent_storage::compute_content_hash(&default_buf.text()));
+        let initial_len = Some(default_buf.len_bytes());
+        let initial_hash = Some(accent_storage::compute_content_hash(default_buf.as_str()));
+        let initial_meta = Some(accent_storage::probe_file_meta(&sample_path));
+        let default_export_path = std::env::temp_dir()
+            .join("esempio_accent.pdf")
+            .to_string_lossy()
+            .to_string();
         let initial_tab = DocumentTab {
             tab_id: 1,
             document_title: "esempio_accent.md".to_string(),
             current_file_path: Some(sample_path.clone()),
             is_dirty: false,
             original_file_hash: initial_hash.clone(),
+            original_file_len: initial_len,
+            last_checked_disk_meta: initial_meta,
             last_edit_instant: None,
             last_edit_utc_ms: 0,
             journal_pending_flush: false,
@@ -1013,9 +1089,13 @@ impl Session {
             config_path,
             recovery_dir,
             original_file_hash: initial_hash,
+            original_file_len: initial_len,
+            last_checked_disk_meta: initial_meta,
             last_edit_instant: None,
             last_edit_utc_ms: 0,
             journal_pending_flush: false,
+            settings_pending_flush: false,
+            last_settings_change: None,
             recovered_from_crash: false,
             recovery_banner_active: false,
             disk_modified_banner_active: false,
@@ -1024,7 +1104,7 @@ impl Session {
             file_dialog_dir: cwd,
             file_dialog_input: "documento.md".to_string(),
             selected_export_format: ExportFormat::Pdf,
-            export_output_path: "/tmp/esempio_accent.pdf".to_string(),
+            export_output_path: default_export_path,
             export_syntax_highlight: true,
             mermaid_cache: RefCell::new(MermaidCache::new()),
             status_message: None,
@@ -1035,7 +1115,8 @@ impl Session {
             dialect: MarkdownDialect::Gfm,
             line_width: LineWidthMode::Compact,
             typography: TypographyConfig::default(),
-            font_catalog: SystemFontCatalog::discover(),
+            font_catalog: SystemFontCatalog::default_curated(),
+            font_catalog_loaded: false,
             preview_active: false,
             preview_layout: PreviewLayout::HalfWidth,
             view_while_typing: true,
@@ -1057,6 +1138,20 @@ impl Session {
         session
     }
 
+    /// Lazily enumerates system fonts on first open of the Preferences dialog.
+    pub fn ensure_font_catalog_loaded(&mut self) {
+        if !self.font_catalog_loaded {
+            self.font_catalog = SystemFontCatalog::discover();
+            self.font_catalog_loaded = true;
+        }
+    }
+
+    fn detach_active_slot_history(&mut self) {
+        if let Some(slot) = self.tabs.get_mut(self.active_tab_index) {
+            slot.buffer.release_shared_history();
+        }
+    }
+
     /// Synchronizes the top-level active document fields of `Session` into `self.tabs[self.active_tab_index]`.
     pub fn sync_active_tab_to_slot(&mut self) {
         if self.tabs.is_empty() {
@@ -1068,6 +1163,8 @@ impl Session {
                 current_file_path: self.current_file_path.clone(),
                 is_dirty: self.is_dirty,
                 original_file_hash: self.original_file_hash.clone(),
+                original_file_len: self.original_file_len,
+                last_checked_disk_meta: self.last_checked_disk_meta,
                 last_edit_instant: self.last_edit_instant,
                 last_edit_utc_ms: self.last_edit_utc_ms,
                 journal_pending_flush: self.journal_pending_flush,
@@ -1094,6 +1191,8 @@ impl Session {
         if slot.original_file_hash != self.original_file_hash {
             slot.original_file_hash = self.original_file_hash.clone();
         }
+        slot.original_file_len = self.original_file_len;
+        slot.last_checked_disk_meta = self.last_checked_disk_meta;
         slot.last_edit_instant = self.last_edit_instant;
         slot.last_edit_utc_ms = self.last_edit_utc_ms;
         slot.journal_pending_flush = self.journal_pending_flush;
@@ -1103,14 +1202,7 @@ impl Session {
         if slot.dismissed_disk_hash != self.dismissed_disk_hash {
             slot.dismissed_disk_hash = self.dismissed_disk_hash.clone();
         }
-        if !std::ptr::eq(slot.buffer.as_str(), self.buffer.as_str())
-            || slot.buffer.revision() != self.buffer.revision()
-        {
-            slot.buffer = self.buffer.clone();
-        } else {
-            let (p, s) = self.buffer.raw_selection();
-            slot.buffer.set_selection(p, s);
-        }
+        slot.buffer = self.buffer.clone();
     }
 
     /// Loads `self.tabs[self.active_tab_index]` into the top-level active document fields of `Session`.
@@ -1126,6 +1218,8 @@ impl Session {
         self.current_file_path = slot.current_file_path.clone();
         self.is_dirty = slot.is_dirty;
         self.original_file_hash = slot.original_file_hash.clone();
+        self.original_file_len = slot.original_file_len;
+        self.last_checked_disk_meta = slot.last_checked_disk_meta;
         self.last_edit_instant = slot.last_edit_instant;
         self.last_edit_utc_ms = slot.last_edit_utc_ms;
         self.journal_pending_flush = slot.journal_pending_flush;
@@ -1146,11 +1240,19 @@ impl Session {
             self.disk_modified_banner_active = false;
             return false;
         };
+        let cur_meta = accent_storage::probe_file_meta(path);
+        if !cur_meta.exists {
+            return false;
+        }
+        if !self.disk_modified_banner_active && self.last_checked_disk_meta == Some(cur_meta) {
+            return false;
+        }
         let Ok(disk_content) = std::fs::read_to_string(path) else {
             return false;
         };
+        let disk_len = disk_content.len();
         let disk_hash = accent_storage::compute_content_hash(&disk_content);
-        let buf_hash = accent_storage::compute_content_hash(&self.buffer.text());
+        let buf_hash = accent_storage::compute_content_hash(self.buffer.as_str());
 
         if self.original_file_hash.as_deref() == Some(disk_hash.as_str()) || disk_hash == buf_hash {
             if self.disk_modified_banner_active {
@@ -1158,11 +1260,14 @@ impl Session {
             }
             if !self.is_dirty {
                 self.original_file_hash = Some(disk_hash);
+                self.original_file_len = Some(disk_len);
             }
+            self.last_checked_disk_meta = Some(cur_meta);
             return false;
         }
 
         if self.dismissed_disk_hash.as_deref() == Some(disk_hash.as_str()) {
+            self.last_checked_disk_meta = Some(cur_meta);
             return false;
         }
 
@@ -1269,7 +1374,7 @@ impl Session {
     }
 
     fn paths_match(a: &std::path::Path, b: &std::path::Path) -> bool {
-        accent_storage::normalize_path(a) == accent_storage::normalize_path(b)
+        a == b || accent_storage::normalize_path(a) == accent_storage::normalize_path(b)
     }
 
     fn is_single_untouched_placeholder(&self) -> bool {
@@ -1277,8 +1382,7 @@ impl Session {
             && !self.is_dirty
             && !self.tabs[0].is_dirty
             && (self.current_file_path.is_none()
-                || self.current_file_path.as_deref()
-                    == Some(std::path::Path::new("/tmp/esempio_accent.md")))
+                || self.current_file_path.as_deref() == Some(default_sample_file_path().as_path()))
     }
 
     fn apply_journal_to_tab(tab: &mut DocumentTab, entry: accent_storage::RecoveryJournalEntry) {
@@ -1294,6 +1398,8 @@ impl Session {
         tab.document_title = title;
         tab.current_file_path = entry.target_path;
         tab.original_file_hash = entry.original_file_hash;
+        tab.original_file_len = None;
+        tab.last_checked_disk_meta = None;
         tab.is_dirty = true;
         tab.journal_pending_flush = false;
         tab.recovered_from_crash = true;
@@ -1304,6 +1410,13 @@ impl Session {
     /// Snapshots all user preferences, recent files, and open tabs into `PersistedSettings`.
     pub fn to_persisted_settings(&self) -> PersistedSettings {
         let mut open_tab_files = Vec::new();
+        let mut seen_norm = BTreeSet::new();
+        let cur_norm = self
+            .current_file_path
+            .as_deref()
+            .map(accent_storage::normalize_path);
+        let mut active_tab_index = 0usize;
+
         for (idx, tab) in self.tabs.iter().enumerate() {
             let path_opt = if idx == self.active_tab_index {
                 self.current_file_path.as_ref()
@@ -1311,19 +1424,20 @@ impl Session {
                 tab.current_file_path.as_ref()
             };
             if let Some(p) = path_opt {
-                if !open_tab_files
-                    .iter()
-                    .any(|existing: &PathBuf| Self::paths_match(existing, p))
-                {
+                let norm = accent_storage::normalize_path(p);
+                if seen_norm.insert(norm.clone()) {
+                    if cur_norm.as_ref() == Some(&norm) {
+                        active_tab_index = open_tab_files.len();
+                    }
                     open_tab_files.push(p.clone());
+                } else if cur_norm.as_ref() == Some(&norm) {
+                    active_tab_index = open_tab_files
+                        .iter()
+                        .position(|existing| Self::paths_match(existing, p))
+                        .unwrap_or(0);
                 }
             }
         }
-        let active_tab_index = self
-            .current_file_path
-            .as_ref()
-            .and_then(|cur| open_tab_files.iter().position(|p| Self::paths_match(p, cur)))
-            .unwrap_or(0);
 
         PersistedSettings {
             theme: self.theme,
@@ -1435,6 +1549,8 @@ impl Session {
                         current_file_path: Some(tab_path.clone()),
                         is_dirty: false,
                         original_file_hash: Some(accent_storage::compute_content_hash(&content)),
+                        original_file_len: Some(content.len()),
+                        last_checked_disk_meta: Some(accent_storage::probe_file_meta(tab_path)),
                         last_edit_instant: None,
                         last_edit_utc_ms: 0,
                         journal_pending_flush: false,
@@ -1472,8 +1588,10 @@ impl Session {
                             self.file_dialog_dir = parent.to_path_buf();
                         }
                     }
+                    self.last_checked_disk_meta = Some(accent_storage::probe_file_meta(&last_file));
                     self.current_file_path = Some(last_file);
                     self.original_file_hash = Some(accent_storage::compute_content_hash(&content));
+                    self.original_file_len = Some(content.len());
                     let mut fresh_buf = DocumentBuffer::from_str_content(&content);
                     fresh_buf.set_cursor(0);
                     self.buffer = fresh_buf;
@@ -1493,7 +1611,7 @@ impl Session {
         };
         self.mermaid_cache
             .borrow_mut()
-            .get_or_render_themed(source, m_theme)
+            .get_or_render_screen_themed(source, m_theme)
     }
 
     fn update_default_export_path(&mut self) {
@@ -1501,11 +1619,12 @@ impl Session {
             .document_title
             .trim_end_matches(".md")
             .trim_end_matches(".markdown");
+        let fallback_tmp = std::env::temp_dir();
         let base_dir = self
             .current_file_path
             .as_ref()
             .and_then(|p| p.parent())
-            .unwrap_or_else(|| std::path::Path::new("/tmp"));
+            .unwrap_or(fallback_tmp.as_path());
         let candidate = base_dir.join(format!(
             "{stem}.{}",
             self.selected_export_format.extension()
@@ -1599,6 +1718,39 @@ impl Session {
         }
     }
 
+    /// Flushes debounced `settings.json` changes once `SETTINGS_DEBOUNCE_MS` has elapsed.
+    pub fn poll_settings_flush(&mut self, now: std::time::Instant) -> bool {
+        if !self.settings_pending_flush {
+            return false;
+        }
+        let debounce = std::time::Duration::from_millis(SETTINGS_DEBOUNCE_MS);
+        let ready = match self.last_settings_change {
+            Some(last) => now.saturating_duration_since(last) >= debounce,
+            None => true,
+        };
+        if ready {
+            let _ = self.save_settings();
+            self.settings_pending_flush = false;
+            return true;
+        }
+        false
+    }
+
+    /// Returns the remaining duration before a pending debounced settings save should fire.
+    pub fn time_until_next_settings_flush(
+        &self,
+        now: std::time::Instant,
+    ) -> Option<std::time::Duration> {
+        if !self.settings_pending_flush {
+            return None;
+        }
+        let debounce = std::time::Duration::from_millis(SETTINGS_DEBOUNCE_MS);
+        match self.last_settings_change {
+            Some(last) => Some(debounce.saturating_sub(now.saturating_duration_since(last))),
+            None => Some(std::time::Duration::ZERO),
+        }
+    }
+
     /// Restores the editor buffer and cursor from a `RecoveryJournalEntry` discovered on startup.
     pub fn restore_from_journal_entry(&mut self, entry: accent_storage::RecoveryJournalEntry) {
         let title = entry
@@ -1619,6 +1771,8 @@ impl Session {
         }
         self.current_file_path = entry.target_path;
         self.original_file_hash = entry.original_file_hash;
+        self.original_file_len = None;
+        self.last_checked_disk_meta = None;
         self.display_word_count_override = None;
         let mut restored_buf = DocumentBuffer::from_str_content(&entry.content);
         restored_buf.set_cursor(entry.cursor_char_offset.min(restored_buf.len_chars()));
@@ -1718,8 +1872,9 @@ impl Session {
     pub fn on_clean_exit(&mut self) {
         self.sync_active_tab_to_slot();
         let _ = self.save_settings();
+        self.settings_pending_flush = false;
         for tab in &mut self.tabs {
-            let current_hash = accent_storage::compute_content_hash(&tab.buffer.text());
+            let current_hash = accent_storage::compute_content_hash(tab.buffer.as_str());
             if !tab.recovered_from_crash
                 && tab.original_file_hash.as_deref() == Some(current_hash.as_str())
             {
@@ -1774,26 +1929,16 @@ impl Session {
     pub fn apply(&mut self, action: Action) {
         let prev_overlay = self.overlay;
         let had_file_path_before = self.current_file_path.is_some();
-        let should_persist_settings = matches!(
+        let immediate_persist = matches!(
             action,
             Action::SetTheme(_)
                 | Action::SetPalettePreset(_)
                 | Action::SetLocale(_)
                 | Action::SetDialect(_)
-                | Action::SetLineWidth(_)
-                | Action::SetProseFont(_)
-                | Action::SetCodeFont(_)
-                | Action::SetFontSize(_)
-                | Action::SetLineHeight(_)
-                | Action::ZoomIn
-                | Action::ZoomOut
-                | Action::ZoomReset
-                | Action::ZoomByStep(_)
                 | Action::SetPreviewLayout(_)
                 | Action::SetPreviewMode { .. }
                 | Action::SetEditorOnlyRaw
                 | Action::SetEditorLivePreview
-                | Action::SetStatMetric(_)
                 | Action::ToggleSplitPreview
                 | Action::ToggleViewWhileTyping
                 | Action::SetViewWhileTyping(_)
@@ -1802,18 +1947,31 @@ impl Session {
                 | Action::ToggleToolbar
                 | Action::NewDocument
                 | Action::NewTab
-                | Action::SwitchTab(_)
                 | Action::CloseTab(_)
-                | Action::NextTab
-                | Action::PrevTab
                 | Action::OpenFile(_)
                 | Action::ConfirmRecoverySave
                 | Action::SaveAsFile(_)
+                | Action::ExecuteExport
+        ) || (matches!(action, Action::SaveDocument) && !had_file_path_before);
+        let debounced_persist = matches!(
+            action,
+            Action::SetLineWidth(_)
+                | Action::SetProseFont(_)
+                | Action::SetCodeFont(_)
+                | Action::SetFontSize(_)
+                | Action::SetLineHeight(_)
+                | Action::ZoomIn
+                | Action::ZoomOut
+                | Action::ZoomReset
+                | Action::ZoomByStep(_)
+                | Action::SetStatMetric(_)
+                | Action::SwitchTab(_)
+                | Action::NextTab
+                | Action::PrevTab
                 | Action::SetFileDialogDir(_)
                 | Action::SelectExportFormat(_)
                 | Action::ToggleExportSyntaxHighlight
-                | Action::ExecuteExport
-        ) || (matches!(action, Action::SaveDocument) && !had_file_path_before);
+        );
         match action {
             Action::SetTheme(theme) => self.theme = theme,
             Action::SetPalettePreset(preset) => self.palette_preset = preset,
@@ -1938,13 +2096,15 @@ impl Session {
             Action::SetReplaceText(r) => self.replace_text = r,
             Action::FindNext => {
                 if !self.search_query.is_empty() {
-                    let current = self.buffer.text();
-                    let cur_char = self.buffer.cursor();
-                    let cur_byte = self.buffer.char_to_byte(cur_char).min(current.len());
-                    let match_byte = current[cur_byte..]
-                        .find(&self.search_query)
-                        .map(|off| cur_byte + off)
-                        .or_else(|| current.find(&self.search_query));
+                    let match_byte = {
+                        let current = self.buffer.as_str();
+                        let cur_char = self.buffer.cursor();
+                        let cur_byte = self.buffer.char_to_byte(cur_char).min(current.len());
+                        current[cur_byte..]
+                            .find(&self.search_query)
+                            .map(|off| cur_byte + off)
+                            .or_else(|| current.find(&self.search_query))
+                    };
                     if let Some(byte_start) = match_byte {
                         let byte_end = byte_start + self.search_query.len();
                         let char_start = self.buffer.byte_to_char(byte_start);
@@ -1955,12 +2115,14 @@ impl Session {
             }
             Action::FindPrev => {
                 if !self.search_query.is_empty() {
-                    let current = self.buffer.text();
-                    let sel_min = self.buffer.selection_char_range().start;
-                    let cur_byte = self.buffer.char_to_byte(sel_min).min(current.len());
-                    let match_byte = current[..cur_byte]
-                        .rfind(&self.search_query)
-                        .or_else(|| current.rfind(&self.search_query));
+                    let match_byte = {
+                        let current = self.buffer.as_str();
+                        let sel_min = self.buffer.selection_char_range().start;
+                        let cur_byte = self.buffer.char_to_byte(sel_min).min(current.len());
+                        current[..cur_byte]
+                            .rfind(&self.search_query)
+                            .or_else(|| current.rfind(&self.search_query))
+                    };
                     if let Some(byte_start) = match_byte {
                         let byte_end = byte_start + self.search_query.len();
                         let char_start = self.buffer.byte_to_char(byte_start);
@@ -1971,14 +2133,20 @@ impl Session {
             }
             Action::ReplaceNext => {
                 if !self.search_query.is_empty() {
-                    let current = self.buffer.text();
-                    if let Some(pos) = current.find(&self.search_query) {
-                        let mut updated = String::with_capacity(current.len());
-                        updated.push_str(&current[..pos]);
-                        updated.push_str(&self.replace_text);
-                        updated.push_str(&current[pos + self.search_query.len()..]);
+                    let updated_opt = {
+                        let current = self.buffer.as_str();
+                        current.find(&self.search_query).map(|pos| {
+                            let mut updated = String::with_capacity(current.len());
+                            updated.push_str(&current[..pos]);
+                            updated.push_str(&self.replace_text);
+                            updated.push_str(&current[pos + self.search_query.len()..]);
+                            updated
+                        })
+                    };
+                    if let Some(updated) = updated_opt {
+                        self.detach_active_slot_history();
                         self.mark_dirty_edit();
-                        self.buffer.set_text(&updated);
+                        self.buffer.set_text_owned(updated);
                     }
                 }
             }
@@ -1987,14 +2155,16 @@ impl Session {
                 if self.overlay == overlay {
                     self.overlay = ActiveOverlay::None;
                 } else {
-                    if overlay == ActiveOverlay::ExportDialog {
+                    if overlay == ActiveOverlay::PreferencesDialog {
+                        self.ensure_font_catalog_loaded();
+                    } else if overlay == ActiveOverlay::ExportDialog {
                         self.update_default_export_path();
                     }
                     self.overlay = overlay;
                 }
             }
             Action::UpdateBufferText(new_text) => {
-                if new_text != self.buffer.text() {
+                if new_text.as_str() != self.buffer.as_str() {
                     if self.overlay == ActiveOverlay::None
                         && !self.search_bar_open
                         && !self.recovery_banner_active
@@ -2002,11 +2172,16 @@ impl Session {
                     {
                         self.chrome_autohidden = true;
                     }
-                    self.buffer.set_text(&new_text);
-                    let new_hash = accent_storage::compute_content_hash(&new_text);
-                    if !self.recovered_from_crash
-                        && self.original_file_hash.as_deref() == Some(new_hash.as_str())
-                    {
+                    let matches_clean_disk = !self.recovered_from_crash
+                        && self.original_file_hash.as_deref().is_some_and(|orig_hash| {
+                            let len_matches = self
+                                .original_file_len
+                                .is_none_or(|orig_len| orig_len == new_text.len());
+                            len_matches && accent_storage::compute_content_hash(&new_text) == orig_hash
+                        });
+                    self.detach_active_slot_history();
+                    self.buffer.set_text_owned(new_text);
+                    if matches_clean_disk {
                         self.display_word_count_override = None;
                         self.is_dirty = false;
                         self.journal_pending_flush = false;
@@ -2023,6 +2198,7 @@ impl Session {
                 self.buffer.set_selection(primary, secondary);
             }
             Action::ApplyFormat(cmd) => {
+                self.detach_active_slot_history();
                 self.mark_dirty_edit();
                 self.chrome_autohidden = false;
                 match cmd {
@@ -2065,6 +2241,8 @@ impl Session {
                     current_file_path: None,
                     is_dirty: false,
                     original_file_hash: Some(accent_storage::compute_content_hash(init_txt)),
+                    original_file_len: Some(init_txt.len()),
+                    last_checked_disk_meta: None,
                     last_edit_instant: None,
                     last_edit_utc_ms: 0,
                     journal_pending_flush: false,
@@ -2198,6 +2376,8 @@ impl Session {
                             original_file_hash: Some(accent_storage::compute_content_hash(
                                 init_txt,
                             )),
+                            original_file_len: Some(init_txt.len()),
+                            last_checked_disk_meta: None,
                             last_edit_instant: None,
                             last_edit_utc_ms: 0,
                             journal_pending_flush: false,
@@ -2243,10 +2423,14 @@ impl Session {
                 }
             }
             Action::Undo => {
+                self.detach_active_slot_history();
                 if self.buffer.undo() {
-                    let current_hash = accent_storage::compute_content_hash(&self.buffer.text());
-                    self.is_dirty =
-                        self.original_file_hash.as_deref() != Some(current_hash.as_str());
+                    let is_clean = self.original_file_hash.as_deref().is_some_and(|orig| {
+                        self.original_file_len
+                            .is_none_or(|l| l == self.buffer.len_bytes())
+                            && accent_storage::compute_content_hash(self.buffer.as_str()) == orig
+                    });
+                    self.is_dirty = !is_clean;
                     self.journal_pending_flush = self.is_dirty;
                     if !self.is_dirty {
                         let _ = accent_storage::remove_journal_for_target(
@@ -2258,10 +2442,14 @@ impl Session {
                 }
             }
             Action::Redo => {
+                self.detach_active_slot_history();
                 if self.buffer.redo() {
-                    let current_hash = accent_storage::compute_content_hash(&self.buffer.text());
-                    self.is_dirty =
-                        self.original_file_hash.as_deref() != Some(current_hash.as_str());
+                    let is_clean = self.original_file_hash.as_deref().is_some_and(|orig| {
+                        self.original_file_len
+                            .is_none_or(|l| l == self.buffer.len_bytes())
+                            && accent_storage::compute_content_hash(self.buffer.as_str()) == orig
+                    });
+                    self.is_dirty = !is_clean;
                     self.journal_pending_flush = self.is_dirty;
                     if !self.is_dirty {
                         let _ = accent_storage::remove_journal_for_target(
@@ -2352,6 +2540,8 @@ impl Session {
                                 current_file_path: Some(path.clone()),
                                 is_dirty: true,
                                 original_file_hash: entry.original_file_hash.clone(),
+                                original_file_len: disk_content.as_ref().map(|c| c.len()),
+                                last_checked_disk_meta: None,
                                 last_edit_instant: None,
                                 last_edit_utc_ms: 0,
                                 journal_pending_flush: false,
@@ -2367,6 +2557,7 @@ impl Session {
                         self.disk_modified_banner_active = false;
                         self.dismissed_disk_hash = None;
                         self.restore_from_journal_entry(entry);
+                        self.original_file_len = disk_content.as_ref().map(|c| c.len());
                         self.recent_files.retain(|p| !Self::paths_match(p, &path));
                         self.recent_files.insert(0, path);
                         if self.recent_files.len() > 8 {
@@ -2374,6 +2565,8 @@ impl Session {
                         }
                         self.overlay = ActiveOverlay::None;
                     } else if let Some(content) = disk_content {
+                        let content_len = content.len();
+                        let disk_meta = accent_storage::probe_file_meta(&path);
                         let title = path
                             .file_name()
                             .and_then(|n| n.to_str())
@@ -2390,6 +2583,8 @@ impl Session {
                                 current_file_path: Some(path.clone()),
                                 is_dirty: false,
                                 original_file_hash: disk_hash.clone(),
+                                original_file_len: Some(content_len),
+                                last_checked_disk_meta: Some(disk_meta),
                                 last_edit_instant: None,
                                 last_edit_utc_ms: 0,
                                 journal_pending_flush: false,
@@ -2412,6 +2607,8 @@ impl Session {
                         self.current_file_path = Some(path.clone());
                         self.update_default_export_path();
                         self.original_file_hash = disk_hash;
+                        self.original_file_len = Some(content_len);
+                        self.last_checked_disk_meta = Some(disk_meta);
                         self.is_dirty = false;
                         self.journal_pending_flush = false;
                         self.recovered_from_crash = false;
@@ -2432,16 +2629,19 @@ impl Session {
                 }
             }
             Action::OpenTutorial => {
-                let tutorial_path = PathBuf::from("/tmp/accent_tutorial.md");
+                let tutorial_path = std::env::temp_dir().join("accent_tutorial.md");
                 let _ = std::fs::write(&tutorial_path, TUTORIAL_MARKDOWN);
                 let _ = accent_storage::remove_journal_for_target(
                     &self.recovery_dir,
                     Some(&tutorial_path),
                 );
+                let tut_meta = accent_storage::probe_file_meta(&tutorial_path);
                 self.document_title = "tutorial_accent.md".to_string();
                 self.current_file_path = Some(tutorial_path);
                 self.original_file_hash =
                     Some(accent_storage::compute_content_hash(TUTORIAL_MARKDOWN));
+                self.original_file_len = Some(TUTORIAL_MARKDOWN.len());
+                self.last_checked_disk_meta = Some(tut_meta);
                 self.is_dirty = false;
                 self.journal_pending_flush = false;
                 self.recovered_from_crash = false;
@@ -2460,9 +2660,9 @@ impl Session {
                 let target = self
                     .current_file_path
                     .clone()
-                    .unwrap_or_else(|| PathBuf::from("/tmp/accent_autosave.md"));
-                let text = self.buffer.text();
-                if accent_storage::atomic_save(&target, &text).is_ok() {
+                    .unwrap_or_else(|| std::env::temp_dir().join("accent_autosave.md"));
+                let saved_ok = accent_storage::atomic_save(&target, self.buffer.as_str()).is_ok();
+                if saved_ok {
                     if self.current_file_path.as_deref() != Some(target.as_path()) {
                         let _ = accent_storage::remove_journal_for_target(
                             &self.recovery_dir,
@@ -2480,7 +2680,10 @@ impl Session {
                     self.disk_modified_banner_active = false;
                     self.dismissed_disk_hash = None;
                     self.chrome_autohidden = false;
-                    self.original_file_hash = Some(accent_storage::compute_content_hash(&text));
+                    self.original_file_len = Some(self.buffer.len_bytes());
+                    self.original_file_hash =
+                        Some(accent_storage::compute_content_hash(self.buffer.as_str()));
+                    self.last_checked_disk_meta = Some(accent_storage::probe_file_meta(&target));
                     self.current_file_path = Some(target.clone());
                     self.status_message = Some(format!("Salvato in {}", target.display()));
                 }
@@ -2500,8 +2703,10 @@ impl Session {
                 self.display_word_count_override = None;
                 if let Some(path) = self.current_file_path.clone() {
                     if let Ok(content) = std::fs::read_to_string(&path) {
+                        self.original_file_len = Some(content.len());
                         self.original_file_hash =
                             Some(accent_storage::compute_content_hash(&content));
+                        self.last_checked_disk_meta = Some(accent_storage::probe_file_meta(&path));
                         let mut clean_buf = DocumentBuffer::from_str_content(&content);
                         clean_buf.set_cursor(0);
                         self.buffer = clean_buf;
@@ -2509,15 +2714,19 @@ impl Session {
                         let init_txt = "# Nuovo Documento\n\nInizia a scrivere qui...\n";
                         self.document_title = self.next_untitled_name();
                         self.current_file_path = None;
+                        self.original_file_len = Some(init_txt.len());
                         self.original_file_hash =
                             Some(accent_storage::compute_content_hash(init_txt));
+                        self.last_checked_disk_meta = None;
                         let mut clean_buf = DocumentBuffer::from_str_content(init_txt);
                         clean_buf.set_cursor(0);
                         self.buffer = clean_buf;
                     }
                 } else {
                     let init_txt = "# Nuovo Documento\n\nInizia a scrivere qui...\n";
+                    self.original_file_len = Some(init_txt.len());
                     self.original_file_hash = Some(accent_storage::compute_content_hash(init_txt));
+                    self.last_checked_disk_meta = None;
                     let mut clean_buf = DocumentBuffer::from_str_content(init_txt);
                     clean_buf.set_cursor(0);
                     self.buffer = clean_buf;
@@ -2525,8 +2734,7 @@ impl Session {
                 self.status_message = Some("Ripristino scartato".to_string());
             }
             Action::SaveAsFile(path) => {
-                let text = self.buffer.text();
-                if accent_storage::atomic_save(&path, &text).is_ok() {
+                if accent_storage::atomic_save(&path, self.buffer.as_str()).is_ok() {
                     let _ = accent_storage::remove_journal_for_target(
                         &self.recovery_dir,
                         self.current_file_path.as_deref(),
@@ -2547,7 +2755,10 @@ impl Session {
                     }
                     self.current_file_path = Some(path.clone());
                     self.update_default_export_path();
-                    self.original_file_hash = Some(accent_storage::compute_content_hash(&text));
+                    self.original_file_len = Some(self.buffer.len_bytes());
+                    self.original_file_hash =
+                        Some(accent_storage::compute_content_hash(self.buffer.as_str()));
+                    self.last_checked_disk_meta = Some(accent_storage::probe_file_meta(&path));
                     self.is_dirty = false;
                     self.journal_pending_flush = false;
                     self.recovered_from_crash = false;
@@ -2578,8 +2789,10 @@ impl Session {
                         let mut fresh_buf = DocumentBuffer::from_str_content(&content);
                         fresh_buf.set_cursor(prev_cursor.min(fresh_buf.len_chars()));
                         self.buffer = fresh_buf;
+                        self.original_file_len = Some(content.len());
                         self.original_file_hash =
                             Some(accent_storage::compute_content_hash(&content));
+                        self.last_checked_disk_meta = Some(accent_storage::probe_file_meta(&path));
                         self.is_dirty = false;
                         self.journal_pending_flush = false;
                         self.recovered_from_crash = false;
@@ -2598,6 +2811,7 @@ impl Session {
                     if let Ok(content) = std::fs::read_to_string(path) {
                         self.dismissed_disk_hash =
                             Some(accent_storage::compute_content_hash(&content));
+                        self.last_checked_disk_meta = Some(accent_storage::probe_file_meta(path));
                     }
                 }
                 self.disk_modified_banner_active = false;
@@ -2615,10 +2829,11 @@ impl Session {
             Action::SelectExportFormat(fmt) => {
                 self.selected_export_format = fmt;
                 let cur_path = PathBuf::from(&self.export_output_path);
+                let fallback_tmp = std::env::temp_dir();
                 let parent = cur_path
                     .parent()
                     .filter(|p| !p.as_os_str().is_empty())
-                    .unwrap_or_else(|| std::path::Path::new("/tmp"));
+                    .unwrap_or(fallback_tmp.as_path());
                 let stem = cur_path
                     .file_stem()
                     .and_then(|s| s.to_str())
@@ -2678,6 +2893,7 @@ impl Session {
                 self.overlay = ActiveOverlay::None;
             }
             Action::InsertText(text) => {
+                self.detach_active_slot_history();
                 self.mark_dirty_edit();
                 if self.overlay == ActiveOverlay::None
                     && !self.search_bar_open
@@ -2696,12 +2912,16 @@ impl Session {
         // Keep `self.tabs[self.active_tab_index]` in sync with top-level active document fields
         self.sync_active_tab_to_slot();
 
-        // Automatically persist user settings whenever a preference/directory/file changes
-        // OR when closing the Preferences dialog / settings overlays.
+        // Persist user settings immediately on discrete lifecycle/overlay-close events, or
+        // debounce rapid-fire events (slider drag, mouse-wheel zoom, rapid tab cycling).
         let closed_settings_overlay =
             prev_overlay != ActiveOverlay::None && self.overlay != prev_overlay;
-        if should_persist_settings || closed_settings_overlay {
+        if immediate_persist || closed_settings_overlay {
             let _ = self.save_settings();
+            self.settings_pending_flush = false;
+        } else if debounced_persist {
+            self.settings_pending_flush = true;
+            self.last_settings_change = Some(std::time::Instant::now());
         }
     }
 

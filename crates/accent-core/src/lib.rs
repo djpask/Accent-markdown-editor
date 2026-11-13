@@ -2,9 +2,13 @@ use comrak::nodes::{AstNode, LineColumn, ListType, NodeValue, Sourcepos};
 use comrak::{Arena, Options};
 use ropey::Rope;
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
+
+static EMPTY_RANGES_ARC: LazyLock<Arc<[Range<usize>]>> = LazyLock::new(|| Arc::from(&[][..]));
 
 /// Canonical version of Accent synchronized across the Cargo workspace.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -185,18 +189,51 @@ pub struct DocumentStats {
 }
 
 impl DocumentStats {
+    /// Computes character, word, sentence, and paragraph statistics in a single zero-allocation
+    /// $O(N)$ pass, handling both Unix (`\n\n`) and Windows (`\r\n\r\n`) paragraph breaks.
     pub fn compute(text: &str) -> Self {
-        let characters = text.chars().count();
-        let words = text.split_whitespace().count();
-        let sentences = text
-            .chars()
-            .filter(|c| matches!(c, '.' | '!' | '?'))
-            .count()
-            .max(usize::from(words > 0));
-        let paragraphs = text
-            .split("\n\n")
-            .filter(|p| !p.trim().is_empty())
-            .count();
+        let mut characters = 0usize;
+        let mut words = 0usize;
+        let mut sentences = 0usize;
+        let mut paragraphs = 0usize;
+        let mut in_word = false;
+        let mut in_para_with_non_ws = false;
+        let mut consecutive_newlines = 0usize;
+
+        for c in text.chars() {
+            characters += 1;
+            if c == '\r' {
+                in_word = false;
+                continue;
+            }
+            if c == '\n' {
+                in_word = false;
+                consecutive_newlines += 1;
+                if consecutive_newlines >= 2 {
+                    in_para_with_non_ws = false;
+                }
+                continue;
+            }
+            if c.is_whitespace() {
+                in_word = false;
+                consecutive_newlines = 0;
+            } else {
+                if !in_word {
+                    words += 1;
+                    in_word = true;
+                }
+                if !in_para_with_non_ws {
+                    paragraphs += 1;
+                    in_para_with_non_ws = true;
+                }
+                consecutive_newlines = 0;
+                if matches!(c, '.' | '!' | '?') {
+                    sentences += 1;
+                }
+            }
+        }
+
+        sentences = sentences.max(usize::from(words > 0));
         let reading_seconds = (words * 60) / 200;
         Self {
             characters,
@@ -213,6 +250,48 @@ impl DocumentStats {
         let seconds = self.reading_seconds % 60;
         format!("{hours}:{minutes:02}:{seconds:02}")
     }
+}
+
+/// Returns `true` if `ch` is a Unicode color emoji scalar rendered via color bitmap/vector slots.
+#[inline]
+pub fn is_color_emoji_char(ch: char) -> bool {
+    let u = ch as u32;
+    if u < 0x203C || (0x1F3FB..=0x1F3FF).contains(&u) {
+        return false;
+    }
+    matches!(
+        u,
+        0x1F000..=0x1FAFF
+            | 0x2600..=0x27BF
+            | 0x231A..=0x231B
+            | 0x2328
+            | 0x23CF
+            | 0x23E9..=0x23F3
+            | 0x23F8..=0x23FA
+            | 0x25AA..=0x25AB
+            | 0x25B6
+            | 0x25C0
+            | 0x25FB..=0x25FE
+            | 0x2B05..=0x2B07
+            | 0x2B1B..=0x2B1C
+            | 0x2B50
+            | 0x2B55
+            | 0x203C
+            | 0x2049
+            | 0x2139
+            | 0x2934..=0x2935
+            | 0x3030
+            | 0x303D
+            | 0x3297
+            | 0x3299
+    )
+}
+
+/// Returns `true` if `ch` is an invisible emoji variation selector, ZWJ, or skin-tone combiner.
+#[inline]
+pub fn is_emoji_invisible_combiner(ch: char) -> bool {
+    let u = ch as u32;
+    u >= 0x200D && matches!(u, 0xFE0E | 0xFE0F | 0x200D | 0x20E3 | 0x1F3FB..=0x1F3FF)
 }
 
 /// AST span kind extracted from `comrak` with exact `Sourcepos` byte and char ranges.
@@ -275,14 +354,13 @@ pub enum DelimiterVisibility {
 pub struct LiveSpan {
     pub span: AstSpan,
     pub visibility: DelimiterVisibility,
-    pub delimiter_byte_ranges: Vec<Range<usize>>,
+    pub delimiter_byte_ranges: Arc<[Range<usize>]>,
 }
 
-/// Segment of the full document text produced for `egui::TextEdit`'s custom `layouter`.
-/// Concatenating `text` across all `EditorTextSegment`s reproduces `DocumentBuffer::text()` 1:1.
+/// Zero-copy segment of the full document text produced for `egui::TextEdit`'s custom `layouter`.
+/// Concatenating `as_str(doc)` across all `EditorTextSegment`s reproduces `DocumentBuffer::as_str()` 1:1.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct EditorTextSegment {
-    pub text: String,
     pub byte_range: Range<usize>,
     /// True if this segment starts at column 0 of a line.
     pub is_line_start: bool,
@@ -308,6 +386,13 @@ pub struct EditorTextSegment {
     pub collapsed_delimiter: bool,
     /// True when this segment is a body line inside a collapsed `mermaid` code block in *View-while-typing* mode.
     pub mermaid_collapsed: bool,
+}
+
+impl EditorTextSegment {
+    #[inline]
+    pub fn as_str<'a>(&self, doc_text: &'a str) -> &'a str {
+        &doc_text[self.byte_range.clone()]
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -410,28 +495,87 @@ pub enum LineKind {
     },
 }
 
+#[derive(Debug, Clone)]
+struct UndoCoalesceState {
+    next_byte_offset: usize,
+    last_instant: Instant,
+    count: u8,
+}
+
+#[derive(Debug, Clone, Default)]
+struct UndoHistory {
+    undo_stack: VecDeque<(Rope, usize, usize)>,
+    redo_stack: VecDeque<(Rope, usize, usize)>,
+    coalesce: Option<UndoCoalesceState>,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedLiveBase {
+    key: (u64, MarkdownDialect),
+    ast_spans: Arc<Vec<AstSpan>>,
+    delimiters: Vec<Arc<[Range<usize>]>>,
+    spans_by_line: Vec<Vec<usize>>,
+    byte_spans_by_line: Vec<Vec<usize>>,
+    collapsed_live_spans: Arc<Vec<LiveSpan>>,
+    all_expanded_live_spans: Option<Arc<Vec<LiveSpan>>>,
+    collapsed_segments: Option<(Arc<Vec<EditorTextSegment>>, Vec<Range<usize>>)>,
+    all_expanded_segments: Option<Arc<Vec<EditorTextSegment>>>,
+    live_lru: VecDeque<(Vec<usize>, Arc<Vec<LiveSpan>>)>,
+    seg_lru: VecDeque<(Vec<usize>, Arc<Vec<EditorTextSegment>>)>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct DocumentAstCache {
     ast_key: Option<(u64, MarkdownDialect)>,
     ast_spans: Arc<Vec<AstSpan>>,
-    live_key: Option<(u64, MarkdownDialect, bool, Range<usize>)>,
-    live_spans: Arc<Vec<LiveSpan>>,
-    segments_key: Option<(u64, MarkdownDialect, bool, Range<usize>)>,
-    editor_segments: Arc<Vec<EditorTextSegment>>,
+    prepared_base: Option<PreparedLiveBase>,
     preview_key: Option<(u64, MarkdownDialect)>,
     preview_blocks: Arc<Vec<PreviewBlock>>,
+    preview_ever_used_for: Option<MarkdownDialect>,
+}
+
+fn common_utf8_prefix_suffix(old: &str, new: &str) -> (usize, usize, usize) {
+    let old_b = old.as_bytes();
+    let new_b = new.as_bytes();
+    let min_len = old_b.len().min(new_b.len());
+    let mut prefix = old_b[..min_len]
+        .iter()
+        .zip(&new_b[..min_len])
+        .position(|(a, b)| a != b)
+        .unwrap_or(min_len);
+    while prefix > 0 && !(new.is_char_boundary(prefix) && old.is_char_boundary(prefix)) {
+        prefix -= 1;
+    }
+
+    let rem_old = old_b.len() - prefix;
+    let rem_new = new_b.len() - prefix;
+    let rem_min = rem_old.min(rem_new);
+    let mut suffix = old_b[old_b.len() - rem_min..]
+        .iter()
+        .rev()
+        .zip(new_b[new_b.len() - rem_min..].iter().rev())
+        .position(|(a, b)| a != b)
+        .unwrap_or(rem_min);
+    while suffix > 0
+        && !(new.is_char_boundary(new_b.len() - suffix)
+            && old.is_char_boundary(old_b.len() - suffix))
+    {
+        suffix -= 1;
+    }
+
+    (prefix, old_b.len() - suffix, new_b.len() - suffix)
 }
 
 #[derive(Debug, Clone)]
 pub struct DocumentBuffer {
     rope: Rope,
     revision: u64,
-    cached_text: Arc<str>,
-    cached_stats: DocumentStats,
+    cached_text: Arc<String>,
+    cached_stats: Cell<Option<DocumentStats>>,
+    has_emojis_cache: Cell<Option<bool>>,
     cursor_char_offset: usize,
     selection_end_char_offset: usize,
-    undo_stack: Vec<(Rope, usize, usize)>,
-    redo_stack: Vec<(Rope, usize, usize)>,
+    history: Arc<UndoHistory>,
     cache: RefCell<DocumentAstCache>,
 }
 
@@ -448,39 +592,50 @@ impl DocumentBuffer {
             .find("Accent è un editor")
             .map(|b| rope.byte_to_char(b))
             .unwrap_or(0);
-        let cached_text: Arc<str> = Arc::from(text);
-        let cached_stats = DocumentStats::compute(&cached_text);
+        let cached_text = Arc::new(text.to_owned());
         Self {
             rope,
             revision: 1,
             cached_text,
-            cached_stats,
+            cached_stats: Cell::new(None),
+            has_emojis_cache: Cell::new(None),
             cursor_char_offset: default_caret,
             selection_end_char_offset: default_caret,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
+            history: Arc::new(UndoHistory::default()),
             cache: RefCell::new(DocumentAstCache::default()),
         }
     }
 
-    fn push_undo_snapshot(&mut self) {
-        if self.undo_stack.len() >= 128 {
-            self.undo_stack.remove(0);
+    /// Releases a shared `Arc<UndoHistory>` reference on an inactive/mirror `TabSlot` before mutating
+    /// the active buffer so `Arc::make_mut` never needs to clone the `VecDeque` undo history.
+    pub fn release_shared_history(&mut self) {
+        if Arc::strong_count(&self.history) > 1 {
+            self.history = Arc::new(UndoHistory::default());
         }
-        self.undo_stack.push((
+    }
+
+    fn push_undo_snapshot_uncoalesced(&mut self) {
+        let hist = Arc::make_mut(&mut self.history);
+        hist.coalesce = None;
+        if hist.undo_stack.len() >= 128 {
+            hist.undo_stack.pop_front();
+        }
+        hist.undo_stack.push_back((
             self.rope.clone(),
             self.cursor_char_offset,
             self.selection_end_char_offset,
         ));
-        self.redo_stack.clear();
+        hist.redo_stack.clear();
     }
 
     /// Reverts the last text mutation on this buffer, returning `true` if a state was restored.
     pub fn undo(&mut self) -> bool {
-        let Some((prev_rope, prev_cur, prev_sel)) = self.undo_stack.pop() else {
+        let hist = Arc::make_mut(&mut self.history);
+        hist.coalesce = None;
+        let Some((prev_rope, prev_cur, prev_sel)) = hist.undo_stack.pop_back() else {
             return false;
         };
-        self.redo_stack.push((
+        hist.redo_stack.push_back((
             self.rope.clone(),
             self.cursor_char_offset,
             self.selection_end_char_offset,
@@ -489,16 +644,21 @@ impl DocumentBuffer {
         let len = self.rope.len_chars();
         self.cursor_char_offset = prev_cur.min(len);
         self.selection_end_char_offset = prev_sel.min(len);
-        self.sync_after_mutation();
+        self.sync_after_rope_mutation();
         true
     }
 
     /// Re-applies the last undone text mutation on this buffer, returning `true` if a state was restored.
     pub fn redo(&mut self) -> bool {
-        let Some((next_rope, next_cur, next_sel)) = self.redo_stack.pop() else {
+        let hist = Arc::make_mut(&mut self.history);
+        hist.coalesce = None;
+        let Some((next_rope, next_cur, next_sel)) = hist.redo_stack.pop_back() else {
             return false;
         };
-        self.undo_stack.push((
+        if hist.undo_stack.len() >= 128 {
+            hist.undo_stack.pop_front();
+        }
+        hist.undo_stack.push_back((
             self.rope.clone(),
             self.cursor_char_offset,
             self.selection_end_char_offset,
@@ -507,14 +667,21 @@ impl DocumentBuffer {
         let len = self.rope.len_chars();
         self.cursor_char_offset = next_cur.min(len);
         self.selection_end_char_offset = next_sel.min(len);
-        self.sync_after_mutation();
+        self.sync_after_rope_mutation();
         true
     }
 
-    fn sync_after_mutation(&mut self) {
+    fn sync_after_rope_mutation(&mut self) {
         self.revision = self.revision.wrapping_add(1);
-        self.cached_text = Arc::from(self.rope.to_string());
-        self.cached_stats = DocumentStats::compute(&self.cached_text);
+        self.cached_text = Arc::new(self.rope.to_string());
+        self.cached_stats.set(None);
+        self.has_emojis_cache.set(None);
+    }
+
+    fn invalidate_after_in_place_mutation(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+        self.cached_stats.set(None);
+        self.has_emojis_cache.set(None);
     }
 
     pub fn revision(&self) -> u64 {
@@ -526,12 +693,33 @@ impl DocumentBuffer {
     }
 
     /// Zero-allocation slice of the current document text.
+    #[inline]
     pub fn as_str(&self) -> &str {
-        &self.cached_text
+        self.cached_text.as_str()
+    }
+
+    /// Cheap `Arc<String>` handle to the current document text without copying bytes.
+    #[inline]
+    pub fn text_arc(&self) -> Arc<String> {
+        Arc::clone(&self.cached_text)
     }
 
     pub fn text(&self) -> String {
-        self.cached_text.to_string()
+        (*self.cached_text).clone()
+    }
+
+    /// Returns `true` if the current document contains any color emoji codepoints, cached per revision.
+    pub fn has_color_emojis(&self) -> bool {
+        if let Some(cached) = self.has_emojis_cache.get() {
+            return cached;
+        }
+        let s = self.as_str();
+        // Every codepoint >= U+2000 begins with a UTF-8 lead byte >= 0xE2.
+        let found = s.as_bytes().iter().any(|&b| b >= 0xE2)
+            && s.chars()
+                .any(|c| is_color_emoji_char(c) || is_emoji_invisible_combiner(c));
+        self.has_emojis_cache.set(Some(found));
+        found
     }
 
     pub fn len_bytes(&self) -> usize {
@@ -649,8 +837,9 @@ impl DocumentBuffer {
     }
 
     pub fn insert_text(&mut self, text: &str) {
-        self.push_undo_snapshot();
+        self.push_undo_snapshot_uncoalesced();
         let sel = self.selection_char_range();
+        let sel_bytes = self.char_to_byte(sel.start)..self.char_to_byte(sel.end);
         if sel.start < sel.end {
             self.rope.remove(sel.clone());
         }
@@ -659,49 +848,147 @@ impl DocumentBuffer {
         let new_cursor = idx + text.chars().count();
         self.cursor_char_offset = new_cursor;
         self.selection_end_char_offset = new_cursor;
-        self.sync_after_mutation();
+        if let Some(s) = Arc::get_mut(&mut self.cached_text) {
+            s.replace_range(sel_bytes, text);
+            self.invalidate_after_in_place_mutation();
+        } else {
+            self.sync_after_rope_mutation();
+        }
     }
 
     /// Wraps the current selection with `prefix` and `suffix` (or inserts `prefix + placeholder + suffix` if empty).
     pub fn wrap_selection(&mut self, prefix: &str, suffix: &str, placeholder: &str) {
-        self.push_undo_snapshot();
+        self.push_undo_snapshot_uncoalesced();
         let sel = self.selection_char_range();
-        if sel.start < sel.end {
-            let selected: String = self.rope.slice(sel.clone()).to_string();
-            let replacement = format!("{prefix}{selected}{suffix}");
+        let sel_bytes = self.char_to_byte(sel.start)..self.char_to_byte(sel.end);
+        let replacement = if sel.start < sel.end {
+            let selected = &self.as_str()[sel_bytes.clone()];
+            let rep = format!("{prefix}{selected}{suffix}");
+            let sel_char_len = sel.end - sel.start;
             self.rope.remove(sel.clone());
-            self.rope.insert(sel.start, &replacement);
+            self.rope.insert(sel.start, &rep);
             let new_start = sel.start + prefix.chars().count();
-            let new_end = new_start + selected.chars().count();
+            let new_end = new_start + sel_char_len;
             self.cursor_char_offset = new_end;
             self.selection_end_char_offset = new_start;
+            rep
         } else {
-            let replacement = format!("{prefix}{placeholder}{suffix}");
+            let rep = format!("{prefix}{placeholder}{suffix}");
             let idx = sel.start.min(self.rope.len_chars());
-            self.rope.insert(idx, &replacement);
+            self.rope.insert(idx, &rep);
             let new_start = idx + prefix.chars().count();
             let new_end = new_start + placeholder.chars().count();
             self.cursor_char_offset = new_end;
             self.selection_end_char_offset = new_start;
+            rep
+        };
+        if let Some(s) = Arc::get_mut(&mut self.cached_text) {
+            s.replace_range(sel_bytes, &replacement);
+            self.invalidate_after_in_place_mutation();
+        } else {
+            self.sync_after_rope_mutation();
         }
-        self.sync_after_mutation();
     }
 
     pub fn set_text(&mut self, text: &str) {
-        if &*self.cached_text == text {
+        if self.as_str() == text {
             return;
         }
-        self.push_undo_snapshot();
-        self.rope = Rope::from_str(text);
+        self.apply_new_text_arc(Arc::new(text.to_owned()));
+    }
+
+    /// Updates the buffer from an already-owned `String` without copying its heap buffer,
+    /// applying a minimal UTF-8 diff to `self.rope` so all `Rope` undo snapshots share CoW `Arc` chunks.
+    pub fn set_text_owned(&mut self, text: String) {
+        if self.as_str() == text.as_str() {
+            return;
+        }
+        self.apply_new_text_arc(Arc::new(text));
+    }
+
+    fn apply_new_text_arc(&mut self, new_arc: Arc<String>) {
+        let (prefix_b, old_end_b, new_end_b) =
+            common_utf8_prefix_suffix(self.as_str(), new_arc.as_str());
+        let ins_str = &new_arc[prefix_b..new_end_b];
+        let rem_bytes = old_end_b - prefix_b;
+
+        let now = Instant::now();
+        let mut single_non_ws_char = false;
+        if rem_bytes == 0 && !ins_str.is_empty() && ins_str.len() <= 4 {
+            let mut chars = ins_str.chars();
+            if let (Some(ch), None) = (chars.next(), chars.next()) {
+                single_non_ws_char = !ch.is_whitespace();
+            }
+        }
+
+        let start_char = self.rope.byte_to_char(prefix_b);
+        let old_end_char = if rem_bytes == 0 {
+            start_char
+        } else {
+            self.rope.byte_to_char(old_end_b)
+        };
+
+        {
+            let hist = Arc::make_mut(&mut self.history);
+            let should_coalesce = single_non_ws_char
+                && !hist.undo_stack.is_empty()
+                && hist.coalesce.as_ref().is_some_and(|st| {
+                    st.next_byte_offset == prefix_b
+                        && st.count < 24
+                        && now.duration_since(st.last_instant) <= Duration::from_millis(350)
+                });
+
+            if should_coalesce {
+                if let Some(st) = hist.coalesce.as_mut() {
+                    st.next_byte_offset = prefix_b + ins_str.len();
+                    st.last_instant = now;
+                    st.count = st.count.saturating_add(1);
+                }
+                hist.redo_stack.clear();
+            } else {
+                if hist.undo_stack.len() >= 128 {
+                    hist.undo_stack.pop_front();
+                }
+                hist.undo_stack.push_back((
+                    self.rope.clone(),
+                    self.cursor_char_offset,
+                    self.selection_end_char_offset,
+                ));
+                hist.redo_stack.clear();
+                hist.coalesce = if single_non_ws_char {
+                    Some(UndoCoalesceState {
+                        next_byte_offset: prefix_b + ins_str.len(),
+                        last_instant: now,
+                        count: 1,
+                    })
+                } else {
+                    None
+                };
+            }
+        }
+
+        if start_char < old_end_char {
+            self.rope.remove(start_char..old_end_char);
+        }
+        if !ins_str.is_empty() {
+            self.rope.insert(start_char, ins_str);
+        }
+
+        self.cached_text = new_arc;
         let len = self.rope.len_chars();
         self.cursor_char_offset = self.cursor_char_offset.min(len);
         self.selection_end_char_offset = self.selection_end_char_offset.min(len);
-        self.sync_after_mutation();
+        self.invalidate_after_in_place_mutation();
     }
 
-    /// Returns cached `DocumentStats` in $O(1)$ without re-scanning the document.
+    /// Returns cached `DocumentStats`, computing lazily at most once per revision.
     pub fn stats(&self) -> DocumentStats {
-        self.cached_stats.clone()
+        if let Some(s) = self.cached_stats.get() {
+            return s;
+        }
+        let computed = DocumentStats::compute(self.as_str());
+        self.cached_stats.set(Some(computed));
+        computed
     }
 
     /// Returns the half-open byte range of `line_idx` excluding any trailing `\r` or `\n`.
@@ -726,16 +1013,13 @@ impl DocumentBuffer {
     /// Returns cached `Arc<Vec<AstSpan>>` for `(self.revision, dialect)`, parsing via `comrak` only on revision/dialect change.
     pub fn extract_ast_spans_arc(&self, dialect: MarkdownDialect) -> Arc<Vec<AstSpan>> {
         let key = (self.revision, dialect);
-        if let Some(cached) = {
+        let also_build_preview = {
             let c = self.cache.borrow();
             if c.ast_key == Some(key) {
-                Some(Arc::clone(&c.ast_spans))
-            } else {
-                None
+                return Arc::clone(&c.ast_spans);
             }
-        } {
-            return cached;
-        }
+            c.preview_ever_used_for == Some(dialect) && c.preview_key != Some(key)
+        };
 
         let text = self.as_str();
         let arena = Arena::new();
@@ -746,9 +1030,23 @@ impl DocumentBuffer {
         self.collect_node_spans(root, &mut spans);
         let arc = Arc::new(spans);
 
+        let maybe_preview = if also_build_preview {
+            let mut blocks = Vec::new();
+            for child in root.children() {
+                self.collect_preview_block(child, &mut blocks);
+            }
+            Some(Arc::new(blocks))
+        } else {
+            None
+        };
+
         let mut c = self.cache.borrow_mut();
         c.ast_key = Some(key);
         c.ast_spans = Arc::clone(&arc);
+        if let Some(p_arc) = maybe_preview {
+            c.preview_key = Some(key);
+            c.preview_blocks = p_arc;
+        }
         arc
     }
 
@@ -757,230 +1055,384 @@ impl DocumentBuffer {
         (*self.extract_ast_spans_arc(dialect)).clone()
     }
 
-    /// Returns cached `Arc<Vec<LiveSpan>>` for `(self.revision, dialect, view_while_typing, caret_byte_range)`.
+    fn compute_span_delimiter_ranges(&self, span: &AstSpan, text: &str) -> Arc<[Range<usize>]> {
+        let sr = &span.byte_range;
+        if sr.start >= sr.end || sr.end > text.len() {
+            return Arc::clone(&EMPTY_RANGES_ARC);
+        }
+        let mut delimiter_byte_ranges = Vec::new();
+        match &span.kind {
+            AstSpanKind::Heading { .. } => {
+                let lr = self.line_content_byte_range(span.start_line);
+                if !lr.is_empty() && lr.end <= text.len() {
+                    let raw_line = &text[lr.clone()];
+                    let trimmed = raw_line.trim_start_matches([' ', '\t']);
+                    let leading_ws = raw_line.len() - trimmed.len();
+                    let hash_count = trimmed.chars().take_while(|&c| c == '#').count();
+                    let after_hashes = &trimmed[hash_count..];
+                    let space_len = usize::from(after_hashes.starts_with(' '));
+                    let prefix_end = lr.start + leading_ws + hash_count + space_len;
+                    if hash_count > 0 && prefix_end > lr.start && prefix_end <= lr.end {
+                        delimiter_byte_ranges.push(lr.start..prefix_end);
+                    }
+                }
+                if span.end_line > span.start_line {
+                    let end_lr = self.line_content_byte_range(span.end_line);
+                    if !end_lr.is_empty() && end_lr.end <= text.len() {
+                        let end_trimmed = text[end_lr.clone()].trim();
+                        if !end_trimmed.is_empty()
+                            && (end_trimmed.chars().all(|c| c == '-')
+                                || end_trimmed.chars().all(|c| c == '='))
+                        {
+                            delimiter_byte_ranges.push(end_lr);
+                        }
+                    }
+                }
+            }
+            AstSpanKind::CodeBlock { fenced: true, .. } => {
+                let start_lr = self.line_content_byte_range(span.start_line);
+                if !start_lr.is_empty() && start_lr.end <= text.len() {
+                    let raw_l = text[start_lr.clone()].trim_start();
+                    if raw_l.starts_with("```") || raw_l.starts_with("~~~") {
+                        delimiter_byte_ranges.push(start_lr);
+                    }
+                }
+                if span.end_line > span.start_line {
+                    let end_lr = self.line_content_byte_range(span.end_line);
+                    if !end_lr.is_empty() && end_lr.end <= text.len() {
+                        let raw_l = text[end_lr.clone()].trim_start();
+                        if raw_l.starts_with("```") || raw_l.starts_with("~~~") {
+                            delimiter_byte_ranges.push(end_lr);
+                        }
+                    }
+                }
+            }
+            AstSpanKind::BlockQuote | AstSpanKind::Alert { .. } => {
+                for l_idx in span.start_line..=span.end_line {
+                    let lr = self.line_content_byte_range(l_idx);
+                    if !lr.is_empty() && lr.end <= text.len() {
+                        let raw_l = &text[lr.clone()];
+                        let trimmed = raw_l.trim_start_matches([' ', '\t']);
+                        if let Some(after_gt) = trimmed.strip_prefix('>') {
+                            let leading_ws = raw_l.len() - trimmed.len();
+                            let space_len = usize::from(after_gt.starts_with(' '));
+                            let mut prefix_end = lr.start + leading_ws + 1 + space_len;
+                            if matches!(span.kind, AstSpanKind::Alert { .. })
+                                && l_idx == span.start_line
+                            {
+                                let rest = &text[prefix_end..lr.end];
+                                if rest.starts_with("[!") {
+                                    if let Some(close_br) = rest.find(']') {
+                                        prefix_end += close_br + 1;
+                                    }
+                                }
+                            }
+                            delimiter_byte_ranges.push(lr.start..prefix_end);
+                        }
+                    }
+                }
+            }
+            AstSpanKind::ListItem { ordered, task, .. } => {
+                if !*ordered {
+                    let lr = self.line_content_byte_range(span.start_line);
+                    if !lr.is_empty() && lr.end <= text.len() {
+                        let raw_l = &text[lr.clone()];
+                        let trimmed = raw_l.trim_start_matches([' ', '\t']);
+                        let leading_ws = raw_l.len() - trimmed.len();
+                        let is_task_prefix = task.is_some()
+                            && trimmed.len() >= 5
+                            && trimmed.is_char_boundary(5)
+                            && matches!(
+                                &trimmed[..5],
+                                "- [ ]"
+                                    | "- [x]"
+                                    | "- [X]"
+                                    | "* [ ]"
+                                    | "* [x]"
+                                    | "* [X]"
+                                    | "+ [ ]"
+                                    | "+ [x]"
+                                    | "+ [X]"
+                            );
+                        if is_task_prefix {
+                            let after_box = &trimmed[5..];
+                            let space_len = usize::from(after_box.starts_with(' '));
+                            let prefix_end = lr.start + leading_ws + 5 + space_len;
+                            delimiter_byte_ranges.push(lr.start..prefix_end);
+                        } else if trimmed.starts_with("- ")
+                            || trimmed.starts_with("* ")
+                            || trimmed.starts_with("+ ")
+                        {
+                            let prefix_end = lr.start + leading_ws + 2;
+                            delimiter_byte_ranges.push(lr.start..prefix_end);
+                        }
+                    }
+                }
+            }
+            AstSpanKind::Table { .. } => {
+                for l_idx in span.start_line..=span.end_line {
+                    let lr = self.line_content_byte_range(l_idx);
+                    if !lr.is_empty() && lr.end <= text.len() {
+                        delimiter_byte_ranges.push(lr);
+                    }
+                }
+            }
+            AstSpanKind::ThematicBreak => {
+                let lr = self.line_content_byte_range(span.start_line);
+                if !lr.is_empty() && lr.end <= text.len() {
+                    delimiter_byte_ranges.push(lr);
+                }
+            }
+            AstSpanKind::MathBlock => {
+                let slice = &text[sr.clone()];
+                if slice.starts_with("$$") && slice.ends_with("$$") && sr.len() >= 4 {
+                    delimiter_byte_ranges.push(sr.start..(sr.start + 2));
+                    delimiter_byte_ranges.push((sr.end - 2)..sr.end);
+                }
+            }
+            AstSpanKind::Strong | AstSpanKind::Strikethrough => {
+                if sr.len() >= 4 {
+                    delimiter_byte_ranges.push(sr.start..(sr.start + 2));
+                    delimiter_byte_ranges.push((sr.end - 2)..sr.end);
+                }
+            }
+            AstSpanKind::Emph => {
+                if sr.len() >= 2 {
+                    delimiter_byte_ranges.push(sr.start..(sr.start + 1));
+                    delimiter_byte_ranges.push((sr.end - 1)..sr.end);
+                }
+            }
+            AstSpanKind::CodeInline | AstSpanKind::MathInline => {
+                let slice = &text[sr.clone()];
+                let delim_ch = if matches!(span.kind, AstSpanKind::CodeInline) {
+                    '`'
+                } else {
+                    '$'
+                };
+                let open_len = slice.chars().take_while(|&c| c == delim_ch).count();
+                let close_len = slice.chars().rev().take_while(|&c| c == delim_ch).count();
+                if open_len > 0 && close_len > 0 && sr.len() > open_len + close_len {
+                    delimiter_byte_ranges.push(sr.start..(sr.start + open_len));
+                    delimiter_byte_ranges.push((sr.end - close_len)..sr.end);
+                }
+            }
+            AstSpanKind::Link {
+                content_byte_range: Some(cr),
+                ..
+            }
+            | AstSpanKind::Image {
+                content_byte_range: Some(cr),
+                ..
+            } => {
+                if cr.start > sr.start && cr.end <= sr.end {
+                    delimiter_byte_ranges.push(sr.start..cr.start);
+                    delimiter_byte_ranges.push(cr.end..sr.end);
+                }
+            }
+            _ => {}
+        }
+
+        if delimiter_byte_ranges.is_empty() {
+            Arc::clone(&EMPTY_RANGES_ARC)
+        } else {
+            Arc::from(delimiter_byte_ranges.into_boxed_slice())
+        }
+    }
+
+    fn ensure_prepared_base(&self, dialect: MarkdownDialect) {
+        let key = (self.revision, dialect);
+        if self
+            .cache
+            .borrow()
+            .prepared_base
+            .as_ref()
+            .is_some_and(|b| b.key == key)
+        {
+            return;
+        }
+        let spans = self.extract_ast_spans_arc(dialect);
+        let text = self.as_str();
+        let total_lines = self.rope.len_lines().max(1);
+        let max_line_idx = total_lines.saturating_sub(1);
+        let max_byte = self.rope.len_bytes();
+
+        let mut delimiters = Vec::with_capacity(spans.len());
+        let mut spans_by_line: Vec<Vec<usize>> = vec![Vec::new(); total_lines];
+        let mut byte_spans_by_line: Vec<Vec<usize>> = vec![Vec::new(); total_lines];
+        let mut collapsed_live = Vec::with_capacity(spans.len());
+
+        for (s_idx, span) in spans.iter().enumerate() {
+            let delims = self.compute_span_delimiter_ranges(span, text);
+            let sl = span.start_line.min(max_line_idx);
+            let el = span.end_line.min(max_line_idx);
+            for line_vec in &mut spans_by_line[sl..=el] {
+                line_vec.push(s_idx);
+            }
+
+            let b_sl = self
+                .rope
+                .byte_to_line(span.byte_range.start.min(max_byte))
+                .min(max_line_idx);
+            let b_el = self
+                .rope
+                .byte_to_line(span.byte_range.end.min(max_byte))
+                .min(max_line_idx);
+            for line_vec in &mut byte_spans_by_line[b_sl..=b_el] {
+                line_vec.push(s_idx);
+            }
+
+            collapsed_live.push(LiveSpan {
+                span: span.clone(),
+                visibility: DelimiterVisibility::Collapsed,
+                delimiter_byte_ranges: Arc::clone(&delims),
+            });
+            delimiters.push(delims);
+        }
+
+        let mut c = self.cache.borrow_mut();
+        c.prepared_base = Some(PreparedLiveBase {
+            key,
+            ast_spans: spans,
+            delimiters,
+            spans_by_line,
+            byte_spans_by_line,
+            collapsed_live_spans: Arc::new(collapsed_live),
+            all_expanded_live_spans: None,
+            collapsed_segments: None,
+            all_expanded_segments: None,
+            live_lru: VecDeque::with_capacity(8),
+            seg_lru: VecDeque::with_capacity(8),
+        });
+    }
+
+    fn expanded_span_indices_for_caret(&self, base: &PreparedLiveBase, caret: &Range<usize>) -> Vec<usize> {
+        if self.rope.len_bytes() == 0 || base.ast_spans.is_empty() {
+            return Vec::new();
+        }
+        let max_byte = self.rope.len_bytes();
+        let max_line = base.byte_spans_by_line.len().saturating_sub(1);
+        let c_start_line = self
+            .rope
+            .byte_to_line(caret.start.min(max_byte))
+            .min(max_line);
+        let c_end_line = self
+            .rope
+            .byte_to_line(caret.end.min(max_byte))
+            .min(max_line);
+
+        let mut expanded = Vec::new();
+        if c_start_line == c_end_line {
+            for &s_idx in &base.byte_spans_by_line[c_start_line] {
+                let sr = &base.ast_spans[s_idx].byte_range;
+                if caret.start <= sr.end && caret.end >= sr.start {
+                    expanded.push(s_idx);
+                }
+            }
+        } else {
+            for line_candidates in &base.byte_spans_by_line[c_start_line..=c_end_line] {
+                for &s_idx in line_candidates {
+                    let sr = &base.ast_spans[s_idx].byte_range;
+                    if caret.start <= sr.end && caret.end >= sr.start {
+                        expanded.push(s_idx);
+                    }
+                }
+            }
+            expanded.sort_unstable();
+            expanded.dedup();
+        }
+        expanded
+    }
+
+    /// Computes a compact 64-bit signature of the exact set of AST spans currently expanded by `caret_byte_range`.
+    /// When the cursor moves inside plain text (or stays within the same span), this signature remains identical,
+    /// allowing `accent-ui` to reuse its cached `Galley` without re-shaping typography via `ab_glyph`.
+    pub fn live_visibility_signature(
+        &self,
+        dialect: MarkdownDialect,
+        view_while_typing: bool,
+        caret_byte_range: Range<usize>,
+    ) -> u64 {
+        if !view_while_typing {
+            return u64::MAX;
+        }
+        self.ensure_prepared_base(dialect);
+        let c = self.cache.borrow();
+        let Some(base) = c.prepared_base.as_ref() else {
+            return 0;
+        };
+        let expanded = self.expanded_span_indices_for_caret(base, &caret_byte_range);
+        if expanded.is_empty() {
+            return 0;
+        }
+        let mut h: u64 = 0xcbf29ce484222325;
+        for idx in expanded {
+            h ^= (idx as u64).wrapping_add(1);
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        if h == 0 || h == u64::MAX {
+            h ^ 0x5555_5555_5555_5555
+        } else {
+            h
+        }
+    }
+
+    /// Returns cached `Arc<Vec<LiveSpan>>` for `(self.revision, dialect, view_while_typing, expanded_spans)`.
     pub fn compute_live_spans_arc(
         &self,
         dialect: MarkdownDialect,
         view_while_typing: bool,
         caret_byte_range: Range<usize>,
     ) -> Arc<Vec<LiveSpan>> {
-        let eff_caret = if view_while_typing {
-            caret_byte_range
-        } else {
-            0..0
-        };
-        let key = (self.revision, dialect, view_while_typing, eff_caret.clone());
-        if let Some(cached) = {
-            let c = self.cache.borrow();
-            if c.live_key == Some(key.clone()) {
-                Some(Arc::clone(&c.live_spans))
-            } else {
-                None
-            }
-        } {
-            return cached;
-        }
+        self.ensure_prepared_base(dialect);
 
-        let text = self.as_str();
-        let spans = self.extract_ast_spans_arc(dialect);
-        let mut out = Vec::with_capacity(spans.len());
-
-        for span in spans.iter() {
-            let sr = &span.byte_range;
-            let caret_touches = eff_caret.start <= sr.end && eff_caret.end >= sr.start;
-            let visibility = if view_while_typing && !caret_touches {
-                DelimiterVisibility::Collapsed
-            } else {
-                DelimiterVisibility::Expanded
-            };
-
-            let mut delimiter_byte_ranges = Vec::new();
-            if sr.start < sr.end && sr.end <= text.len() {
-                match &span.kind {
-                    AstSpanKind::Heading { .. } => {
-                        let lr = self.line_content_byte_range(span.start_line);
-                        if !lr.is_empty() && lr.end <= text.len() {
-                            let raw_line = &text[lr.clone()];
-                            let trimmed = raw_line.trim_start_matches([' ', '\t']);
-                            let leading_ws = raw_line.len() - trimmed.len();
-                            let hash_count = trimmed.chars().take_while(|&c| c == '#').count();
-                            let after_hashes = &trimmed[hash_count..];
-                            let space_len = usize::from(after_hashes.starts_with(' '));
-                            let prefix_end = lr.start + leading_ws + hash_count + space_len;
-                            if hash_count > 0 && prefix_end > lr.start && prefix_end <= lr.end {
-                                delimiter_byte_ranges.push(lr.start..prefix_end);
-                            }
-                        }
-                        // If Setext heading (`===` or `---` on span.end_line), collapse the underline line too
-                        if span.end_line > span.start_line {
-                            let end_lr = self.line_content_byte_range(span.end_line);
-                            if !end_lr.is_empty() && end_lr.end <= text.len() {
-                                let end_trimmed = text[end_lr.clone()].trim();
-                                if !end_trimmed.is_empty()
-                                    && (end_trimmed.chars().all(|c| c == '-')
-                                        || end_trimmed.chars().all(|c| c == '='))
-                                {
-                                    delimiter_byte_ranges.push(end_lr);
-                                }
-                            }
-                        }
-                    }
-                    AstSpanKind::CodeBlock { fenced: true, .. } => {
-                        let start_lr = self.line_content_byte_range(span.start_line);
-                        if !start_lr.is_empty() && start_lr.end <= text.len() {
-                            let raw_l = text[start_lr.clone()].trim_start();
-                            if raw_l.starts_with("```") || raw_l.starts_with("~~~") {
-                                delimiter_byte_ranges.push(start_lr);
-                            }
-                        }
-                        if span.end_line > span.start_line {
-                            let end_lr = self.line_content_byte_range(span.end_line);
-                            if !end_lr.is_empty() && end_lr.end <= text.len() {
-                                let raw_l = text[end_lr.clone()].trim_start();
-                                if raw_l.starts_with("```") || raw_l.starts_with("~~~") {
-                                    delimiter_byte_ranges.push(end_lr);
-                                }
-                            }
-                        }
-                    }
-                    AstSpanKind::BlockQuote | AstSpanKind::Alert { .. } => {
-                        for l_idx in span.start_line..=span.end_line {
-                            let lr = self.line_content_byte_range(l_idx);
-                            if !lr.is_empty() && lr.end <= text.len() {
-                                let raw_l = &text[lr.clone()];
-                                let trimmed = raw_l.trim_start_matches([' ', '\t']);
-                                if let Some(after_gt) = trimmed.strip_prefix('>') {
-                                    let leading_ws = raw_l.len() - trimmed.len();
-                                    let space_len = usize::from(after_gt.starts_with(' '));
-                                    let mut prefix_end = lr.start + leading_ws + 1 + space_len;
-                                    // For GFM Alerts (`> [!NOTE]`), also collapse the `[!TYPE]` marker on the first line
-                                    if matches!(span.kind, AstSpanKind::Alert { .. })
-                                        && l_idx == span.start_line
-                                    {
-                                        let rest = &text[prefix_end..lr.end];
-                                        if rest.starts_with("[!") {
-                                            if let Some(close_br) = rest.find(']') {
-                                                prefix_end += close_br + 1;
-                                            }
-                                        }
-                                    }
-                                    delimiter_byte_ranges.push(lr.start..prefix_end);
-                                }
-                            }
-                        }
-                    }
-                    AstSpanKind::ListItem { ordered, task, .. } => {
-                        if !*ordered {
-                            let lr = self.line_content_byte_range(span.start_line);
-                            if !lr.is_empty() && lr.end <= text.len() {
-                                let raw_l = &text[lr.clone()];
-                                let trimmed = raw_l.trim_start_matches([' ', '\t']);
-                                let leading_ws = raw_l.len() - trimmed.len();
-                                let is_task_prefix = task.is_some()
-                                    && trimmed.len() >= 5
-                                    && trimmed.is_char_boundary(5)
-                                    && matches!(
-                                        &trimmed[..5],
-                                        "- [ ]"
-                                            | "- [x]"
-                                            | "- [X]"
-                                            | "* [ ]"
-                                            | "* [x]"
-                                            | "* [X]"
-                                            | "+ [ ]"
-                                            | "+ [x]"
-                                            | "+ [X]"
-                                    );
-                                if is_task_prefix {
-                                    let after_box = &trimmed[5..];
-                                    let space_len = usize::from(after_box.starts_with(' '));
-                                    let prefix_end = lr.start + leading_ws + 5 + space_len;
-                                    delimiter_byte_ranges.push(lr.start..prefix_end);
-                                } else if trimmed.starts_with("- ")
-                                    || trimmed.starts_with("* ")
-                                    || trimmed.starts_with("+ ")
-                                {
-                                    let prefix_end = lr.start + leading_ws + 2;
-                                    delimiter_byte_ranges.push(lr.start..prefix_end);
-                                }
-                            }
-                        }
-                    }
-                    AstSpanKind::Table { .. } => {
-                        for l_idx in span.start_line..=span.end_line {
-                            let lr = self.line_content_byte_range(l_idx);
-                            if !lr.is_empty() && lr.end <= text.len() {
-                                delimiter_byte_ranges.push(lr);
-                            }
-                        }
-                    }
-                    AstSpanKind::ThematicBreak => {
-                        let lr = self.line_content_byte_range(span.start_line);
-                        if !lr.is_empty() && lr.end <= text.len() {
-                            delimiter_byte_ranges.push(lr);
-                        }
-                    }
-                    AstSpanKind::MathBlock => {
-                        let slice = &text[sr.clone()];
-                        if slice.starts_with("$$") && slice.ends_with("$$") && sr.len() >= 4 {
-                            delimiter_byte_ranges.push(sr.start..(sr.start + 2));
-                            delimiter_byte_ranges.push((sr.end - 2)..sr.end);
-                        }
-                    }
-                    AstSpanKind::Strong | AstSpanKind::Strikethrough => {
-                        if sr.len() >= 4 {
-                            delimiter_byte_ranges.push(sr.start..(sr.start + 2));
-                            delimiter_byte_ranges.push((sr.end - 2)..sr.end);
-                        }
-                    }
-                    AstSpanKind::Emph => {
-                        if sr.len() >= 2 {
-                            delimiter_byte_ranges.push(sr.start..(sr.start + 1));
-                            delimiter_byte_ranges.push((sr.end - 1)..sr.end);
-                        }
-                    }
-                    AstSpanKind::CodeInline | AstSpanKind::MathInline => {
-                        let slice = &text[sr.clone()];
-                        let delim_ch = if matches!(span.kind, AstSpanKind::CodeInline) {
-                            '`'
-                        } else {
-                            '$'
-                        };
-                        let open_len = slice.chars().take_while(|&c| c == delim_ch).count();
-                        let close_len = slice.chars().rev().take_while(|&c| c == delim_ch).count();
-                        if open_len > 0 && close_len > 0 && sr.len() > open_len + close_len {
-                            delimiter_byte_ranges.push(sr.start..(sr.start + open_len));
-                            delimiter_byte_ranges.push((sr.end - close_len)..sr.end);
-                        }
-                    }
-                    AstSpanKind::Link {
-                        content_byte_range: Some(cr),
-                        ..
-                    }
-                    | AstSpanKind::Image {
-                        content_byte_range: Some(cr),
-                        ..
-                    } => {
-                        if cr.start > sr.start && cr.end <= sr.end {
-                            delimiter_byte_ranges.push(sr.start..cr.start);
-                            delimiter_byte_ranges.push(cr.end..sr.end);
-                        }
-                    }
-                    _ => {}
+        if !view_while_typing {
+            {
+                let c = self.cache.borrow();
+                if let Some(arc) = c
+                    .prepared_base
+                    .as_ref()
+                    .and_then(|b| b.all_expanded_live_spans.as_ref())
+                {
+                    return Arc::clone(arc);
                 }
             }
-
-            out.push(LiveSpan {
-                span: span.clone(),
-                visibility,
-                delimiter_byte_ranges,
-            });
+            let mut c = self.cache.borrow_mut();
+            let base = c.prepared_base.as_mut().unwrap();
+            let mut v = (*base.collapsed_live_spans).clone();
+            for ls in &mut v {
+                ls.visibility = DelimiterVisibility::Expanded;
+            }
+            let arc = Arc::new(v);
+            base.all_expanded_live_spans = Some(Arc::clone(&arc));
+            return arc;
         }
 
-        let arc = Arc::new(out);
+        let expanded = {
+            let c = self.cache.borrow();
+            let base = c.prepared_base.as_ref().unwrap();
+            let exp = self.expanded_span_indices_for_caret(base, &caret_byte_range);
+            if exp.is_empty() {
+                return Arc::clone(&base.collapsed_live_spans);
+            }
+            if let Some((_, cached_arc)) = base.live_lru.iter().find(|(k, _)| *k == exp) {
+                return Arc::clone(cached_arc);
+            }
+            exp
+        };
+
         let mut c = self.cache.borrow_mut();
-        c.live_key = Some(key);
-        c.live_spans = Arc::clone(&arc);
+        let base = c.prepared_base.as_mut().unwrap();
+        let mut v = (*base.collapsed_live_spans).clone();
+        for &idx in &expanded {
+            if let Some(ls) = v.get_mut(idx) {
+                ls.visibility = DelimiterVisibility::Expanded;
+            }
+        }
+        let arc = Arc::new(v);
+        if base.live_lru.len() >= 8 {
+            base.live_lru.pop_front();
+        }
+        base.live_lru.push_back((expanded, Arc::clone(&arc)));
         arc
     }
 
@@ -1231,219 +1683,325 @@ impl DocumentBuffer {
         }
     }
 
-    /// Returns cached `Arc<Vec<EditorTextSegment>>` in $O(1)$ on cache hit, or computes it in $O(L + S)$ linear time.
+    /// Returns cached `Arc<Vec<EditorTextSegment>>` in $O(1)$ on cache hit, or patches only the 1..3
+    /// lines overlapping expanded spans when the cursor enters/leaves a Markdown span.
     pub fn build_editor_segments_arc(
         &self,
         dialect: MarkdownDialect,
         view_while_typing: bool,
         caret_byte_range: Range<usize>,
     ) -> Arc<Vec<EditorTextSegment>> {
-        let eff_caret = if view_while_typing {
-            caret_byte_range
-        } else {
-            0..0
-        };
-        let key = (self.revision, dialect, view_while_typing, eff_caret.clone());
-        if let Some(cached) = {
-            let c = self.cache.borrow();
-            if c.segments_key == Some(key.clone()) {
-                Some(Arc::clone(&c.editor_segments))
-            } else {
-                None
-            }
-        } {
-            return cached;
-        }
-
         let text = self.as_str();
         if text.is_empty() {
             return Arc::new(Vec::new());
         }
-        let live_spans = self.compute_live_spans_arc(dialect, view_while_typing, eff_caret);
-        let total_lines = self.rope.len_lines();
+        self.ensure_prepared_base(dialect);
 
-        // Pre-index live_spans by line in O(S) so each line only inspects its 0..4 overlapping spans!
-        let mut spans_by_line: Vec<Vec<usize>> = vec![Vec::new(); total_lines];
-        for (s_idx, ls) in live_spans.iter().enumerate() {
-            let sl = ls.span.start_line.min(total_lines.saturating_sub(1));
-            let el = ls.span.end_line.min(total_lines.saturating_sub(1));
-            for line_vec in &mut spans_by_line[sl..=el] {
-                line_vec.push(s_idx);
+        if !view_while_typing {
+            {
+                let c = self.cache.borrow();
+                if let Some(arc) = c
+                    .prepared_base
+                    .as_ref()
+                    .and_then(|b| b.all_expanded_segments.as_ref())
+                {
+                    return Arc::clone(arc);
+                }
             }
+            let built = {
+                let c = self.cache.borrow();
+                let base = c.prepared_base.as_ref().unwrap();
+                let total_lines = self.rope.len_lines();
+                let mut out = Vec::with_capacity(total_lines * 2);
+                for (line_idx, line_span_indices) in base.spans_by_line.iter().enumerate() {
+                    self.append_line_editor_segments(
+                        text,
+                        line_idx,
+                        &base.ast_spans,
+                        &base.delimiters,
+                        line_span_indices,
+                        &[],
+                        true,
+                        &mut out,
+                    );
+                }
+                Arc::new(out)
+            };
+            let mut c = self.cache.borrow_mut();
+            c.prepared_base.as_mut().unwrap().all_expanded_segments = Some(Arc::clone(&built));
+            return built;
         }
 
-        let mut out = Vec::with_capacity(total_lines * 2);
-
-        for (line_idx, line_span_indices) in spans_by_line.iter().enumerate() {
-            let line_start = self.rope.line_to_byte(line_idx);
-            let slice = self.rope.line(line_idx);
-            let full_line_bytes = slice.len_bytes();
-            if full_line_bytes == 0 {
-                continue;
-            }
-            let full_line_end = line_start + full_line_bytes;
-
-            // Separate content from trailing newline ('\n' or '\r\n')
-            let mut content_len = full_line_bytes;
-            while content_len > 0 {
-                let b = slice.byte(content_len - 1);
-                if b == b'\n' || b == b'\r' {
-                    content_len -= 1;
-                } else {
-                    break;
+        // Ensure base all-collapsed segments + per-line index ranges exist once per (revision, dialect)
+        let needs_collapsed_base = {
+            let c = self.cache.borrow();
+            c.prepared_base
+                .as_ref()
+                .is_some_and(|b| b.collapsed_segments.is_none())
+        };
+        if needs_collapsed_base {
+            let (arc_segs, line_ranges) = {
+                let c = self.cache.borrow();
+                let base = c.prepared_base.as_ref().unwrap();
+                let total_lines = self.rope.len_lines();
+                let mut out = Vec::with_capacity(total_lines * 2);
+                let mut ranges = Vec::with_capacity(total_lines);
+                for (line_idx, line_span_indices) in base.spans_by_line.iter().enumerate() {
+                    let s0 = out.len();
+                    self.append_line_editor_segments(
+                        text,
+                        line_idx,
+                        &base.ast_spans,
+                        &base.delimiters,
+                        line_span_indices,
+                        &[],
+                        false,
+                        &mut out,
+                    );
+                    let s1 = out.len();
+                    ranges.push(s0..s1);
                 }
+                (Arc::new(out), ranges)
+            };
+            let mut c = self.cache.borrow_mut();
+            c.prepared_base.as_mut().unwrap().collapsed_segments = Some((arc_segs, line_ranges));
+        }
+
+        let expanded = {
+            let c = self.cache.borrow();
+            let base = c.prepared_base.as_ref().unwrap();
+            let exp = self.expanded_span_indices_for_caret(base, &caret_byte_range);
+            if exp.is_empty() {
+                return Arc::clone(&base.collapsed_segments.as_ref().unwrap().0);
             }
-            let content_end = line_start + content_len;
-            let raw_line = &text[line_start..content_end];
-
-            let mut heading_span: Option<(u8, bool)> = None;
-            let mut code_block_span: Option<&LiveSpan> = None;
-            let mut in_blockquote = false;
-            let mut is_list_item_start = false;
-
-            for &s_idx in line_span_indices {
-                let ls = &live_spans[s_idx];
-                match &ls.span.kind {
-                    AstSpanKind::Heading { level } => {
-                        heading_span =
-                            Some((*level, ls.visibility == DelimiterVisibility::Collapsed));
-                    }
-                    AstSpanKind::CodeBlock { .. } => {
-                        code_block_span = Some(ls);
-                    }
-                    AstSpanKind::BlockQuote | AstSpanKind::Alert { .. } => {
-                        in_blockquote = true;
-                    }
-                    AstSpanKind::ListItem { ordered, .. } => {
-                        if !*ordered && ls.span.start_line == line_idx {
-                            is_list_item_start = true;
-                        }
-                    }
-                    _ => {}
-                }
+            if let Some((_, cached_arc)) = base.seg_lru.iter().find(|(k, _)| *k == exp) {
+                return Arc::clone(cached_arc);
             }
-            let heading_level = heading_span.map(|(lvl, _)| lvl);
-            let in_code_block = code_block_span.is_some();
+            exp
+        };
 
-            if content_len == 0 {
-                out.push(EditorTextSegment {
-                    text: text[line_start..full_line_end].to_string(),
-                    byte_range: line_start..full_line_end,
-                    is_line_start: true,
-                    line_index: line_idx,
-                    code_block: in_code_block,
-                    blockquote: in_blockquote,
-                    ..Default::default()
-                });
-                continue;
-            }
+        let patched_arc = {
+            let c = self.cache.borrow();
+            let base = c.prepared_base.as_ref().unwrap();
+            let (collapsed_segs, line_ranges) = base.collapsed_segments.as_ref().unwrap();
+            let max_line_idx = line_ranges.len().saturating_sub(1);
 
-            if let Some(cb_ls) = code_block_span {
-                let is_fence_delim = cb_ls
-                    .delimiter_byte_ranges
-                    .iter()
-                    .any(|dr| dr.start == line_start && dr.end == content_end);
-                let is_mermaid_block = matches!(
-                    &cb_ls.span.kind,
-                    AstSpanKind::CodeBlock { info, .. }
-                        if info.trim().to_ascii_lowercase().starts_with("mermaid")
+            let min_dirty_line = expanded
+                .iter()
+                .map(|&idx| base.ast_spans[idx].start_line.min(max_line_idx))
+                .min()
+                .unwrap_or(0);
+            let max_dirty_line = expanded
+                .iter()
+                .map(|&idx| base.ast_spans[idx].end_line.min(max_line_idx))
+                .max()
+                .unwrap_or(0);
+
+            let prefix_end = line_ranges[min_dirty_line].start;
+            let suffix_start = line_ranges[max_dirty_line].end;
+
+            let mut out = Vec::with_capacity(collapsed_segs.len() + 16);
+            out.extend_from_slice(&collapsed_segs[..prefix_end]);
+            for line_idx in min_dirty_line..=max_dirty_line {
+                self.append_line_editor_segments(
+                    text,
+                    line_idx,
+                    &base.ast_spans,
+                    &base.delimiters,
+                    &base.spans_by_line[line_idx],
+                    &expanded,
+                    false,
+                    &mut out,
                 );
-                let is_cb_collapsed = cb_ls.visibility == DelimiterVisibility::Collapsed;
-                let fence_collapsed = is_fence_delim && is_cb_collapsed;
-                let mermaid_body_collapsed = !is_fence_delim && is_mermaid_block && is_cb_collapsed;
-                let trimmed_cb = raw_line.trim_start();
-                let is_code_comment = !is_fence_delim
-                    && (trimmed_cb.starts_with('#') || trimmed_cb.starts_with("//"));
+            }
+            out.extend_from_slice(&collapsed_segs[suffix_start..]);
+            Arc::new(out)
+        };
+
+        let mut c = self.cache.borrow_mut();
+        let base = c.prepared_base.as_mut().unwrap();
+        if base.seg_lru.len() >= 8 {
+            base.seg_lru.pop_front();
+        }
+        base.seg_lru
+            .push_back((expanded, Arc::clone(&patched_arc)));
+        patched_arc
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_line_editor_segments(
+        &self,
+        text: &str,
+        line_idx: usize,
+        ast_spans: &[AstSpan],
+        delimiters: &[Arc<[Range<usize>]>],
+        line_span_indices: &[usize],
+        expanded_indices: &[usize],
+        all_expanded: bool,
+        out: &mut Vec<EditorTextSegment>,
+    ) {
+        let line_start = self.rope.line_to_byte(line_idx);
+        let slice = self.rope.line(line_idx);
+        let full_line_bytes = slice.len_bytes();
+        if full_line_bytes == 0 {
+            return;
+        }
+        let full_line_end = line_start + full_line_bytes;
+
+        let mut content_len = full_line_bytes;
+        while content_len > 0 {
+            let b = slice.byte(content_len - 1);
+            if b == b'\n' || b == b'\r' {
+                content_len -= 1;
+            } else {
+                break;
+            }
+        }
+        let content_end = line_start + content_len;
+        let raw_line = &text[line_start..content_end];
+
+        let is_span_collapsed = |s_idx: usize| -> bool {
+            !all_expanded && expanded_indices.binary_search(&s_idx).is_err()
+        };
+
+        let mut heading_span: Option<(u8, bool)> = None;
+        let mut code_block_idx: Option<usize> = None;
+        let mut in_blockquote = false;
+        let mut is_list_item_start = false;
+
+        for &s_idx in line_span_indices {
+            let span = &ast_spans[s_idx];
+            match &span.kind {
+                AstSpanKind::Heading { level } => {
+                    heading_span = Some((*level, is_span_collapsed(s_idx)));
+                }
+                AstSpanKind::CodeBlock { .. } => {
+                    code_block_idx = Some(s_idx);
+                }
+                AstSpanKind::BlockQuote | AstSpanKind::Alert { .. } => {
+                    in_blockquote = true;
+                }
+                AstSpanKind::ListItem { ordered, .. } => {
+                    if !*ordered && span.start_line == line_idx {
+                        is_list_item_start = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let heading_level = heading_span.map(|(lvl, _)| lvl);
+        let in_code_block = code_block_idx.is_some();
+
+        if content_len == 0 {
+            out.push(EditorTextSegment {
+                byte_range: line_start..full_line_end,
+                is_line_start: true,
+                line_index: line_idx,
+                code_block: in_code_block,
+                blockquote: in_blockquote,
+                ..Default::default()
+            });
+            return;
+        }
+
+        if let Some(cb_idx) = code_block_idx {
+            let cb_span = &ast_spans[cb_idx];
+            let is_fence_delim = delimiters[cb_idx]
+                .iter()
+                .any(|dr| dr.start == line_start && dr.end == content_end);
+            let is_mermaid_block = matches!(
+                &cb_span.kind,
+                AstSpanKind::CodeBlock { info, .. }
+                    if info.trim().len() >= 7
+                        && info.trim().as_bytes()[..7].eq_ignore_ascii_case(b"mermaid")
+            );
+            let is_cb_collapsed = is_span_collapsed(cb_idx);
+            let fence_collapsed = is_fence_delim && is_cb_collapsed;
+            let mermaid_body_collapsed = !is_fence_delim && is_mermaid_block && is_cb_collapsed;
+            let trimmed_cb = raw_line.trim_start();
+            let is_code_comment =
+                !is_fence_delim && (trimmed_cb.starts_with('#') || trimmed_cb.starts_with("//"));
+            out.push(EditorTextSegment {
+                byte_range: line_start..content_end,
+                is_line_start: true,
+                line_index: line_idx,
+                code_block: true,
+                code_comment: is_code_comment,
+                code_inline: true,
+                muted: is_fence_delim || is_code_comment,
+                collapsed_delimiter: fence_collapsed || mermaid_body_collapsed,
+                mermaid_collapsed: mermaid_body_collapsed,
+                ..Default::default()
+            });
+            if content_end < full_line_end {
                 out.push(EditorTextSegment {
-                    text: text[line_start..content_end].to_string(),
-                    byte_range: line_start..content_end,
-                    is_line_start: true,
+                    byte_range: content_end..full_line_end,
+                    is_line_start: false,
                     line_index: line_idx,
                     code_block: true,
-                    code_comment: is_code_comment,
-                    code_inline: true,
-                    muted: is_fence_delim || is_code_comment,
                     collapsed_delimiter: fence_collapsed || mermaid_body_collapsed,
                     mermaid_collapsed: mermaid_body_collapsed,
                     ..Default::default()
                 });
-                if content_end < full_line_end {
-                    out.push(EditorTextSegment {
-                        text: text[content_end..full_line_end].to_string(),
-                        byte_range: content_end..full_line_end,
-                        is_line_start: false,
-                        line_index: line_idx,
-                        code_block: true,
-                        collapsed_delimiter: fence_collapsed || mermaid_body_collapsed,
-                        mermaid_collapsed: mermaid_body_collapsed,
-                        ..Default::default()
-                    });
-                }
-                continue;
             }
+            return;
+        }
 
-            let mut content_start = line_start;
-            let mut next_is_line_start = true;
+        let mut content_start = line_start;
+        let mut next_is_line_start = true;
 
-            if let Some((level, heading_collapsed)) = heading_span {
-                let trimmed = raw_line.trim_start();
-                let leading_ws = raw_line.len() - trimmed.len();
-                let hash_count = trimmed.chars().take_while(|&c| c == '#').count();
-                let after_hashes = &trimmed[hash_count..];
-                let space_len = usize::from(after_hashes.starts_with(' '));
-                let prefix_end = line_start + leading_ws + hash_count + space_len;
+        if let Some((level, heading_collapsed)) = heading_span {
+            let trimmed = raw_line.trim_start();
+            let leading_ws = raw_line.len() - trimmed.len();
+            let hash_count = trimmed.chars().take_while(|&c| c == '#').count();
+            let after_hashes = &trimmed[hash_count..];
+            let space_len = usize::from(after_hashes.starts_with(' '));
+            let prefix_end = line_start + leading_ws + hash_count + space_len;
 
-                if hash_count > 0 && prefix_end > line_start {
-                    out.push(EditorTextSegment {
-                        text: text[line_start..prefix_end].to_string(),
-                        byte_range: line_start..prefix_end,
-                        is_line_start: true,
-                        line_index: line_idx,
-                        heading_level: Some(level),
-                        is_heading_hashes: true,
-                        bold: true,
-                        muted: heading_collapsed,
-                        collapsed_delimiter: heading_collapsed,
-                        ..Default::default()
-                    });
-                    content_start = prefix_end;
-                    next_is_line_start = false;
-                }
-            }
-
-            // Slice inline segments across content_start..content_end using only line_span_indices
-            let inline_segs = self.slice_editor_inline_segments_indexed(
-                text,
-                content_start..content_end,
-                &live_spans,
-                line_span_indices,
-                line_idx,
-                heading_level,
-                in_blockquote,
-                is_list_item_start,
-                next_is_line_start,
-            );
-            out.extend(inline_segs);
-
-            if content_end < full_line_end {
+            if hash_count > 0 && prefix_end > line_start {
                 out.push(EditorTextSegment {
-                    text: text[content_end..full_line_end].to_string(),
-                    byte_range: content_end..full_line_end,
-                    is_line_start: false,
+                    byte_range: line_start..prefix_end,
+                    is_line_start: true,
                     line_index: line_idx,
-                    heading_level,
-                    blockquote: in_blockquote,
-                    list_item: is_list_item_start,
+                    heading_level: Some(level),
+                    is_heading_hashes: true,
+                    bold: true,
+                    muted: heading_collapsed,
+                    collapsed_delimiter: heading_collapsed,
                     ..Default::default()
                 });
+                content_start = prefix_end;
+                next_is_line_start = false;
             }
         }
 
-        let arc = Arc::new(out);
-        let mut c = self.cache.borrow_mut();
-        c.segments_key = Some(key);
-        c.editor_segments = Arc::clone(&arc);
-        arc
+        self.slice_editor_inline_segments_indexed(
+            text,
+            content_start..content_end,
+            ast_spans,
+            delimiters,
+            line_span_indices,
+            expanded_indices,
+            all_expanded,
+            line_idx,
+            heading_level,
+            in_blockquote,
+            is_list_item_start,
+            next_is_line_start,
+            out,
+        );
+
+        if content_end < full_line_end {
+            out.push(EditorTextSegment {
+                byte_range: content_end..full_line_end,
+                is_line_start: false,
+                line_index: line_idx,
+                heading_level,
+                blockquote: in_blockquote,
+                list_item: is_list_item_start,
+                ..Default::default()
+            });
+        }
     }
 
     /// Builds a 1:1 full-document stream of `EditorTextSegment`s for `egui::TextEdit`'s custom `layouter`.
@@ -1462,38 +2020,64 @@ impl DocumentBuffer {
         &self,
         text: &str,
         range: Range<usize>,
-        live_spans: &[LiveSpan],
+        ast_spans: &[AstSpan],
+        delimiters: &[Arc<[Range<usize>]>],
         line_span_indices: &[usize],
+        expanded_indices: &[usize],
+        all_expanded: bool,
         line_idx: usize,
         heading_level: Option<u8>,
         in_blockquote: bool,
         is_list_item_start: bool,
         first_is_line_start: bool,
-    ) -> Vec<EditorTextSegment> {
+        out: &mut Vec<EditorTextSegment>,
+    ) {
         if range.is_empty() {
-            return Vec::new();
+            return;
         }
         let base_bold = heading_level.is_some();
 
-        let mut boundaries = vec![range.start, range.end];
+        if line_span_indices.is_empty() {
+            out.push(EditorTextSegment {
+                byte_range: range,
+                is_line_start: first_is_line_start,
+                line_index: line_idx,
+                heading_level,
+                blockquote: in_blockquote,
+                list_item: is_list_item_start,
+                bold: base_bold,
+                ..Default::default()
+            });
+            return;
+        }
+
+        let is_span_expanded = |s_idx: usize| -> bool {
+            all_expanded || expanded_indices.binary_search(&s_idx).is_ok()
+        };
+
+        let mut boundaries = [0usize; 2];
+        boundaries[0] = range.start;
+        boundaries[1] = range.end;
+        let mut bounds_vec = Vec::with_capacity(8);
+        bounds_vec.extend_from_slice(&boundaries);
         let mut list_marker_range: Option<(Range<usize>, Option<bool>)> = None;
 
         for &s_idx in line_span_indices {
-            let ls = &live_spans[s_idx];
-            let sr = &ls.span.byte_range;
+            let span = &ast_spans[s_idx];
+            let sr = &span.byte_range;
             if sr.end <= range.start || sr.start >= range.end {
                 continue;
             }
-            for dr in &ls.delimiter_byte_ranges {
+            for dr in delimiters[s_idx].iter() {
                 if dr.start >= range.start && dr.start <= range.end {
-                    boundaries.push(dr.start);
+                    bounds_vec.push(dr.start);
                 }
                 if dr.end >= range.start && dr.end <= range.end {
-                    boundaries.push(dr.end);
+                    bounds_vec.push(dr.end);
                 }
             }
-            match &ls.span.kind {
-                AstSpanKind::ListItem { ordered, task, .. } if ls.span.start_line == line_idx => {
+            match &span.kind {
+                AstSpanKind::ListItem { ordered, task, .. } if span.start_line == line_idx => {
                     let raw_l = &text[range.clone()];
                     let trimmed = raw_l.trim_start_matches([' ', '\t']);
                     let leading_ws = raw_l.len() - trimmed.len();
@@ -1521,16 +2105,16 @@ impl DocumentBuffer {
                         0
                     };
                     if m_len > 0 && m_start + m_len <= range.end {
-                        boundaries.push(m_start);
-                        boundaries.push(m_start + m_len);
+                        bounds_vec.push(m_start);
+                        bounds_vec.push(m_start + m_len);
                         list_marker_range = Some((m_start..(m_start + m_len), *task));
                     }
                 }
-                AstSpanKind::Table { .. } if ls.visibility == DelimiterVisibility::Expanded => {
+                AstSpanKind::Table { .. } if is_span_expanded(s_idx) => {
                     for (off, ch) in text[range.clone()].char_indices() {
                         if ch == '|' {
-                            boundaries.push(range.start + off);
-                            boundaries.push(range.start + off + 1);
+                            bounds_vec.push(range.start + off);
+                            bounds_vec.push(range.start + off + 1);
                         }
                     }
                 }
@@ -1539,37 +2123,37 @@ impl DocumentBuffer {
                 | AstSpanKind::Strikethrough
                 | AstSpanKind::CodeInline
                 | AstSpanKind::MathInline => {
-                    boundaries.push(sr.start.max(range.start));
-                    boundaries.push(sr.end.min(range.end));
+                    bounds_vec.push(sr.start.max(range.start));
+                    bounds_vec.push(sr.end.min(range.end));
                 }
                 AstSpanKind::Link {
                     content_byte_range, ..
                 } => {
-                    boundaries.push(sr.start.max(range.start));
-                    boundaries.push(sr.end.min(range.end));
+                    bounds_vec.push(sr.start.max(range.start));
+                    bounds_vec.push(sr.end.min(range.end));
                     if let Some(cr) = content_byte_range {
                         if cr.start >= range.start && cr.start <= range.end {
-                            boundaries.push(cr.start);
+                            bounds_vec.push(cr.start);
                         }
                         if cr.end >= range.start && cr.end <= range.end {
-                            boundaries.push(cr.end);
+                            bounds_vec.push(cr.end);
                         }
                     }
                 }
                 AstSpanKind::Image {
                     content_byte_range, ..
                 } => {
-                    boundaries.push(sr.start.max(range.start));
-                    boundaries.push(sr.end.min(range.end));
+                    bounds_vec.push(sr.start.max(range.start));
+                    bounds_vec.push(sr.end.min(range.end));
                     if sr.start + 1 >= range.start && sr.start + 1 <= range.end {
-                        boundaries.push(sr.start + 1);
+                        bounds_vec.push(sr.start + 1);
                     }
                     if let Some(cr) = content_byte_range {
                         if cr.start >= range.start && cr.start <= range.end {
-                            boundaries.push(cr.start);
+                            bounds_vec.push(cr.start);
                         }
                         if cr.end >= range.start && cr.end <= range.end {
-                            boundaries.push(cr.end);
+                            bounds_vec.push(cr.end);
                         }
                     }
                 }
@@ -1577,18 +2161,16 @@ impl DocumentBuffer {
             }
         }
 
-        boundaries.sort_unstable();
-        boundaries.dedup();
-        boundaries.retain(|&b| text.is_char_boundary(b));
+        bounds_vec.sort_unstable();
+        bounds_vec.dedup();
+        bounds_vec.retain(|&b| text.is_char_boundary(b));
 
-        let mut segments = Vec::with_capacity(boundaries.len());
-        for (i, pair) in boundaries.windows(2).enumerate() {
+        for (i, pair) in bounds_vec.windows(2).enumerate() {
             let (seg_start, seg_end) = (pair[0], pair[1]);
             if seg_start >= seg_end {
                 continue;
             }
             let mut seg = EditorTextSegment {
-                text: text[seg_start..seg_end].to_string(),
                 byte_range: seg_start..seg_end,
                 is_line_start: i == 0 && first_is_line_start,
                 line_index: line_idx,
@@ -1608,26 +2190,26 @@ impl DocumentBuffer {
             }
 
             for &s_idx in line_span_indices {
-                let ls = &live_spans[s_idx];
-                let sr = &ls.span.byte_range;
+                let span = &ast_spans[s_idx];
+                let sr = &span.byte_range;
                 if seg_start < sr.start || seg_end > sr.end {
                     continue;
                 }
-                let is_delim = ls
-                    .delimiter_byte_ranges
+                let expanded_flag = is_span_expanded(s_idx);
+                let is_delim = delimiters[s_idx]
                     .iter()
                     .any(|dr| seg_start >= dr.start && seg_end <= dr.end);
                 if is_delim {
-                    if !matches!(ls.span.kind, AstSpanKind::Table { .. }) {
+                    if !matches!(span.kind, AstSpanKind::Table { .. }) {
                         seg.muted = true;
                     }
-                    if ls.visibility == DelimiterVisibility::Collapsed {
+                    if !expanded_flag {
                         seg.collapsed_delimiter = true;
                     }
                 }
 
-                match &ls.span.kind {
-                    AstSpanKind::Table { .. } if ls.visibility == DelimiterVisibility::Expanded => {
+                match &span.kind {
+                    AstSpanKind::Table { .. } if expanded_flag => {
                         let line_slice = text[range.clone()].trim();
                         let is_sep_row = !line_slice.is_empty()
                             && line_slice
@@ -1636,7 +2218,7 @@ impl DocumentBuffer {
                         if is_sep_row || &text[seg_start..seg_end] == "|" {
                             seg.table_pipe = true;
                             seg.bold = true;
-                        } else if line_idx == ls.span.start_line {
+                        } else if line_idx == span.start_line {
                             seg.table_header_cell = true;
                             seg.bold = true;
                         }
@@ -1701,10 +2283,8 @@ impl DocumentBuffer {
                 }
             }
 
-            segments.push(seg);
+            out.push(seg);
         }
-
-        segments
     }
 
     /// Produces AST-styled lines for the editor strictly from `comrak` `Sourcepos` spans.
@@ -1849,7 +2429,7 @@ impl DocumentBuffer {
             if sr.end <= range.start || sr.start >= range.end {
                 continue;
             }
-            for dr in &ls.delimiter_byte_ranges {
+            for dr in ls.delimiter_byte_ranges.iter() {
                 if dr.start >= range.start && dr.start <= range.end {
                     boundaries.push(dr.start);
                 }
@@ -2001,16 +2581,14 @@ impl DocumentBuffer {
     /// Parses the document into structured `PreviewBlock`s for Split/Full/Windowed Preview rendering, cached by `(revision, dialect)`.
     pub fn parse_preview_blocks_arc(&self, dialect: MarkdownDialect) -> Arc<Vec<PreviewBlock>> {
         let key = (self.revision, dialect);
-        if let Some(cached) = {
-            let c = self.cache.borrow();
+        let also_build_spans = {
+            let mut c = self.cache.borrow_mut();
+            c.preview_ever_used_for = Some(dialect);
             if c.preview_key == Some(key) {
-                Some(Arc::clone(&c.preview_blocks))
-            } else {
-                None
+                return Arc::clone(&c.preview_blocks);
             }
-        } {
-            return cached;
-        }
+            c.ast_key != Some(key)
+        };
 
         let text = self.as_str();
         let arena = Arena::new();
@@ -2022,9 +2600,22 @@ impl DocumentBuffer {
             self.collect_preview_block(child, &mut blocks);
         }
         let arc = Arc::new(blocks);
+
+        let maybe_spans = if also_build_spans {
+            let mut spans = Vec::new();
+            self.collect_node_spans(root, &mut spans);
+            Some(Arc::new(spans))
+        } else {
+            None
+        };
+
         let mut c = self.cache.borrow_mut();
         c.preview_key = Some(key);
         c.preview_blocks = Arc::clone(&arc);
+        if let Some(s_arc) = maybe_spans {
+            c.ast_key = Some(key);
+            c.ast_spans = s_arc;
+        }
         arc
     }
 
@@ -2510,11 +3101,11 @@ indice_archivio_principale__c, stato_elaborazione_finale__c)
 
         let segs_collapsed = buf.build_editor_segments(MarkdownDialect::Gfm, true, 0..0);
         // Verify 1:1 text preservation (zero cursor drift)
-        let reconstructed: String = segs_collapsed.iter().map(|s| s.text.as_str()).collect();
+        let reconstructed: String = segs_collapsed.iter().map(|s| s.as_str(md)).collect();
         assert_eq!(reconstructed, md);
         assert!(segs_collapsed
             .iter()
-            .any(|s| s.text == "**" && s.collapsed_delimiter));
+            .any(|s| s.as_str(md) == "**" && s.collapsed_delimiter));
 
         // 2. Caret at byte 9 (inside `**parola**`, byte range 7..17) -> Strong becomes Expanded!
         let expanded_spans = buf.compute_live_spans(MarkdownDialect::Gfm, true, 9..9);
@@ -2565,30 +3156,30 @@ let x = 42;
             neutral_pos..(neutral_pos + 1),
         );
         // 1:1 text preservation across all blocks
-        let reconstructed: String = segs.iter().map(|s| s.text.as_str()).collect();
+        let reconstructed: String = segs.iter().map(|s| s.as_str(md)).collect();
         assert_eq!(reconstructed, md);
 
         // Verify `# ` and `## ` heading prefixes are collapsed when caret is outside
         assert!(segs
             .iter()
-            .any(|s| s.is_heading_hashes && s.text == "# " && s.collapsed_delimiter));
+            .any(|s| s.is_heading_hashes && s.as_str(md) == "# " && s.collapsed_delimiter));
         assert!(segs
             .iter()
-            .any(|s| s.is_heading_hashes && s.text == "## " && s.collapsed_delimiter));
+            .any(|s| s.is_heading_hashes && s.as_str(md) == "## " && s.collapsed_delimiter));
 
         // Verify `- [x] `, `- `, `> `, and ` ```rust ` are collapsed when caret is outside
         assert!(segs
             .iter()
-            .any(|s| s.text == "- [x] " && s.collapsed_delimiter));
+            .any(|s| s.as_str(md) == "- [x] " && s.collapsed_delimiter));
         assert!(segs
             .iter()
-            .any(|s| s.text == "- " && s.collapsed_delimiter));
+            .any(|s| s.as_str(md) == "- " && s.collapsed_delimiter));
         assert!(segs
             .iter()
-            .any(|s| s.text == "> " && s.collapsed_delimiter));
+            .any(|s| s.as_str(md) == "> " && s.collapsed_delimiter));
         assert!(segs
             .iter()
-            .any(|s| s.text == "```rust" && s.collapsed_delimiter));
+            .any(|s| s.as_str(md) == "```rust" && s.collapsed_delimiter));
 
         // Verify table lines are collapsed when caret is outside, and expand when caret enters table
         let live_outside = buf.compute_live_spans(
@@ -2643,7 +3234,7 @@ let x = 42;
             "Segments should be non-empty for GFM_reference_example.md"
         );
         // Verify 1:1 text preservation across all 5,050 lines
-        let reconstructed: String = segs_1.iter().map(|s| s.text.as_str()).collect();
+        let reconstructed: String = segs_1.iter().map(|s| s.as_str(&content)).collect();
         assert_eq!(reconstructed, content);
 
         // Second call with identical state must hit cache in < 0.5 ms
@@ -2786,36 +3377,36 @@ DISPLAY=:99 apostrophe
         let buf = DocumentBuffer::from_str_content(md);
         // Source mode (view_while_typing = false -> all spans Expanded)
         let segs = buf.build_editor_segments(MarkdownDialect::Gfm, false, 0..0);
-        let reconstructed: String = segs.iter().map(|s| s.text.as_str()).collect();
+        let reconstructed: String = segs.iter().map(|s| s.as_str(md)).collect();
         assert_eq!(reconstructed, md);
 
         // Ordered list marker `1. `
-        assert!(segs.iter().any(|s| s.text == "1. " && s.list_marker));
+        assert!(segs.iter().any(|s| s.as_str(md) == "1. " && s.list_marker));
         // Checked task marker `- [x] `
         assert!(segs
             .iter()
-            .any(|s| s.text == "- [x] " && s.list_marker && s.task_checked == Some(true)));
+            .any(|s| s.as_str(md) == "- [x] " && s.list_marker && s.task_checked == Some(true)));
         // Unchecked task marker `- [ ] `
         assert!(segs
             .iter()
-            .any(|s| s.text == "- [ ] " && s.list_marker && s.task_checked == Some(false)));
+            .any(|s| s.as_str(md) == "- [ ] " && s.list_marker && s.task_checked == Some(false)));
         // Link text and URL part
-        assert!(segs.iter().any(|s| s.text == "guida" && s.link));
+        assert!(segs.iter().any(|s| s.as_str(md) == "guida" && s.link));
         assert!(segs
             .iter()
-            .any(|s| s.text == "](https://accent.dev)" && s.link_url_part));
+            .any(|s| s.as_str(md) == "](https://accent.dev)" && s.link_url_part));
         // Code block comment vs body
         assert!(segs
             .iter()
-            .any(|s| s.text == "# Comment line" && s.code_block && s.code_comment));
+            .any(|s| s.as_str(md) == "# Comment line" && s.code_block && s.code_comment));
         assert!(segs
             .iter()
-            .any(|s| s.text == "DISPLAY=:99 apostrophe" && s.code_block && !s.code_comment));
+            .any(|s| s.as_str(md) == "DISPLAY=:99 apostrophe" && s.code_block && !s.code_comment));
         // Expanded table pipes and header cells
-        assert!(segs.iter().any(|s| s.text == "|" && s.table_pipe));
+        assert!(segs.iter().any(|s| s.as_str(md) == "|" && s.table_pipe));
         assert!(segs
             .iter()
-            .any(|s| s.text.contains("Costrutto") && s.table_header_cell));
+            .any(|s| s.as_str(md).contains("Costrutto") && s.table_header_cell));
     }
 
     #[test]
@@ -2839,7 +3430,7 @@ Paragrafo con **grassetto 🦀👍🏽✨**, *corsivo 👩‍💻*, ~~barrato �
         let buf = DocumentBuffer::from_str_content(md);
         for view_while_typing in [false, true] {
             let segs = buf.build_editor_segments(MarkdownDialect::Gfm, view_while_typing, 0..0);
-            let reconstructed: String = segs.iter().map(|s| s.text.as_str()).collect();
+            let reconstructed: String = segs.iter().map(|s| s.as_str(md)).collect();
             assert_eq!(
                 reconstructed, md,
                 "1:1 UTF-8 reconstruction must hold with complex ZWJ and flag emojis"
@@ -2849,7 +3440,7 @@ Paragrafo con **grassetto 🦀👍🏽✨**, *corsivo 👩‍💻*, ~~barrato �
             for seg in &segs {
                 assert!(md.is_char_boundary(seg.byte_range.start));
                 assert!(md.is_char_boundary(seg.byte_range.end));
-                assert_eq!(&md[seg.byte_range.clone()], seg.text.as_str());
+                assert_eq!(&md[seg.byte_range.clone()], seg.as_str(md));
             }
         }
 
@@ -2884,7 +3475,7 @@ Paragrafo con **grassetto 🦀👍🏽✨**, *corsivo 👩‍💻*, ~~barrato �
             let caret_bytes = buf.selection_byte_range();
             let live = buf.compute_live_spans(MarkdownDialect::Gfm, true, caret_bytes.clone());
             let segs = buf.build_editor_segments(MarkdownDialect::Gfm, true, caret_bytes);
-            let reconstructed: String = segs.iter().map(|s| s.text.as_str()).collect();
+            let reconstructed: String = segs.iter().map(|s| s.as_str(md)).collect();
             assert_eq!(reconstructed, md);
 
             let strong_live = live
@@ -2951,7 +3542,7 @@ Paragrafo con **grassetto 🦀👍🏽✨**, *corsivo 👩‍💻*, ~~barrato �
 
         // Cold build and 1:1 verification
         let segs_cold = buf.build_editor_segments_arc(MarkdownDialect::Gfm, true, 0..0);
-        let reconstructed: String = segs_cold.iter().map(|s| s.text.as_str()).collect();
+        let reconstructed: String = segs_cold.iter().map(|s| s.as_str(&big_md)).collect();
         assert_eq!(reconstructed, big_md);
 
         // Warm cache must be sub-millisecond
@@ -2970,12 +3561,79 @@ Paragrafo con **grassetto 🦀👍🏽✨**, *corsivo 👩‍💻*, ~~barrato �
         }
         let segs_after_edits =
             buf.build_editor_segments_arc(MarkdownDialect::Gfm, true, buf.selection_byte_range());
+        let after_doc = buf.as_str();
         let after_reconstructed: String =
-            segs_after_edits.iter().map(|s| s.text.as_str()).collect();
-        assert_eq!(after_reconstructed, buf.text());
+            segs_after_edits.iter().map(|s| s.as_str(after_doc)).collect();
+        assert_eq!(after_reconstructed, after_doc);
 
         // Undo all 100 emoji insertions and verify exact restoration
         while buf.undo() {}
         assert_eq!(buf.text(), initial_text);
+    }
+
+    #[test]
+    fn test_crlf_paragraph_stats_and_plain_text_caret_stability() {
+        let crlf_doc = "Primo paragrafo.\r\n\r\nSecondo paragrafo.\r\n\r\nTerzo paragrafo.";
+        let lf_doc = "Primo paragrafo.\n\nSecondo paragrafo.\n\nTerzo paragrafo.";
+        let s_crlf = DocumentStats::compute(crlf_doc);
+        let s_lf = DocumentStats::compute(lf_doc);
+        assert_eq!(s_crlf.paragraphs, 3);
+        assert_eq!(s_crlf.words, s_lf.words);
+        assert_eq!(s_crlf.sentences, s_lf.sentences);
+
+        let md = "Riga neutra iniziale con molte parole semplici.\n\nSeconda riga con **grassetto** qui.\n";
+        let buf = DocumentBuffer::from_str_content(md);
+        assert!(!buf.has_color_emojis());
+        let segs_a = buf.build_editor_segments_arc(MarkdownDialect::Gfm, true, 0..0);
+        let segs_b = buf.build_editor_segments_arc(MarkdownDialect::Gfm, true, 12..12);
+        let sig_a = buf.live_visibility_signature(MarkdownDialect::Gfm, true, 0..0);
+        let sig_b = buf.live_visibility_signature(MarkdownDialect::Gfm, true, 12..12);
+        assert_eq!(sig_a, 0);
+        assert_eq!(sig_a, sig_b);
+        assert!(
+            Arc::ptr_eq(&segs_a, &segs_b),
+            "Moving caret across plain text must reuse the exact Arc<Vec<EditorTextSegment>>"
+        );
+
+        let bold_off = md.find("grassetto").unwrap();
+        let sig_bold =
+            buf.live_visibility_signature(MarkdownDialect::Gfm, true, bold_off..bold_off);
+        let sig_bold_next = buf.live_visibility_signature(
+            MarkdownDialect::Gfm,
+            true,
+            (bold_off + 2)..(bold_off + 2),
+        );
+        assert_ne!(sig_bold, sig_a);
+        assert_eq!(sig_bold, sig_bold_next);
+        let segs_bold_1 =
+            buf.build_editor_segments_arc(MarkdownDialect::Gfm, true, bold_off..bold_off);
+        let segs_bold_2 = buf.build_editor_segments_arc(
+            MarkdownDialect::Gfm,
+            true,
+            (bold_off + 2)..(bold_off + 2),
+        );
+        assert!(
+            Arc::ptr_eq(&segs_bold_1, &segs_bold_2),
+            "Moving caret within the same expanded span must reuse cached patched segments"
+        );
+    }
+
+    #[test]
+    fn test_set_text_owned_cow_undo_and_word_coalescing() {
+        let base = "Inizio documento.\n".repeat(500);
+        let mut buf = DocumentBuffer::from_str_content(&base);
+        let mut working = base.clone();
+        // Simulate typing "ciao mondo" one char at a time via set_text_owned
+        for ch in "ciao mondo".chars() {
+            working.push(ch);
+            buf.set_text_owned(working.clone());
+        }
+        assert_eq!(buf.as_str(), working.as_str());
+        // Undo once: "mondo" was coalesced into 1 word undo step!
+        assert!(buf.undo());
+        assert!(buf.as_str().ends_with("ciao "));
+        // Undo until original base
+        while buf.undo() {}
+        assert_eq!(buf.as_str(), base.as_str());
     }
 }
