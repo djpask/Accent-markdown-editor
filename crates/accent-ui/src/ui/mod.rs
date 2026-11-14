@@ -167,29 +167,7 @@ pub fn render_ui(
     }
 
     // Intercept Ctrl + Mouse Wheel for Text Zoom and consume vertical scroll delta so ScrollArea doesn't scroll
-    ctx.input_mut(|i| {
-        if i.modifiers.ctrl || i.modifiers.command {
-            let wheel_y = i.raw_scroll_delta.y;
-            let smooth_y = i.smooth_scroll_delta.y;
-            let z_delta = i.zoom_delta();
-            if wheel_y.abs() > 0.1 {
-                let step = if wheel_y > 0.0 { 1.0 } else { -1.0 };
-                actions.push(Action::ZoomByStep(step));
-                i.raw_scroll_delta = Vec2::ZERO;
-                i.smooth_scroll_delta = Vec2::ZERO;
-            } else if smooth_y.abs() > 0.1 {
-                let step = if smooth_y > 0.0 { 1.0 } else { -1.0 };
-                actions.push(Action::ZoomByStep(step));
-                i.raw_scroll_delta = Vec2::ZERO;
-                i.smooth_scroll_delta = Vec2::ZERO;
-            } else if (z_delta - 1.0).abs() > 0.005 {
-                let step = if z_delta > 1.0 { 1.0 } else { -1.0 };
-                actions.push(Action::ZoomByStep(step));
-                i.raw_scroll_delta = Vec2::ZERO;
-                i.smooth_scroll_delta = Vec2::ZERO;
-            }
-        }
-    });
+    handle_ctrl_wheel_zoom(ctx, actions);
 
     // Global keyboard shortcuts (consume app-level Ctrl/Cmd shortcuts so `egui::TextEdit`
     // does not interpret Ctrl+W as delete-word or Ctrl+Z via widget undoer)
@@ -533,6 +511,8 @@ pub fn render_ui(
             .with_title(format!("{} — Preview", session.document_title))
             .with_inner_size([720.0, 920.0]);
         ctx.show_viewport_immediate(vp_id, builder, |vp_ctx, _class| {
+            vp_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+            handle_ctrl_wheel_zoom(vp_ctx, actions);
             let vp_pal = apply_theme(vp_ctx, session.palette_preset, session.theme);
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(vp_pal.bg_preview))
@@ -549,6 +529,82 @@ pub fn render_ui(
             }
         });
     }
+}
+
+/// Font-size change (in `pt`) per single standard mouse-wheel notch (`MouseWheelUnit::Line` = `1.0`).
+/// Matches the `±0.5 pt` (~2.9%) granularity of the Preferences font-size stepper.
+const WHEEL_ZOOM_STEP_PER_LINE_PT: f32 = 0.5;
+/// Point-to-line normalization factor (`30.0` logical points per discrete notch).
+const WHEEL_ZOOM_POINTS_PER_LINE: f32 = 30.0;
+/// Maximum font-size change (in `pt`) allowed in a single frame so neither rapid wheel bursts
+/// nor X11 `ButtonPress`+`ButtonRelease` scroll pairs can jump more than one `0.5 pt` step per frame.
+const MAX_WHEEL_ZOOM_STEP_PER_FRAME_PT: f32 = 0.5;
+
+/// Computes the proportional font-size delta (`pt`) for the current frame from `Ctrl/Cmd + MouseWheel`
+/// (or native trackpad pinch `Event::Zoom`), ignoring `egui`'s multi-frame `smooth_scroll_delta` and
+/// `zoom_delta()` exponential decay tails so a single wheel movement never triggers repeated jumps.
+pub(crate) fn compute_ctrl_wheel_zoom_step(i: &egui::InputState) -> f32 {
+    let ctrl_held = i.modifiers.ctrl || i.modifiers.command || i.modifiers.mac_cmd;
+    let mut notches = 0.0_f32;
+    let mut saw_wheel_event = false;
+
+    for ev in &i.events {
+        match ev {
+            egui::Event::MouseWheel {
+                unit,
+                delta,
+                modifiers,
+            } if ctrl_held || modifiers.ctrl || modifiers.command || modifiers.mac_cmd => {
+                saw_wheel_event = true;
+                notches += match unit {
+                    egui::MouseWheelUnit::Line => delta.y,
+                    egui::MouseWheelUnit::Point => delta.y / WHEEL_ZOOM_POINTS_PER_LINE,
+                    egui::MouseWheelUnit::Page => delta.y * 4.0,
+                };
+            }
+            egui::Event::Zoom(factor) if (*factor - 1.0).abs() > 0.002 => {
+                notches += (*factor - 1.0) * 10.0;
+            }
+            _ => {}
+        }
+    }
+
+    if !saw_wheel_event && ctrl_held && i.raw_scroll_delta.y.abs() > 0.05 {
+        notches += i.raw_scroll_delta.y / WHEEL_ZOOM_POINTS_PER_LINE;
+    }
+
+    let step_pt = (notches * WHEEL_ZOOM_STEP_PER_LINE_PT).clamp(
+        -MAX_WHEEL_ZOOM_STEP_PER_FRAME_PT,
+        MAX_WHEEL_ZOOM_STEP_PER_FRAME_PT,
+    );
+    if step_pt.abs() > 0.01 {
+        step_pt
+    } else {
+        0.0
+    }
+}
+
+fn handle_ctrl_wheel_zoom(ctx: &Context, actions: &mut Vec<Action>) {
+    ctx.input_mut(|i| {
+        let step_pt = compute_ctrl_wheel_zoom_step(i);
+        let ctrl_held = i.modifiers.ctrl
+            || i.modifiers.command
+            || i.modifiers.mac_cmd
+            || i.events.iter().any(|ev| {
+                matches!(
+                    ev,
+                    egui::Event::MouseWheel { modifiers, .. }
+                        if modifiers.ctrl || modifiers.command || modifiers.mac_cmd
+                )
+            });
+        if step_pt != 0.0 {
+            actions.push(Action::ZoomByStep(step_pt));
+        }
+        if ctrl_held || step_pt != 0.0 {
+            i.raw_scroll_delta = Vec2::ZERO;
+            i.smooth_scroll_delta = Vec2::ZERO;
+        }
+    });
 }
 
 fn handle_window_edge_resize(ctx: &Context, win_rect: Rect, is_maximized: bool) {
@@ -5927,5 +5983,127 @@ fn render_preferences_dialog(
             actions.push(Action::SetPalettePreset(preset));
         }
         ppx += w_pill + 4.0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_wheel_notch_applies_once_without_multi_frame_exponential_tail() {
+        let ctx = Context::default();
+        let mut session = Session::default();
+        let initial_font_size = session.typography.font_size;
+
+        // Frame 0: user turns the mouse wheel by 1 single notch while holding Ctrl
+        let mut raw0 = egui::RawInput {
+            modifiers: egui::Modifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+            events: vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: Vec2::new(0.0, 1.0),
+                modifiers: egui::Modifiers {
+                    ctrl: true,
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        };
+        raw0.time = Some(0.0);
+
+        let mut frame0_actions = Vec::new();
+        let _ = ctx.run(raw0, |ctx| {
+            handle_ctrl_wheel_zoom(ctx, &mut frame0_actions);
+        });
+        assert_eq!(
+            frame0_actions.len(),
+            1,
+            "Exactly one ZoomByStep action must fire on Frame 0"
+        );
+        for act in frame0_actions {
+            session.apply(act);
+        }
+        assert!(
+            (session.typography.font_size - (initial_font_size + 0.5)).abs() < 1e-4,
+            "1 standard wheel notch must increment font_size by +0.5 pt (got {})",
+            session.typography.font_size
+        );
+
+        // Frames 1..=15: user keeps holding Ctrl without moving the wheel.
+        // Internally, egui's `unprocessed_scroll_delta_for_zoom` continues decaying into `i.zoom_delta()`,
+        // which previously caused +1.0 pt jumps on every frame. Now zero actions must fire!
+        for frame_idx in 1..=15 {
+            let mut raw = egui::RawInput {
+                modifiers: egui::Modifiers {
+                    ctrl: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            raw.time = Some(frame_idx as f64 * 0.016);
+
+            let mut follow_actions = Vec::new();
+            let _ = ctx.run(raw, |ctx| {
+                handle_ctrl_wheel_zoom(ctx, &mut follow_actions);
+            });
+            assert!(
+                follow_actions.is_empty(),
+                "Frame {frame_idx} must not emit ghost zoom steps from egui's exponential decay tail: {follow_actions:?}"
+            );
+        }
+
+        assert!(
+            (session.typography.font_size - (initial_font_size + 0.5)).abs() < 1e-4,
+            "Font size must remain at +0.5 pt after 15 frames of holding Ctrl"
+        );
+    }
+
+    #[test]
+    fn fractional_high_res_wheel_and_touchpad_deltas_scale_proportionally() {
+        let mut input = egui::InputState::default();
+        input.modifiers.ctrl = true;
+
+        // Fractional high-resolution wheel event: 0.2 lines -> 0.2 * 0.5 = +0.10 pt
+        input.events = vec![egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: Vec2::new(0.0, 0.2),
+            modifiers: input.modifiers,
+        }];
+        let step_line = compute_ctrl_wheel_zoom_step(&input);
+        assert!(
+            (step_line - 0.10).abs() < 1e-4,
+            "Expected +0.10 pt for 0.2 line delta, got {step_line}"
+        );
+
+        // Small touchpad pixel/point event: -3.0 points -> (-3.0 / 30.0) * 0.5 = -0.05 pt
+        input.events = vec![egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: Vec2::new(0.0, -3.0),
+            modifiers: input.modifiers,
+        }];
+        let step_point = compute_ctrl_wheel_zoom_step(&input);
+        assert!(
+            (step_point - (-0.05)).abs() < 1e-4,
+            "Expected -0.05 pt for -3.0 point delta, got {step_point}"
+        );
+    }
+
+    #[test]
+    fn rapid_wheel_burst_is_clamped_per_frame() {
+        let mut input = egui::InputState::default();
+        input.modifiers.ctrl = true;
+        input.events = vec![egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: Vec2::new(0.0, 12.0),
+            modifiers: input.modifiers,
+        }];
+        let step = compute_ctrl_wheel_zoom_step(&input);
+        assert!(
+            (step - MAX_WHEEL_ZOOM_STEP_PER_FRAME_PT).abs() < 1e-4,
+            "Expected clamping at +{MAX_WHEEL_ZOOM_STEP_PER_FRAME_PT} pt, got {step}"
+        );
     }
 }
