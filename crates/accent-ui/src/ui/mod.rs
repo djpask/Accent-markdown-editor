@@ -2332,11 +2332,17 @@ fn render_editor_pane(
                         egui::text_edit::TextEditState::load(ui.ctx(), te_id).unwrap_or_default();
                     te_state.cursor.set_char_range(Some(c_range));
                     te_state.store(ui.ctx(), te_id);
-                    if session.overlay == ActiveOverlay::None && !session.search_bar_open {
+                    if matches!(
+                        session.overlay,
+                        ActiveOverlay::None | ActiveOverlay::StatsMenu
+                    ) && !session.search_bar_open
+                    {
                         ui.ctx().memory_mut(|m| m.request_focus(te_id));
                     }
-                } else if session.overlay == ActiveOverlay::None
-                    && !session.search_bar_open
+                } else if matches!(
+                    session.overlay,
+                    ActiveOverlay::None | ActiveOverlay::StatsMenu
+                ) && !session.search_bar_open
                     && !ui.ctx().memory(|m| m.has_focus(te_id))
                 {
                     ui.ctx().memory_mut(|m| m.request_focus(te_id));
@@ -2836,7 +2842,7 @@ fn render_editor_pane(
                     );
                 }
 
-                if output.response.clicked()
+                if (output.response.clicked() || output.response.drag_started())
                     && session.overlay != ActiveOverlay::None
                     && session.overlay != ActiveOverlay::PreferencesDialog
                 {
@@ -2894,7 +2900,11 @@ fn render_editor_pane(
                         .translate(output.galley_pos.to_vec2())
                         .expand2(Vec2::new(4.0, 16.0));
                     ui.scroll_to_rect(cur_screen, None);
-                    if session.overlay == ActiveOverlay::None && !session.search_bar_open {
+                    if matches!(
+                        session.overlay,
+                        ActiveOverlay::None | ActiveOverlay::StatsMenu
+                    ) && !session.search_bar_open
+                    {
                         output.response.request_focus();
                     }
                     ui.ctx().request_repaint();
@@ -3651,6 +3661,8 @@ fn render_bottom_bar(
         Stroke::new(1.0, pal.border_headerbar),
         StrokeKind::Inside,
     );
+    // Prevent clicks on the bottom bar background from passing through to the editor and clearing text selection
+    let _ = ui.interact(bar_rect, ui.id().with("bottom_bar_bg_shield"), Sense::click());
 
     let y_mid = bar_rect.center().y;
     let fg = pal.fg_primary;
@@ -3763,7 +3775,12 @@ fn render_bottom_bar(
     draw_chevron_up(painter, Pos2::new(stat_btn_rect.right() - 14.0, y_mid), fg);
 
     if stat_hit.clicked() {
-        actions.push(Action::SetOverlay(ActiveOverlay::StatsMenu));
+        let next = if session.overlay == ActiveOverlay::StatsMenu {
+            ActiveOverlay::None
+        } else {
+            ActiveOverlay::StatsMenu
+        };
+        actions.push(Action::SetOverlay(next));
     }
 }
 
@@ -4470,7 +4487,14 @@ fn render_popovers(
                 Stroke::new(1.0, pal.border_headerbar),
                 StrokeKind::Middle,
             );
-            let stats = session.buffer.stats();
+            let _ = ui.interact(pop_rect, ui.id().with("stats_pop_bg_shield"), Sense::click());
+            let stats = session.active_stats();
+            let has_selection = session.buffer.selection_stats().is_some();
+            let word_count = if has_selection {
+                stats.words
+            } else {
+                session.display_word_count_override.unwrap_or(stats.words)
+            };
             let options = [
                 (
                     StatMetric::Characters,
@@ -4484,7 +4508,7 @@ fn render_popovers(
                     StatMetric::Words,
                     format!(
                         "{} {}",
-                        accent_session::format_thousands(stats.words, session.locale),
+                        accent_session::format_thousands(word_count, session.locale),
                         I18n::tr(session.locale, "words")
                     ),
                 ),

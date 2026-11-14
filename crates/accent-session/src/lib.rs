@@ -2925,8 +2925,14 @@ impl Session {
         }
     }
 
+    /// Returns `DocumentStats` for the active text selection when non-empty, or for the full document otherwise.
+    pub fn active_stats(&self) -> DocumentStats {
+        self.buffer.active_stats()
+    }
+
     pub fn format_active_stat(&self) -> String {
-        let stats: DocumentStats = self.buffer.stats();
+        let has_selection = self.buffer.selection_stats().is_some();
+        let stats: DocumentStats = self.buffer.active_stats();
         match self.stat_metric {
             StatMetric::Characters => {
                 format!(
@@ -2936,7 +2942,11 @@ impl Session {
                 )
             }
             StatMetric::Words => {
-                let w = self.display_word_count_override.unwrap_or(stats.words);
+                let w = if has_selection {
+                    stats.words
+                } else {
+                    self.display_word_count_override.unwrap_or(stats.words)
+                };
                 format!(
                     "{} {}",
                     format_thousands(w, self.locale),
@@ -3940,5 +3950,43 @@ mod tests {
         let after_scroll_right = session.compute_tab_bar_layout(avail_w);
         assert_eq!(after_scroll_right.start_idx, initial_start);
         assert_eq!(after_scroll_right.end_idx, 22);
+    }
+
+    #[test]
+    fn test_selected_text_overrides_document_stats_and_restores_on_deselect() {
+        let mut session = Session::default();
+        session.apply(Action::SetLocale(Locale::It));
+        let doc = "Primo paragrafo con sette parole esatte qui.\n\nSecondo paragrafo breve. Seconda frase qui!\n\nTerzo paragrafo finale.";
+        session.apply(Action::UpdateBufferText(doc.to_string()));
+
+        // Without selection: reports full document statistics (16 words, 3 paragraphs, 3 sentences)
+        session.apply(Action::SetSelection(0, 0));
+        session.apply(Action::SetStatMetric(StatMetric::Words));
+        assert_eq!(session.format_active_stat(), "16 parole");
+        session.apply(Action::SetStatMetric(StatMetric::Paragraphs));
+        assert_eq!(session.format_active_stat(), "3 paragrafi");
+
+        // Select "Secondo paragrafo breve. Seconda frase qui!" (6 words, 2 sentences, 1 paragraph, 43 chars)
+        let target = "Secondo paragrafo breve. Seconda frase qui!";
+        let start_byte = doc.find(target).unwrap();
+        let start_char = session.buffer.byte_to_char(start_byte);
+        let end_char = start_char + target.chars().count();
+        session.apply(Action::SetSelection(end_char, start_char));
+
+        session.apply(Action::SetStatMetric(StatMetric::Words));
+        assert_eq!(session.format_active_stat(), "6 parole");
+        session.apply(Action::SetStatMetric(StatMetric::Characters));
+        assert_eq!(session.format_active_stat(), "43 caratteri");
+        session.apply(Action::SetStatMetric(StatMetric::Sentences));
+        assert_eq!(session.format_active_stat(), "2 frasi");
+        session.apply(Action::SetStatMetric(StatMetric::Paragraphs));
+        assert_eq!(session.format_active_stat(), "1 paragrafi");
+
+        // Clear selection (single caret) -> restores full document stats immediately
+        session.apply(Action::SetSelection(start_char, start_char));
+        session.apply(Action::SetStatMetric(StatMetric::Words));
+        assert_eq!(session.format_active_stat(), "16 parole");
+        session.apply(Action::SetStatMetric(StatMetric::Paragraphs));
+        assert_eq!(session.format_active_stat(), "3 paragrafi");
     }
 }

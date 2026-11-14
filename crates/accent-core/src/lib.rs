@@ -572,6 +572,7 @@ pub struct DocumentBuffer {
     revision: u64,
     cached_text: Arc<String>,
     cached_stats: Cell<Option<DocumentStats>>,
+    cached_selection_stats: Cell<Option<(usize, usize, DocumentStats)>>,
     has_emojis_cache: Cell<Option<bool>>,
     cursor_char_offset: usize,
     selection_end_char_offset: usize,
@@ -598,6 +599,7 @@ impl DocumentBuffer {
             revision: 1,
             cached_text,
             cached_stats: Cell::new(None),
+            cached_selection_stats: Cell::new(None),
             has_emojis_cache: Cell::new(None),
             cursor_char_offset: default_caret,
             selection_end_char_offset: default_caret,
@@ -675,12 +677,14 @@ impl DocumentBuffer {
         self.revision = self.revision.wrapping_add(1);
         self.cached_text = Arc::new(self.rope.to_string());
         self.cached_stats.set(None);
+        self.cached_selection_stats.set(None);
         self.has_emojis_cache.set(None);
     }
 
     fn invalidate_after_in_place_mutation(&mut self) {
         self.revision = self.revision.wrapping_add(1);
         self.cached_stats.set(None);
+        self.cached_selection_stats.set(None);
         self.has_emojis_cache.set(None);
     }
 
@@ -989,6 +993,31 @@ impl DocumentBuffer {
         let computed = DocumentStats::compute(self.as_str());
         self.cached_stats.set(Some(computed));
         computed
+    }
+
+    /// Returns `DocumentStats` for the currently selected text slice when a non-empty selection
+    /// is active (`selection_byte_range()` is non-empty), or `None` when no text is selected.
+    pub fn selection_stats(&self) -> Option<DocumentStats> {
+        let range = self.selection_byte_range();
+        let text = self.as_str();
+        let start = range.start.min(text.len());
+        let end = range.end.min(text.len());
+        if start >= end {
+            return None;
+        }
+        if let Some((c_start, c_end, stats)) = self.cached_selection_stats.get() {
+            if c_start == start && c_end == end {
+                return Some(stats);
+            }
+        }
+        let computed = DocumentStats::compute(&text[start..end]);
+        self.cached_selection_stats.set(Some((start, end, computed)));
+        Some(computed)
+    }
+
+    /// Returns `DocumentStats` for the active text selection if non-empty, otherwise for the full document.
+    pub fn active_stats(&self) -> DocumentStats {
+        self.selection_stats().unwrap_or_else(|| self.stats())
     }
 
     /// Returns the half-open byte range of `line_idx` excluding any trailing `\r` or `\n`.
@@ -3635,5 +3664,40 @@ Paragrafo con **grassetto 🦀👍🏽✨**, *corsivo 👩‍💻*, ~~barrato �
         // Undo until original base
         while buf.undo() {}
         assert_eq!(buf.as_str(), base.as_str());
+    }
+
+    #[test]
+    fn test_selection_stats_and_active_stats_caching_and_fallback() {
+        let doc = "Primo paragrafo con sei parole qui.\n\nSecondo paragrafo con quattro parole. Seconda frase!";
+        let mut buf = DocumentBuffer::from_str_content(doc);
+        let full_stats = buf.stats();
+        assert_eq!(full_stats.paragraphs, 2);
+        assert_eq!(full_stats.words, 13);
+        assert_eq!(full_stats.sentences, 3);
+
+        // No selection -> selection_stats() is None and active_stats() equals full document stats
+        buf.set_cursor(5);
+        assert_eq!(buf.selection_stats(), None);
+        assert_eq!(buf.active_stats(), full_stats);
+
+        // Select only "Secondo paragrafo con quattro parole."
+        let sub = "Secondo paragrafo con quattro parole.";
+        let start_byte = doc.find(sub).unwrap();
+        let end_byte = start_byte + sub.len();
+        let start_char = buf.byte_to_char(start_byte);
+        let end_char = buf.byte_to_char(end_byte);
+        buf.set_selection(end_char, start_char);
+
+        let sel_stats = buf.selection_stats().expect("selection must produce stats");
+        assert_eq!(sel_stats.words, 5);
+        assert_eq!(sel_stats.characters, sub.chars().count());
+        assert_eq!(sel_stats.sentences, 1);
+        assert_eq!(sel_stats.paragraphs, 1);
+        assert_eq!(buf.active_stats(), sel_stats);
+
+        // Collapse selection back to single caret -> returns to full document stats
+        buf.set_selection(start_char, start_char);
+        assert_eq!(buf.selection_stats(), None);
+        assert_eq!(buf.active_stats(), full_stats);
     }
 }
