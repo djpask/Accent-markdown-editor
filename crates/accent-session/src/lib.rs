@@ -3782,7 +3782,7 @@ mod tests {
 
         let diagram = session.render_mermaid("flowchart LR\n  A[Start] --> B[End]");
         assert_eq!(diagram.theme, MermaidTheme::SemiDark);
-        assert!(diagram.svg.contains("#2B2E33") || diagram.svg.contains("#2E3136"));
+        assert!(diagram.svg.contains("#282B32") || diagram.svg.contains("#2E3136"));
     }
 
     #[test]

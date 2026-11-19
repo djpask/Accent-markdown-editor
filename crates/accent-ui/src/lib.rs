@@ -222,26 +222,41 @@ fn html_unescape_basic(s: &str) -> String {
 }
 
 fn inject_rust_mermaid_svgs(raw_html: &str, session: &Session) -> String {
-    let open_tag = "<pre><code class=\"language-mermaid\">";
+    let prefix = "<pre><code class=\"language-";
     let close_tag = "</code></pre>";
     let mut out = String::with_capacity(raw_html.len() + 1024);
     let mut rest = raw_html;
-    while let Some(start) = rest.find(open_tag) {
+    while let Some(start) = rest.find(prefix) {
         out.push_str(&rest[..start]);
-        let after_open = &rest[start + open_tag.len()..];
-        if let Some(end) = after_open.find(close_tag) {
-            let escaped_code = &after_open[..end];
-            let code = html_unescape_basic(escaped_code);
-            let diagram = session.render_mermaid(&code);
-            out.push_str("<div class=\"accent-mermaid-block\" data-testid=\"mermaid-svg-block\">");
-            out.push_str(&diagram.svg);
-            out.push_str("</div>");
-            rest = &after_open[end + close_tag.len()..];
-        } else {
-            out.push_str(&rest[start..]);
-            rest = "";
-            break;
+        let after_prefix = &rest[start + prefix.len()..];
+        if let Some(quote_end) = after_prefix.find("\">") {
+            let lang = &after_prefix[..quote_end];
+            let after_open = &after_prefix[quote_end + 2..];
+            if lang == "mermaid" {
+                if let Some(end) = after_open.find(close_tag) {
+                    let escaped_code = &after_open[..end];
+                    let code = html_unescape_basic(escaped_code);
+                    let diagram = session.render_mermaid(&code);
+                    out.push_str(
+                        "<div class=\"accent-mermaid-block\" data-testid=\"mermaid-svg-block\">",
+                    );
+                    out.push_str(&diagram.svg);
+                    out.push_str("</div>");
+                    rest = &after_open[end + close_tag.len()..];
+                    continue;
+                }
+            } else {
+                out.push_str("<pre data-code-lang=\"");
+                out.push_str(lang);
+                out.push_str("\"><code class=\"language-");
+                out.push_str(lang);
+                out.push_str("\">");
+                rest = after_open;
+                continue;
+            }
         }
+        out.push_str(prefix);
+        rest = after_prefix;
     }
     out.push_str(rest);
     out
@@ -498,29 +513,60 @@ mod tests {
 
     #[test]
     fn test_ergonomic_palette_presets() {
+        let amber_light = ui::theme::AccentPalette::for_preset(
+            ColorPalettePreset::AmberCoral,
+            ThemeMode::Light,
+        );
+        assert_eq!(amber_light.fg_heading, ui::theme::Color32::from_rgb(0x9a, 0x47, 0x08));
+        assert_eq!(amber_light.fg_subheading, ui::theme::Color32::from_rgb(0x25, 0x58, 0x9e));
+        assert_eq!(amber_light.markup_emphasis_fg, ui::theme::Color32::from_rgb(0x8a, 0x62, 0x00));
+        assert_eq!(amber_light.markup_code_fg, ui::theme::Color32::from_rgb(0xc8, 0x28, 0x50));
+        assert_eq!(amber_light.markup_codeblock_fg, ui::theme::Color32::from_rgb(0x1e, 0x82, 0x4c));
+        assert_eq!(amber_light.markup_quote_bar, ui::theme::Color32::from_rgb(0xc8, 0x5a, 0x17));
+
+        let amber_sepia = ui::theme::AccentPalette::for_preset(
+            ColorPalettePreset::AmberCoral,
+            ThemeMode::Sepia,
+        );
+        assert_eq!(amber_sepia.fg_heading, ui::theme::Color32::from_rgb(0x8f, 0x3f, 0x06));
+        assert_eq!(amber_sepia.fg_subheading, ui::theme::Color32::from_rgb(0x20, 0x4e, 0x8e));
+        assert_eq!(amber_sepia.markup_emphasis_fg, ui::theme::Color32::from_rgb(0x80, 0x5a, 0x00));
+        assert_eq!(amber_sepia.markup_code_fg, ui::theme::Color32::from_rgb(0xb8, 0x22, 0x48));
+        assert_eq!(amber_sepia.markup_codeblock_fg, ui::theme::Color32::from_rgb(0x1e, 0x82, 0x4c));
+        assert_eq!(amber_sepia.markup_quote_bar, ui::theme::Color32::from_rgb(0xc8, 0x5a, 0x17));
+
         let amber_semi = ui::theme::AccentPalette::for_preset(
             ColorPalettePreset::AmberCoral,
             ThemeMode::SemiDark,
         );
-        assert_eq!(amber_semi.bg_canvas, ui::theme::Color32::from_rgb(0x2b, 0x2e, 0x33));
+        assert_eq!(amber_semi.bg_canvas, ui::theme::Color32::from_rgb(0x28, 0x2b, 0x32));
+        assert_eq!(amber_semi.fg_primary, ui::theme::Color32::from_rgb(0xed, 0xef, 0xf2));
+        assert_eq!(amber_semi.fg_heading, ui::theme::Color32::from_rgb(0xf2, 0xc1, 0x2e));
+        assert_eq!(amber_semi.fg_subheading, ui::theme::Color32::from_rgb(0x85, 0xaa, 0xfa));
         assert_eq!(amber_semi.markup_bold_fg, ui::theme::Color32::from_rgb(0xf2, 0xc1, 0x2e));
-        assert_eq!(amber_semi.markup_emphasis_fg, ui::theme::Color32::from_rgb(0xeb, 0x85, 0x7e));
+        assert_eq!(amber_semi.markup_emphasis_fg, ui::theme::Color32::from_rgb(0xe0, 0xbe, 0x4a));
+        assert_eq!(amber_semi.markup_code_fg, ui::theme::Color32::from_rgb(0xff, 0x75, 0x93));
+        assert_eq!(amber_semi.markup_codeblock_fg, ui::theme::Color32::from_rgb(0x6b, 0xcb, 0x77));
+        assert_eq!(amber_semi.markup_quote_bar, ui::theme::Color32::from_rgb(0xe0, 0x7a, 0x38));
 
         let amber_dark = ui::theme::AccentPalette::for_preset(
             ColorPalettePreset::AmberCoral,
             ThemeMode::Dark,
         );
         assert_eq!(amber_dark.bg_canvas, ui::theme::Color32::from_rgb(0x18, 0x1a, 0x1d));
-        assert_eq!(amber_dark.bg_headerbar, ui::theme::Color32::from_rgb(0x13, 0x15, 0x18));
-        assert_eq!(amber_dark.bg_code_block, ui::theme::Color32::from_rgb(0x22, 0x25, 0x2a));
+        assert_eq!(amber_dark.bg_headerbar, ui::theme::Color32::from_rgb(0x12, 0x14, 0x17));
+        assert_eq!(amber_dark.bg_code_block, ui::theme::Color32::from_rgb(0x21, 0x24, 0x2b));
         assert_eq!(amber_dark.fg_primary, ui::theme::Color32::from_rgb(0xe6, 0xe8, 0xeb));
+        assert_eq!(amber_dark.fg_heading, ui::theme::Color32::from_rgb(0xea, 0xb7, 0x00));
+        assert_eq!(amber_dark.fg_subheading, ui::theme::Color32::from_rgb(0x7a, 0xa2, 0xf7));
         assert_eq!(amber_dark.markup_bold_fg, ui::theme::Color32::from_rgb(0xea, 0xb7, 0x00));
-        assert_eq!(amber_dark.markup_emphasis_fg, ui::theme::Color32::from_rgb(0xe5, 0x7a, 0x74));
+        assert_eq!(amber_dark.markup_emphasis_fg, ui::theme::Color32::from_rgb(0xd9, 0xb6, 0x48));
         assert_eq!(amber_dark.markup_quote_bar, ui::theme::Color32::from_rgb(0xe0, 0x7a, 0x38));
-        assert_eq!(amber_dark.markup_quote_fg, ui::theme::Color32::from_rgb(0xce, 0xc6, 0xba));
-        assert_eq!(amber_dark.markup_code_fg, ui::theme::Color32::from_rgb(0xeb, 0x7a, 0x82));
-        assert_eq!(amber_dark.bg_code_inline, ui::theme::Color32::from_rgb(0x26, 0x2a, 0x30));
-        assert_eq!(amber_dark.accent_link, ui::theme::Color32::from_rgb(0x81, 0xa2, 0xbe));
+        assert_eq!(amber_dark.markup_quote_fg, ui::theme::Color32::from_rgb(0xd8, 0xd2, 0xc8));
+        assert_eq!(amber_dark.markup_code_fg, ui::theme::Color32::from_rgb(0xff, 0x6b, 0x8b));
+        assert_eq!(amber_dark.markup_codeblock_fg, ui::theme::Color32::from_rgb(0x6b, 0xcb, 0x77));
+        assert_eq!(amber_dark.bg_code_inline, ui::theme::Color32::from_rgb(0x28, 0x2c, 0x34));
+        assert_eq!(amber_dark.accent_link, ui::theme::Color32::from_rgb(0x7a, 0xa2, 0xf7));
 
         let ed_light = ui::theme::AccentPalette::for_preset(
             ColorPalettePreset::EditorialSlate,
@@ -596,14 +642,15 @@ mod tests {
         assert_eq!(snap.palette_css.bg_canvas, "#2c3038");
         assert_eq!(snap.i18n.get("open").map(String::as_str), Some("Apri"));
 
-        // Verify Mermaid SVG injection in preview HTML
+        // Verify Mermaid SVG injection and data-code-lang enrichment in preview HTML
         let raw_html = accent_export::render_markdown_to_html(
-            "# Titolo\n\n```mermaid\nflowchart LR\n  A[Start] --> B[End]\n```\n",
+            "# Titolo\n\n```json\n{\"a\": 1}\n```\n\n```mermaid\nflowchart LR\n  A[Start] --> B[End]\n```\n",
         );
         let with_svg = inject_rust_mermaid_svgs(&raw_html, &session);
+        assert!(with_svg.contains("data-code-lang=\"json\""));
         assert!(with_svg.contains("class=\"accent-mermaid-block\""));
         assert!(with_svg.contains("<svg"));
-        assert!(with_svg.contains("#2B2E33"));
+        assert!(with_svg.contains("#282B32"));
 
         let _ = std::fs::remove_dir_all(&test_dir);
     }
@@ -630,7 +677,7 @@ mod tests {
 
     #[test]
     fn test_version_system_consistency() {
-        assert_eq!(VERSION, "0.8.21");
+        assert_eq!(VERSION, "0.8.22");
         assert_eq!(accent_core::VERSION, VERSION);
         let version_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../VERSION");
         let file_ver = std::fs::read_to_string(version_file)

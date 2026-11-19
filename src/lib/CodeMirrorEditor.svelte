@@ -41,6 +41,7 @@
   const shellLanguage = StreamLanguage.define(shell);
   const tomlLanguage = StreamLanguage.define(toml);
   const listMarkerTag = Tag.define();
+  const inlineCodeTag = Tag.define();
 
   function resolveCodeLanguage(info: string): Language | null {
     const lang = info.trim().toLowerCase().split(/\s+/)[0];
@@ -338,16 +339,26 @@
           } else {
             for (let ln = startLineNum; ln <= endLineNum; ln++) {
               const l = doc.line(ln);
-              const isFenceBoundary = ln === startLineNum || ln === endLineNum;
-              if (enabled && isFenceBoundary && !caretInsideBlock) {
+              const isFirst = ln === startLineNum;
+              const isLast = ln === endLineNum;
+              const isFenceBoundary = isFirst || isLast;
+              const classes = ['cm-live-codeblock-line'];
+              if (isFirst) classes.push('cm-live-codeblock-first');
+              if (isLast) classes.push('cm-live-codeblock-last');
+
+              const attrs: Record<string, string> | undefined =
+                isFirst && fenceLang ? { 'data-code-lang': fenceLang } : undefined;
+
+              ranges.push(
+                Decoration.line({
+                  class: classes.join(' '),
+                  ...(attrs ? { attributes: attrs } : {}),
+                }).range(l.from)
+              );
+
+              if (enabled && isFenceBoundary && !caretInsideBlock && l.to > l.from) {
                 ranges.push(
-                  Decoration.line({
-                    class: 'cm-live-codeblock-line cm-live-fence-muted',
-                  }).range(l.from)
-                );
-              } else {
-                ranges.push(
-                  Decoration.line({ class: 'cm-live-codeblock-line' }).range(l.from)
+                  Decoration.mark({ class: 'cm-live-fence-muted' }).range(l.from, l.to)
                 );
               }
             }
@@ -561,8 +572,10 @@
         }
       }
 
-      // 7f. Italic (*text*)
-      for (const m of text.matchAll(/(?<!\*)\*(?=\S)([^*\n]*?\S)\*(?!\*)/g)) {
+      // 7f. Italic (*text* or _text_)
+      for (const m of text.matchAll(
+        /(?<!\*)\*(?=\S)([^*\n]*?\S)\*(?!\*)|(?<![_\w])_(?=\S)([^_\n]*?\S)_(?![_\w])/g
+      )) {
         if (m.index === undefined) continue;
         const from = line.from + m.index;
         const to = from + m[0].length;
@@ -615,12 +628,16 @@
   }
 
   const accentMarkdownHighlight = HighlightStyle.define([
-    { tag: tags.quote, color: 'var(--markup-quote-fg)', fontStyle: 'italic' },
+    { tag: tags.quote, color: 'var(--markup-quote-fg)' },
     { tag: tags.heading1, color: 'var(--fg-heading)', fontWeight: '700' },
-    { tag: tags.heading2, color: 'var(--fg-heading)', fontWeight: '700' },
-    { tag: tags.heading3, color: 'var(--fg-subheading)', fontWeight: '700' },
     {
-      tag: [tags.heading4, tags.heading5, tags.heading6],
+      tag: [
+        tags.heading2,
+        tags.heading3,
+        tags.heading4,
+        tags.heading5,
+        tags.heading6,
+      ],
       color: 'var(--fg-subheading)',
       fontWeight: '700',
     },
@@ -628,7 +645,7 @@
     { tag: tags.emphasis, fontStyle: 'italic', color: 'var(--markup-emphasis-fg)' },
     { tag: tags.strikethrough, textDecoration: 'line-through', color: 'var(--fg-muted)' },
     {
-      tag: tags.monospace,
+      tag: inlineCodeTag,
       fontFamily: 'var(--code-font-stack)',
       color: 'var(--markup-code-fg)',
       backgroundColor: 'var(--bg-code-inline)',
@@ -640,6 +657,10 @@
     { tag: tags.processingInstruction, color: 'var(--fg-muted)' },
     { tag: tags.meta, color: 'var(--fg-muted)' },
     // Code block syntax highlighting (JSON, Rust, Bash, Python, TOML, YAML, HTML, CSS, JS/TS)
+    {
+      tag: [tags.variableName, tags.definition(tags.variableName)],
+      color: 'var(--fg-primary)',
+    },
     {
       tag: [
         tags.propertyName,
@@ -673,6 +694,7 @@
       tag: [
         tags.function(tags.variableName),
         tags.function(tags.propertyName),
+        tags.standard(tags.variableName),
         tags.macroName,
       ],
       color: 'var(--syntax-function)',
@@ -789,7 +811,9 @@
                   'OrderedList/... BulletList/...': tags.content,
                   ListMark: listMarkerTag,
                   CodeText: tags.content,
-                  InlineCode: tags.monospace,
+                  CodeInfo: tags.processingInstruction,
+                  InlineCode: inlineCodeTag,
+                  'InlineCode/...': inlineCodeTag,
                 }),
               ],
             },
@@ -930,7 +954,7 @@
   :global(.cm-live-h2) {
     font-size: 1.26em;
     line-height: 1.35;
-    color: var(--fg-heading);
+    color: var(--fg-subheading);
     padding-top: 6px !important;
     padding-bottom: 3px !important;
   }
@@ -949,20 +973,62 @@
     border-left: 3px solid var(--markup-quote-bar);
     padding-left: 14px !important;
     color: var(--markup-quote-fg);
-    font-style: italic;
+    font-style: normal;
   }
 
   :global(.cm-live-codeblock-line) {
     background-color: var(--bg-code-block);
+    color: var(--markup-codeblock-fg);
     font-family: var(--code-font-stack) !important;
-    padding-left: 12px !important;
-    padding-right: 12px !important;
-    border-radius: 3px;
+    font-size: 0.88em !important;
+    line-height: 1.38 !important;
+    padding-left: 14px !important;
+    padding-right: 14px !important;
+    border-left: 1px solid color-mix(in srgb, var(--border-headerbar) 75%, transparent);
+    border-right: 1px solid color-mix(in srgb, var(--border-headerbar) 75%, transparent);
+    border-radius: 0;
+  }
+
+  :global(.cm-live-codeblock-first) {
+    border-top: 1px solid color-mix(in srgb, var(--border-headerbar) 75%, transparent);
+    border-top-left-radius: 7px;
+    border-top-right-radius: 7px;
+    padding-top: 6px !important;
+  }
+
+  :global(.cm-live-codeblock-last) {
+    border-bottom: 1px solid color-mix(in srgb, var(--border-headerbar) 75%, transparent);
+    border-bottom-left-radius: 7px;
+    border-bottom-right-radius: 7px;
+    padding-bottom: 6px !important;
+  }
+
+  :global(.cm-live-codeblock-first[data-code-lang]) {
+    position: relative;
+    padding-right: 76px !important;
+  }
+
+  :global(.cm-live-codeblock-first[data-code-lang]::after) {
+    content: attr(data-code-lang);
+    position: absolute;
+    top: 5px;
+    right: 12px;
+    padding: 1px 8px;
+    border-radius: 4px;
+    font-family: var(--code-font-stack);
+    font-size: 0.82em;
+    font-weight: 600;
+    line-height: 1.32;
+    letter-spacing: 0.03em;
+    color: var(--fg-muted);
+    background-color: color-mix(in srgb, var(--bg-canvas) 62%, var(--bg-code-block));
+    border: 1px solid color-mix(in srgb, var(--border-headerbar) 85%, transparent);
+    pointer-events: none;
+    user-select: none;
   }
 
   :global(.cm-live-fence-muted) {
-    opacity: 0.42;
-    font-size: 0.85em;
+    opacity: 0.28;
   }
 
   :global(.cm-live-mermaid-hidden-line) {

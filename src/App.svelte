@@ -41,7 +41,7 @@
   }
 
   const PALETTE_SWATCHES: Record<ColorPalettePreset, [string, string, string]> = {
-    AmberCoral: ['#181a1d', '#eab700', '#e57a74'],
+    AmberCoral: ['#181a1d', '#eab700', '#ff6b8b'],
     EditorialSlate: ['#faf9f5', '#2b6cb0', '#2c6e63'],
     NordicForest: ['#f7f9fc', '#3a9485', '#5e81ac'],
     VelvetDawn: ['#faf4ed', '#9b5b4a', '#c4a7e7'],
@@ -1612,12 +1612,15 @@
                 </span>
               </div>
               <div class="live-preview-content">
-                <h3 style={`color: ${draftPreviewTokens.fg_heading}; margin: 0 0 8px 0;`}>
-                  # Titolo Markdown ({draftTheme})
+                <h3 style={`color: ${draftPreviewTokens.fg_heading}; margin: 0 0 4px 0;`}>
+                  # Titolo H1 ({draftTheme})
                 </h3>
+                <h4 style={`color: ${draftPreviewTokens.fg_subheading}; margin: 0 0 8px 0; font-size: 13.2px;`}>
+                  ## Sezione H2–H6
+                </h4>
                 <p style="margin: 0 0 10px 0;">
                   Scrittura calma con <strong style={`color: ${draftPreviewTokens.markup_bold_fg};`}>grassetto</strong>,
-                  <em style={`color: ${draftPreviewTokens.markup_emphasis_fg};`}>corsivo</em>,
+                  <em style={`color: ${draftPreviewTokens.markup_emphasis_fg}; font-style: italic;`}>corsivo</em>,
                   <code
                     style={`background-color: ${draftPreviewTokens.bg_code_inline}; color: ${draftPreviewTokens.markup_code_fg}; padding: 2px 6px; border-radius: 4px;`}
                   >
@@ -1626,7 +1629,7 @@
                   e <span style={`color: ${draftPreviewTokens.accent_link}; text-decoration: underline;`}>collegamento ipertestuale</span>.
                 </p>
                 <blockquote
-                  style={`margin: 0; padding: 4px 0 4px 12px; border-left: 3px solid ${draftPreviewTokens.markup_quote_bar}; color: ${draftPreviewTokens.markup_quote_fg}; font-style: italic;`}
+                  style={`margin: 0; padding: 4px 0 4px 12px; border-left: 3px solid ${draftPreviewTokens.markup_quote_bar}; color: ${draftPreviewTokens.markup_quote_fg}; font-style: normal;`}
                 >
                   «La semplicità visiva protegge l'attenzione dell'autore.»
                 </blockquote>
@@ -2101,7 +2104,7 @@
               <div><span>{tr('fullscreen_mode')}</span><b>F11</b></div>
             </div>
           {:else}
-            <p style="margin: 0 0 8px 0; font-weight: 700;">Accent Markdown Editor v0.8.21</p>
+            <p style="margin: 0 0 8px 0; font-weight: 700;">Accent Markdown Editor v0.8.22</p>
             <p style="margin: 0; color: var(--fg-muted);">
               Rust Backend (L1–L4) • Tauri v2 • Svelte 5 • CodeMirror 6 • Offline KaTeX &amp; Mermaid
             </p>
@@ -2635,11 +2638,11 @@
     font-style: italic;
   }
 
-  :global(.preview-prose h1),
-  :global(.preview-prose h2) {
+  :global(.preview-prose h1) {
     color: var(--fg-heading);
   }
 
+  :global(.preview-prose h2),
   :global(.preview-prose h3),
   :global(.preview-prose h4),
   :global(.preview-prose h5),
@@ -2660,11 +2663,34 @@
   }
 
   :global(.preview-prose pre) {
+    position: relative;
     font-family: var(--code-font-stack);
+    font-size: 0.88em;
+    line-height: 1.38;
     background-color: var(--bg-code-block);
+    border: 1px solid color-mix(in srgb, var(--border-headerbar) 75%, transparent);
     padding: 14px 16px;
-    border-radius: 8px;
+    border-radius: 7px;
     overflow-x: auto;
+  }
+
+  :global(.preview-prose pre[data-code-lang]::after) {
+    content: attr(data-code-lang);
+    position: absolute;
+    top: 6px;
+    right: 12px;
+    padding: 1px 8px;
+    border-radius: 4px;
+    font-family: var(--code-font-stack);
+    font-size: 0.82em;
+    font-weight: 600;
+    line-height: 1.32;
+    letter-spacing: 0.03em;
+    color: var(--fg-muted);
+    background-color: color-mix(in srgb, var(--bg-canvas) 62%, var(--bg-code-block));
+    border: 1px solid color-mix(in srgb, var(--border-headerbar) 85%, transparent);
+    pointer-events: none;
+    user-select: none;
   }
 
   :global(.preview-prose pre code) {
@@ -2678,7 +2704,7 @@
     padding: 4px 0 4px 16px;
     border-left: 3px solid var(--markup-quote-bar);
     color: var(--markup-quote-fg);
-    font-style: italic;
+    font-style: normal;
   }
 
   :global(.preview-prose table) {

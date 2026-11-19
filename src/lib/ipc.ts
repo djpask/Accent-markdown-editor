@@ -136,12 +136,12 @@ export function applyPaletteToRoot(tokens: PaletteCssTokens, theme: ThemeMode): 
   root.style.setProperty('--scrollbar-thumb', tokens.scrollbar_thumb);
   root.style.setProperty('--scrollbar-track', 'transparent');
 
-  // Code block syntax highlighting semantic tokens (JSON keys in periwinkle blue, strings in sage green)
-  root.style.setProperty('--syntax-key', isDark ? '#81a2be' : '#1d5b79');
-  root.style.setProperty('--syntax-string', isDark ? '#98c379' : '#2f7a4d');
-  root.style.setProperty('--syntax-number', isDark ? '#d19a66' : '#9a4708');
-  root.style.setProperty('--syntax-keyword', isDark ? '#c678dd' : '#7c3aed');
-  root.style.setProperty('--syntax-function', isDark ? '#61afef' : '#1e5670');
+  // Code block syntax highlighting semantic tokens (keys in periwinkle/cobalt blue, strings in vibrant green)
+  root.style.setProperty('--syntax-key', isDark ? '#7aa2f7' : '#25589e');
+  root.style.setProperty('--syntax-string', isDark ? '#6bcb77' : '#1e824c');
+  root.style.setProperty('--syntax-number', isDark ? '#e09f5a' : '#9a4708');
+  root.style.setProperty('--syntax-keyword', isDark ? '#c792ea' : '#7c3aed');
+  root.style.setProperty('--syntax-function', isDark ? '#7aa2f7' : '#25589e');
   root.style.setProperty('--syntax-type', isDark ? '#eab700' : '#8f3f06');
   root.style.setProperty('--syntax-comment', tokens.fg_muted);
   root.style.setProperty('--syntax-punctuation', tokens.fg_primary);

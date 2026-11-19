@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "accent-core"
-version = "0.8.21"
+version = "0.8.22"
 dependencies = [
  "comrak",
  "pulldown-cmark",
@@ -15,7 +15,7 @@ dependencies = [
 
 [[package]]
 name = "accent-export"
-version = "0.8.21"
+version = "0.8.22"
 dependencies = [
  "accent-core",
  "accent-mermaid",
@@ -28,7 +28,7 @@ dependencies = [
 
 [[package]]
 name = "accent-mermaid"
-version = "0.8.21"
+version = "0.8.22"
 dependencies = [
  "accent-core",
  "resvg",
@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "accent-session"
-version = "0.8.21"
+version = "0.8.22"
 dependencies = [
  "accent-core",
  "accent-export",
@@ -50,7 +50,7 @@ dependencies = [
 
 [[package]]
 name = "accent-storage"
-version = "0.8.21"
+version = "0.8.22"
 dependencies = [
  "accent-core",
  "serde",
@@ -59,7 +59,7 @@ dependencies = [
 
 [[package]]
 name = "accent-ui"
-version = "0.8.21"
+version = "0.8.22"
 dependencies = [
  "accent-core",
  "accent-export",

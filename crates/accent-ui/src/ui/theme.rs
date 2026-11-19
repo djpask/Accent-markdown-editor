@@ -161,29 +161,29 @@ impl AccentPalette {
     pub const fn amber_light() -> Self {
         Self {
             bg_canvas: Color32::from_rgb(0xfa, 0xf8, 0xf5),         // #faf8f5
-            bg_headerbar: Color32::from_rgb(0xf1, 0xed, 0xe6),      // #f1ede6
-            border_headerbar: Color32::from_rgb(0xe0, 0xda, 0xd1),  // #e0dad1
+            bg_headerbar: Color32::from_rgb(0xef, 0xec, 0xe5),      // #efece5
+            border_headerbar: Color32::from_rgb(0xdd, 0xd6, 0xcc),  // #ddd6cc
             fg_primary: Color32::from_rgb(0x22, 0x25, 0x2a),        // #22252a
-            fg_heading: Color32::from_rgb(0x18, 0x22, 0x32),        // #182232
-            fg_subheading: Color32::from_rgb(0x1d, 0x5b, 0x79),     // #1d5b79
-            fg_muted: Color32::from_rgb(0x78, 0x7d, 0x85),          // #787d85
+            fg_heading: Color32::from_rgb(0x9a, 0x47, 0x08),        // #9a4708 (H1 burnt amber)
+            fg_subheading: Color32::from_rgb(0x25, 0x58, 0x9e),     // #25589e (H2-H6 deep slate/cobalt blue)
+            fg_muted: Color32::from_rgb(0x74, 0x79, 0x82),          // #747982
             bg_code_block: Color32::from_rgb(0xef, 0xec, 0xe6),     // #efece6
-            bg_code_inline: Color32::from_rgb(0xee, 0xf0, 0xf4),    // #eef0f4
+            bg_code_inline: Color32::from_rgb(0xea, 0xe5, 0xdc),    // #eae5dc
             bg_pill_button: Color32::from_rgb(0xe6, 0xe0, 0xd6),    // #e6e0d6
             bg_popover: Color32::from_rgb(0xfd, 0xfb, 0xf8),        // #fdfbf8
             bg_preview: Color32::from_rgb(0xf5, 0xf1, 0xea),        // #f5f1ea
-            divider_preview: Color32::from_rgb(0xe0, 0xda, 0xd1),   // #e0dad1
+            divider_preview: Color32::from_rgb(0xdd, 0xd6, 0xcc),   // #ddd6cc
             accent_orange: Color32::from_rgb(0x9a, 0x47, 0x08),     // #9a4708
-            accent_link: Color32::from_rgb(0x1d, 0x5b, 0x79),       // #1d5b79
+            accent_link: Color32::from_rgb(0x25, 0x58, 0x9e),       // #25589e
             markup_bold_fg: Color32::from_rgb(0x9a, 0x47, 0x08),    // #9a4708
-            markup_emphasis_fg: Color32::from_rgb(0xa6, 0x3a, 0x50),// #a63a50
-            markup_code_fg: Color32::from_rgb(0x1e, 0x56, 0x70),    // #1e5670
-            markup_codeblock_fg: Color32::from_rgb(0x1d, 0x5b, 0x79),// #1d5b79
+            markup_emphasis_fg: Color32::from_rgb(0x8a, 0x62, 0x00),// #8a6200 (warm dark golden-amber italic)
+            markup_code_fg: Color32::from_rgb(0xc8, 0x28, 0x50),    // #c82850 (exclusive inline code coral-raspberry)
+            markup_codeblock_fg: Color32::from_rgb(0x1e, 0x82, 0x4c),// #1e824c (vibrant codeblock green)
             markup_list_marker: Color32::from_rgb(0x9a, 0x47, 0x08),// #9a4708
-            markup_task_done: Color32::from_rgb(0x2f, 0x7a, 0x4d),  // #2f7a4d
-            markup_quote_bar: Color32::from_rgb(0x9a, 0x47, 0x08),  // #9a4708
-            markup_quote_fg: Color32::from_rgb(0x52, 0x4b, 0x42),   // #524b42
-            markup_link_url: Color32::from_rgb(0x4a, 0x74, 0x91),   // #4a7491
+            markup_task_done: Color32::from_rgb(0x1e, 0x82, 0x4c),  // #1e824c
+            markup_quote_bar: Color32::from_rgb(0xc8, 0x5a, 0x17),  // #c85a17 (warm quote bar)
+            markup_quote_fg: Color32::from_rgb(0x3b, 0x35, 0x2e),   // #3b352e
+            markup_link_url: Color32::from_rgb(0x44, 0x6b, 0x9e),   // #446b9e
             bg_table_header: Color32::from_rgb(0xea, 0xe4, 0xdc),   // #eae4dc
             spellcheck_red: Color32::from_rgb(0xb8, 0x32, 0x32),    // #b83232
             scrollbar_thumb: Color32::from_rgb(0xc8, 0xc2, 0xb8),   // #c8c2b8
@@ -194,65 +194,65 @@ impl AccentPalette {
     pub const fn amber_sepia() -> Self {
         Self {
             bg_canvas: Color32::from_rgb(0xf4, 0xef, 0xe4),         // #f4efe4
-            bg_headerbar: Color32::from_rgb(0xeb, 0xe3, 0xd3),      // #ebe3d3
-            border_headerbar: Color32::from_rgb(0xda, 0xcf, 0xb8),  // #dacfb8
+            bg_headerbar: Color32::from_rgb(0xea, 0xe2, 0xd2),      // #eae2d2
+            border_headerbar: Color32::from_rgb(0xd8, 0xcc, 0xb4),  // #d8ccb4
             fg_primary: Color32::from_rgb(0x2f, 0x27, 0x1f),        // #2f271f
-            fg_heading: Color32::from_rgb(0x21, 0x1a, 0x13),        // #211a13
-            fg_subheading: Color32::from_rgb(0x1d, 0x5b, 0x79),     // #1d5b79
-            fg_muted: Color32::from_rgb(0x7d, 0x72, 0x63),          // #7d7263
-            bg_code_block: Color32::from_rgb(0xe8, 0xe0, 0xcf),     // #e8e0cf
-            bg_code_inline: Color32::from_rgb(0xea, 0xe4, 0xd7),    // #eae4d7
+            fg_heading: Color32::from_rgb(0x8f, 0x3f, 0x06),        // #8f3f06 (H1 burnt amber)
+            fg_subheading: Color32::from_rgb(0x20, 0x4e, 0x8e),     // #204e8e (H2-H6 deep slate/cobalt blue)
+            fg_muted: Color32::from_rgb(0x7a, 0x6f, 0x60),          // #7a6f60
+            bg_code_block: Color32::from_rgb(0xe7, 0xdf, 0xce),     // #e7dfce
+            bg_code_inline: Color32::from_rgb(0xe4, 0xda, 0xc6),    // #e4dac6
             bg_pill_button: Color32::from_rgb(0xe0, 0xd6, 0xc3),    // #e0d6c3
             bg_popover: Color32::from_rgb(0xf7, 0xf2, 0xe8),        // #f7f2e8
             bg_preview: Color32::from_rgb(0xef, 0xe7, 0xd8),        // #efe7d8
-            divider_preview: Color32::from_rgb(0xda, 0xcf, 0xb8),   // #dacfb8
+            divider_preview: Color32::from_rgb(0xd8, 0xcc, 0xb4),   // #d8ccb4
             accent_orange: Color32::from_rgb(0x8f, 0x3f, 0x06),     // #8f3f06
-            accent_link: Color32::from_rgb(0x1d, 0x5b, 0x79),       // #1d5b79
+            accent_link: Color32::from_rgb(0x20, 0x4e, 0x8e),       // #204e8e
             markup_bold_fg: Color32::from_rgb(0x8f, 0x3f, 0x06),    // #8f3f06
-            markup_emphasis_fg: Color32::from_rgb(0x9b, 0x37, 0x4b),// #9b374b
-            markup_code_fg: Color32::from_rgb(0x1e, 0x56, 0x70),    // #1e5670
-            markup_codeblock_fg: Color32::from_rgb(0x1d, 0x5b, 0x79),// #1d5b79
+            markup_emphasis_fg: Color32::from_rgb(0x80, 0x5a, 0x00),// #805a00 (warm dark golden-amber italic)
+            markup_code_fg: Color32::from_rgb(0xb8, 0x22, 0x48),    // #b82248 (exclusive inline code coral-raspberry)
+            markup_codeblock_fg: Color32::from_rgb(0x1e, 0x82, 0x4c),// #1e824c (vibrant codeblock green)
             markup_list_marker: Color32::from_rgb(0x8f, 0x3f, 0x06),// #8f3f06
-            markup_task_done: Color32::from_rgb(0x2f, 0x7a, 0x4d),  // #2f7a4d
-            markup_quote_bar: Color32::from_rgb(0x8f, 0x3f, 0x06),  // #8f3f06
-            markup_quote_fg: Color32::from_rgb(0x52, 0x46, 0x38),   // #524638
-            markup_link_url: Color32::from_rgb(0x46, 0x6e, 0x82),   // #466e82
+            markup_task_done: Color32::from_rgb(0x1e, 0x82, 0x4c),  // #1e824c
+            markup_quote_bar: Color32::from_rgb(0xc8, 0x5a, 0x17),  // #c85a17 (warm quote bar)
+            markup_quote_fg: Color32::from_rgb(0x3e, 0x33, 0x28),   // #3e3328
+            markup_link_url: Color32::from_rgb(0x3e, 0x63, 0x94),   // #3e6394
             bg_table_header: Color32::from_rgb(0xe2, 0xd9, 0xc5),   // #e2d9c5
             spellcheck_red: Color32::from_rgb(0xb8, 0x3b, 0x2a),    // #b83b2a
             scrollbar_thumb: Color32::from_rgb(0xc6, 0xbc, 0xae),   // #c6bcae
         }
     }
 
-    /// Amber & Coral (mdfried-inspired) — Semi-Dark (*Soft Anthracite & Warm Gold*)
+    /// Amber & Coral (mdfried-inspired) — Semi-Dark (*Balanced Slate Anthracite & Warm Gold*)
     pub const fn amber_semi_dark() -> Self {
         Self {
-            bg_canvas: Color32::from_rgb(0x2b, 0x2e, 0x33),         // #2b2e33
-            bg_headerbar: Color32::from_rgb(0x23, 0x26, 0x2a),      // #23262a
-            border_headerbar: Color32::from_rgb(0x3c, 0x40, 0x47),  // #3c4047
-            fg_primary: Color32::from_rgb(0xec, 0xee, 0xf2),        // #eceef2
-            fg_heading: Color32::from_rgb(0xf5, 0xf7, 0xfa),        // #f5f7fa
-            fg_subheading: Color32::from_rgb(0x81, 0xa2, 0xbe),     // #81a2be
-            fg_muted: Color32::from_rgb(0x8e, 0x95, 0xa0),          // #8e95a0
-            bg_code_block: Color32::from_rgb(0x33, 0x37, 0x3e),     // #33373e
-            bg_code_inline: Color32::from_rgb(0x38, 0x3d, 0x45),    // #383d45
-            bg_pill_button: Color32::from_rgb(0x39, 0x3e, 0x46),    // #393e46
-            bg_popover: Color32::from_rgb(0x31, 0x35, 0x3b),        // #31353b
-            bg_preview: Color32::from_rgb(0x27, 0x2a, 0x2e),        // #272a2e
-            divider_preview: Color32::from_rgb(0x3c, 0x40, 0x47),   // #3c4047
+            bg_canvas: Color32::from_rgb(0x28, 0x2b, 0x32),         // #282b32 (balanced slate/warm gray)
+            bg_headerbar: Color32::from_rgb(0x1e, 0x21, 0x27),      // #1e2127 (crisp darker bar separation)
+            border_headerbar: Color32::from_rgb(0x3d, 0x42, 0x4d),  // #3d424d
+            fg_primary: Color32::from_rgb(0xed, 0xef, 0xf2),        // #edeff2 (crisp luminous text)
+            fg_heading: Color32::from_rgb(0xf2, 0xc1, 0x2e),        // #f2c12e (H1 warm amber gold)
+            fg_subheading: Color32::from_rgb(0x85, 0xaa, 0xfa),     // #85aafa (H2-H6 crisp periwinkle blue)
+            fg_muted: Color32::from_rgb(0x96, 0x9e, 0xa9),          // #969ea9
+            bg_code_block: Color32::from_rgb(0x1f, 0x22, 0x29),     // #1f2229 (deep recessed code well)
+            bg_code_inline: Color32::from_rgb(0x36, 0x3b, 0x46),    // #363b46 (detached inline pill)
+            bg_pill_button: Color32::from_rgb(0x35, 0x3a, 0x44),    // #353a44
+            bg_popover: Color32::from_rgb(0x22, 0x26, 0x2d),        // #22262d
+            bg_preview: Color32::from_rgb(0x24, 0x27, 0x2e),        // #24272e
+            divider_preview: Color32::from_rgb(0x3d, 0x42, 0x4d),   // #3d424d
             accent_orange: Color32::from_rgb(0xf2, 0xc1, 0x2e),     // #f2c12e
-            accent_link: Color32::from_rgb(0x81, 0xa2, 0xbe),       // #81a2be
+            accent_link: Color32::from_rgb(0x85, 0xaa, 0xfa),       // #85aafa
             markup_bold_fg: Color32::from_rgb(0xf2, 0xc1, 0x2e),    // #f2c12e
-            markup_emphasis_fg: Color32::from_rgb(0xeb, 0x85, 0x7e),// #eb857e
-            markup_code_fg: Color32::from_rgb(0xf0, 0x85, 0x8d),    // #f0858d
-            markup_codeblock_fg: Color32::from_rgb(0x81, 0xa2, 0xbe),// #81a2be
+            markup_emphasis_fg: Color32::from_rgb(0xe0, 0xbe, 0x4a),// #e0be4a (warm golden-yellow italic)
+            markup_code_fg: Color32::from_rgb(0xff, 0x75, 0x93),    // #ff7593 (exclusive inline code coral-raspberry)
+            markup_codeblock_fg: Color32::from_rgb(0x6b, 0xcb, 0x77),// #6bcb77 (vibrant codeblock green)
             markup_list_marker: Color32::from_rgb(0xf2, 0xc1, 0x2e),// #f2c12e
-            markup_task_done: Color32::from_rgb(0x98, 0xc3, 0x79),  // #98c379
+            markup_task_done: Color32::from_rgb(0x6b, 0xcb, 0x77),  // #6bcb77
             markup_quote_bar: Color32::from_rgb(0xe0, 0x7a, 0x38),  // #e07a38
-            markup_quote_fg: Color32::from_rgb(0xd6, 0xcf, 0xc4),   // #d6cfc4
-            markup_link_url: Color32::from_rgb(0x73, 0x91, 0xa8),   // #7391a8
-            bg_table_header: Color32::from_rgb(0x37, 0x3b, 0x42),   // #373b42
-            spellcheck_red: Color32::from_rgb(0xeb, 0x85, 0x7e),    // #eb857e
-            scrollbar_thumb: Color32::from_rgb(0x55, 0x5b, 0x64),   // #555b64
+            markup_quote_fg: Color32::from_rgb(0xe0, 0xdb, 0xd1),   // #e0dbd1
+            markup_link_url: Color32::from_rgb(0x73, 0x93, 0xd6),   // #7393d6
+            bg_table_header: Color32::from_rgb(0x32, 0x37, 0x41),   // #323741
+            spellcheck_red: Color32::from_rgb(0xe5, 0x5a, 0x5a),    // #e55a5a
+            scrollbar_thumb: Color32::from_rgb(0x55, 0x5b, 0x66),   // #555b66
         }
     }
 
@@ -260,32 +260,32 @@ impl AccentPalette {
     pub const fn amber_dark() -> Self {
         Self {
             bg_canvas: Color32::from_rgb(0x18, 0x1a, 0x1d),         // #181a1d
-            bg_headerbar: Color32::from_rgb(0x13, 0x15, 0x18),      // #131518
-            border_headerbar: Color32::from_rgb(0x28, 0x2c, 0x32),  // #282c32
+            bg_headerbar: Color32::from_rgb(0x12, 0x14, 0x17),      // #121417
+            border_headerbar: Color32::from_rgb(0x2a, 0x2e, 0x35),  // #2a2e35
             fg_primary: Color32::from_rgb(0xe6, 0xe8, 0xeb),        // #e6e8eb
-            fg_heading: Color32::from_rgb(0xf0, 0xf2, 0xf5),        // #f0f2f5
-            fg_subheading: Color32::from_rgb(0x81, 0xa2, 0xbe),     // #81a2be
-            fg_muted: Color32::from_rgb(0x74, 0x7c, 0x87),          // #747c87
-            bg_code_block: Color32::from_rgb(0x22, 0x25, 0x2a),     // #22252a
-            bg_code_inline: Color32::from_rgb(0x26, 0x2a, 0x30),    // #262a30
-            bg_pill_button: Color32::from_rgb(0x27, 0x2b, 0x31),    // #272b31
-            bg_popover: Color32::from_rgb(0x1e, 0x21, 0x26),        // #1e2126
+            fg_heading: Color32::from_rgb(0xea, 0xb7, 0x00),        // #eab700 (H1 luminous amber gold)
+            fg_subheading: Color32::from_rgb(0x7a, 0xa2, 0xf7),     // #7aa2f7 (H2-H6 crisp periwinkle blue)
+            fg_muted: Color32::from_rgb(0x7c, 0x84, 0x90),          // #7c8490
+            bg_code_block: Color32::from_rgb(0x21, 0x24, 0x2b),     // #21242b
+            bg_code_inline: Color32::from_rgb(0x28, 0x2c, 0x34),    // #282c34
+            bg_pill_button: Color32::from_rgb(0x27, 0x2b, 0x32),    // #272b32
+            bg_popover: Color32::from_rgb(0x1e, 0x21, 0x27),        // #1e2127
             bg_preview: Color32::from_rgb(0x15, 0x17, 0x1a),        // #15171a
-            divider_preview: Color32::from_rgb(0x28, 0x2c, 0x32),   // #282c32
+            divider_preview: Color32::from_rgb(0x2a, 0x2e, 0x35),   // #2a2e35
             accent_orange: Color32::from_rgb(0xea, 0xb7, 0x00),     // #eab700
-            accent_link: Color32::from_rgb(0x81, 0xa2, 0xbe),       // #81a2be
+            accent_link: Color32::from_rgb(0x7a, 0xa2, 0xf7),       // #7aa2f7
             markup_bold_fg: Color32::from_rgb(0xea, 0xb7, 0x00),    // #eab700
-            markup_emphasis_fg: Color32::from_rgb(0xe5, 0x7a, 0x74),// #e57a74
-            markup_code_fg: Color32::from_rgb(0xeb, 0x7a, 0x82),    // #eb7a82
-            markup_codeblock_fg: Color32::from_rgb(0x81, 0xa2, 0xbe),// #81a2be
+            markup_emphasis_fg: Color32::from_rgb(0xd9, 0xb6, 0x48),// #d9b648 (warm golden-yellow italic)
+            markup_code_fg: Color32::from_rgb(0xff, 0x6b, 0x8b),    // #ff6b8b (exclusive inline code coral-raspberry)
+            markup_codeblock_fg: Color32::from_rgb(0x6b, 0xcb, 0x77),// #6bcb77 (vibrant codeblock green)
             markup_list_marker: Color32::from_rgb(0xea, 0xb7, 0x00),// #eab700
-            markup_task_done: Color32::from_rgb(0x98, 0xc3, 0x79),  // #98c379
+            markup_task_done: Color32::from_rgb(0x6b, 0xcb, 0x77),  // #6bcb77
             markup_quote_bar: Color32::from_rgb(0xe0, 0x7a, 0x38),  // #e07a38
-            markup_quote_fg: Color32::from_rgb(0xce, 0xc6, 0xba),   // #cec6ba
-            markup_link_url: Color32::from_rgb(0x66, 0x85, 0x9e),   // #66859e
-            bg_table_header: Color32::from_rgb(0x24, 0x28, 0x2e),   // #24282e
-            spellcheck_red: Color32::from_rgb(0xe5, 0x7a, 0x74),    // #e57a74
-            scrollbar_thumb: Color32::from_rgb(0x45, 0x4a, 0x52),   // #454a52
+            markup_quote_fg: Color32::from_rgb(0xd8, 0xd2, 0xc8),   // #d8d2c8
+            markup_link_url: Color32::from_rgb(0x68, 0x89, 0xc2),   // #6889c2
+            bg_table_header: Color32::from_rgb(0x24, 0x28, 0x30),   // #242830
+            spellcheck_red: Color32::from_rgb(0xe0, 0x52, 0x52),    // #e05252
+            scrollbar_thumb: Color32::from_rgb(0x45, 0x4a, 0x54),   // #454a54
         }
     }
 

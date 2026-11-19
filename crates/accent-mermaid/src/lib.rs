@@ -33,41 +33,41 @@ impl MermaidTheme {
             MermaidTheme::Light => DiagramColors {
                 bg: "#FAF8F5",
                 node_fill: "#FFFFFF",
-                node_stroke: "#1D5B79",
+                node_stroke: "#25589E",
                 diamond_fill: "#FFF5EB",
                 diamond_stroke: "#9A4708",
                 edge_stroke: "#4A5568",
-                label_bg: "#EEF0F4",
+                label_bg: "#EAE5DC",
                 text_fg: "#22252A",
             },
             MermaidTheme::Sepia => DiagramColors {
                 bg: "#F4EFE4",
                 node_fill: "#FBF7F0",
-                node_stroke: "#1D5B79",
+                node_stroke: "#204E8E",
                 diamond_fill: "#F6E4CC",
                 diamond_stroke: "#8F3F06",
                 edge_stroke: "#6B4F24",
-                label_bg: "#EAE4D7",
+                label_bg: "#E4DAC6",
                 text_fg: "#2F271F",
             },
             MermaidTheme::SemiDark => DiagramColors {
-                bg: "#2B2E33",
-                node_fill: "#33373E",
-                node_stroke: "#81A2BE",
-                diamond_fill: "#3E352B",
+                bg: "#282B32",
+                node_fill: "#1F2229",
+                node_stroke: "#85AAFA",
+                diamond_fill: "#362E22",
                 diamond_stroke: "#F2C12E",
-                edge_stroke: "#A8B3C2",
-                label_bg: "#383D45",
-                text_fg: "#ECEEF2",
+                edge_stroke: "#A8B3C4",
+                label_bg: "#363B46",
+                text_fg: "#EDEFF2",
             },
             MermaidTheme::Dark => DiagramColors {
                 bg: "#181A1D",
-                node_fill: "#22252A",
-                node_stroke: "#81A2BE",
+                node_fill: "#21242B",
+                node_stroke: "#7AA2F7",
                 diamond_fill: "#2E261E",
                 diamond_stroke: "#EAB700",
                 edge_stroke: "#94A3B8",
-                label_bg: "#262A30",
+                label_bg: "#282C34",
                 text_fg: "#E6E8EB",
             },
         }
@@ -997,7 +997,7 @@ mod tests {
 
         let semi_rendered = cache.get_or_render_themed(seq, MermaidTheme::SemiDark);
         assert_eq!(semi_rendered.theme, MermaidTheme::SemiDark);
-        assert!(semi_rendered.svg.contains("#2B2E33"));
+        assert!(semi_rendered.svg.contains("#282B32"));
         assert!(semi_rendered.png_bytes.len() > 1000);
     }
 }
