@@ -31,44 +31,44 @@ impl MermaidTheme {
     fn palette(self) -> DiagramColors {
         match self {
             MermaidTheme::Light => DiagramColors {
-                bg: "#F8F9FA",
+                bg: "#FAF8F5",
                 node_fill: "#FFFFFF",
-                node_stroke: "#4A5568",
+                node_stroke: "#1D5B79",
                 diamond_fill: "#FFF5EB",
-                diamond_stroke: "#D9621F",
+                diamond_stroke: "#9A4708",
                 edge_stroke: "#4A5568",
-                label_bg: "#F1F5F9",
-                text_fg: "#2E3436",
+                label_bg: "#EEF0F4",
+                text_fg: "#22252A",
             },
             MermaidTheme::Sepia => DiagramColors {
-                bg: "#F3EBDD",
+                bg: "#F4EFE4",
                 node_fill: "#FBF7F0",
-                node_stroke: "#7C5E30",
+                node_stroke: "#1D5B79",
                 diamond_fill: "#F6E4CC",
-                diamond_stroke: "#C85A17",
+                diamond_stroke: "#8F3F06",
                 edge_stroke: "#6B4F24",
-                label_bg: "#EFE4D2",
-                text_fg: "#4F3915",
+                label_bg: "#EAE4D7",
+                text_fg: "#2F271F",
             },
             MermaidTheme::SemiDark => DiagramColors {
                 bg: "#2B2E33",
-                node_fill: "#363A40",
-                node_stroke: "#9CA7B5",
-                diamond_fill: "#433930",
-                diamond_stroke: "#E69545",
+                node_fill: "#33373E",
+                node_stroke: "#81A2BE",
+                diamond_fill: "#3E352B",
+                diamond_stroke: "#F2C12E",
                 edge_stroke: "#A8B3C2",
-                label_bg: "#32363C",
-                text_fg: "#E4E6EB",
+                label_bg: "#383D45",
+                text_fg: "#ECEEF2",
             },
             MermaidTheme::Dark => DiagramColors {
-                bg: "#232327",
-                node_fill: "#333339",
-                node_stroke: "#94A3B8",
-                diamond_fill: "#3E3127",
-                diamond_stroke: "#ED8936",
-                edge_stroke: "#A0AEC0",
-                label_bg: "#2D2D33",
-                text_fg: "#EEEEEE",
+                bg: "#181A1D",
+                node_fill: "#22252A",
+                node_stroke: "#81A2BE",
+                diamond_fill: "#2E261E",
+                diamond_stroke: "#EAB700",
+                edge_stroke: "#94A3B8",
+                label_bg: "#262A30",
+                text_fg: "#E6E8EB",
             },
         }
     }
@@ -180,8 +180,8 @@ fn shared_fontdb() -> Arc<usvg::fontdb::Database> {
             }
             for mono_path in [
                 r"C:\Windows\Fonts\consola.ttf",
-                "/usr/share/fonts/gsfonts/NimbusMonoPS-Regular.otf",
                 "/usr/share/fonts/gnu-free/FreeMono.otf",
+                "/usr/share/fonts/gsfonts/NimbusMonoPS-Regular.otf",
             ] {
                 let pm = std::path::Path::new(mono_path);
                 if pm.is_file() {
@@ -214,7 +214,7 @@ fn shared_fontdb() -> Arc<usvg::fontdb::Database> {
                     break;
                 }
             }
-            for mono in ["Nimbus Mono PS", "Consolas", "DejaVu Sans Mono"] {
+            for mono in ["FreeMono", "Nimbus Mono PS", "Consolas", "DejaVu Sans Mono"] {
                 let exists = db.faces().any(|f| {
                     f.families
                         .iter()

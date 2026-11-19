@@ -48,6 +48,7 @@ pub struct PaletteCssTokens {
     pub divider_preview: String,
     pub accent_orange: String,
     pub accent_link: String,
+    pub markup_bold_fg: String,
     pub markup_emphasis_fg: String,
     pub markup_code_fg: String,
     pub markup_codeblock_fg: String,
@@ -78,6 +79,7 @@ pub struct AccentPalette {
     pub divider_preview: Color32,
     pub accent_orange: Color32,
     pub accent_link: Color32,
+    pub markup_bold_fg: Color32,
     pub markup_emphasis_fg: Color32,
     pub markup_code_fg: Color32,
     pub markup_codeblock_fg: Color32,
@@ -140,6 +142,7 @@ impl AccentPalette {
             divider_preview: self.divider_preview.to_hex(),
             accent_orange: self.accent_orange.to_hex(),
             accent_link: self.accent_link.to_hex(),
+            markup_bold_fg: self.markup_bold_fg.to_hex(),
             markup_emphasis_fg: self.markup_emphasis_fg.to_hex(),
             markup_code_fg: self.markup_code_fg.to_hex(),
             markup_codeblock_fg: self.markup_codeblock_fg.to_hex(),
@@ -160,28 +163,29 @@ impl AccentPalette {
             bg_canvas: Color32::from_rgb(0xfa, 0xf8, 0xf5),         // #faf8f5
             bg_headerbar: Color32::from_rgb(0xf1, 0xed, 0xe6),      // #f1ede6
             border_headerbar: Color32::from_rgb(0xe0, 0xda, 0xd1),  // #e0dad1
-            fg_primary: Color32::from_rgb(0x2c, 0x2e, 0x33),        // #2c2e33
-            fg_heading: Color32::from_rgb(0x1e, 0x29, 0x3b),        // #1e293b
-            fg_subheading: Color32::from_rgb(0x2b, 0x6c, 0xb0),     // #2b6cb0
-            fg_muted: Color32::from_rgb(0x86, 0x8a, 0x92),          // #868a92
-            bg_code_block: Color32::from_rgb(0xef, 0xeb, 0xe4),     // #efebe4
-            bg_code_inline: Color32::from_rgb(0xe9, 0xe3, 0xd9),    // #e9e3d9
+            fg_primary: Color32::from_rgb(0x22, 0x25, 0x2a),        // #22252a
+            fg_heading: Color32::from_rgb(0x18, 0x22, 0x32),        // #182232
+            fg_subheading: Color32::from_rgb(0x1d, 0x5b, 0x79),     // #1d5b79
+            fg_muted: Color32::from_rgb(0x78, 0x7d, 0x85),          // #787d85
+            bg_code_block: Color32::from_rgb(0xef, 0xec, 0xe6),     // #efece6
+            bg_code_inline: Color32::from_rgb(0xee, 0xf0, 0xf4),    // #eef0f4
             bg_pill_button: Color32::from_rgb(0xe6, 0xe0, 0xd6),    // #e6e0d6
             bg_popover: Color32::from_rgb(0xfd, 0xfb, 0xf8),        // #fdfbf8
             bg_preview: Color32::from_rgb(0xf5, 0xf1, 0xea),        // #f5f1ea
             divider_preview: Color32::from_rgb(0xe0, 0xda, 0xd1),   // #e0dad1
-            accent_orange: Color32::from_rgb(0xb4, 0x53, 0x09),     // #b45309
-            accent_link: Color32::from_rgb(0x25, 0x63, 0xeb),       // #2563eb
-            markup_emphasis_fg: Color32::from_rgb(0xb4, 0x53, 0x09),// #b45309
-            markup_code_fg: Color32::from_rgb(0xc5, 0x30, 0x30),    // #c53030
-            markup_codeblock_fg: Color32::from_rgb(0x25, 0x63, 0xeb),// #2563eb
-            markup_list_marker: Color32::from_rgb(0xb4, 0x53, 0x09),// #b45309
-            markup_task_done: Color32::from_rgb(0x2f, 0x85, 0x5a),  // #2f855a
-            markup_quote_bar: Color32::from_rgb(0xb4, 0x53, 0x09),  // #b45309
-            markup_quote_fg: Color32::from_rgb(0x57, 0x53, 0x4e),   // #57534e
-            markup_link_url: Color32::from_rgb(0x5a, 0x82, 0xb8),   // #5a82b8
+            accent_orange: Color32::from_rgb(0x9a, 0x47, 0x08),     // #9a4708
+            accent_link: Color32::from_rgb(0x1d, 0x5b, 0x79),       // #1d5b79
+            markup_bold_fg: Color32::from_rgb(0x9a, 0x47, 0x08),    // #9a4708
+            markup_emphasis_fg: Color32::from_rgb(0xa6, 0x3a, 0x50),// #a63a50
+            markup_code_fg: Color32::from_rgb(0x1e, 0x56, 0x70),    // #1e5670
+            markup_codeblock_fg: Color32::from_rgb(0x1d, 0x5b, 0x79),// #1d5b79
+            markup_list_marker: Color32::from_rgb(0x9a, 0x47, 0x08),// #9a4708
+            markup_task_done: Color32::from_rgb(0x2f, 0x7a, 0x4d),  // #2f7a4d
+            markup_quote_bar: Color32::from_rgb(0x9a, 0x47, 0x08),  // #9a4708
+            markup_quote_fg: Color32::from_rgb(0x52, 0x4b, 0x42),   // #524b42
+            markup_link_url: Color32::from_rgb(0x4a, 0x74, 0x91),   // #4a7491
             bg_table_header: Color32::from_rgb(0xea, 0xe4, 0xdc),   // #eae4dc
-            spellcheck_red: Color32::from_rgb(0xc5, 0x30, 0x30),    // #c53030
+            spellcheck_red: Color32::from_rgb(0xb8, 0x32, 0x32),    // #b83232
             scrollbar_thumb: Color32::from_rgb(0xc8, 0xc2, 0xb8),   // #c8c2b8
         }
     }
@@ -192,26 +196,27 @@ impl AccentPalette {
             bg_canvas: Color32::from_rgb(0xf4, 0xef, 0xe4),         // #f4efe4
             bg_headerbar: Color32::from_rgb(0xeb, 0xe3, 0xd3),      // #ebe3d3
             border_headerbar: Color32::from_rgb(0xda, 0xcf, 0xb8),  // #dacfb8
-            fg_primary: Color32::from_rgb(0x38, 0x30, 0x28),        // #383028
-            fg_heading: Color32::from_rgb(0x29, 0x21, 0x1a),        // #29211a
+            fg_primary: Color32::from_rgb(0x2f, 0x27, 0x1f),        // #2f271f
+            fg_heading: Color32::from_rgb(0x21, 0x1a, 0x13),        // #211a13
             fg_subheading: Color32::from_rgb(0x1d, 0x5b, 0x79),     // #1d5b79
-            fg_muted: Color32::from_rgb(0x8a, 0x7f, 0x70),          // #8a7f70
+            fg_muted: Color32::from_rgb(0x7d, 0x72, 0x63),          // #7d7263
             bg_code_block: Color32::from_rgb(0xe8, 0xe0, 0xcf),     // #e8e0cf
-            bg_code_inline: Color32::from_rgb(0xe4, 0xdb, 0xc7),    // #e4dbc7
+            bg_code_inline: Color32::from_rgb(0xea, 0xe4, 0xd7),    // #eae4d7
             bg_pill_button: Color32::from_rgb(0xe0, 0xd6, 0xc3),    // #e0d6c3
             bg_popover: Color32::from_rgb(0xf7, 0xf2, 0xe8),        // #f7f2e8
             bg_preview: Color32::from_rgb(0xef, 0xe7, 0xd8),        // #efe7d8
             divider_preview: Color32::from_rgb(0xda, 0xcf, 0xb8),   // #dacfb8
-            accent_orange: Color32::from_rgb(0xa1, 0x48, 0x07),     // #a14807
+            accent_orange: Color32::from_rgb(0x8f, 0x3f, 0x06),     // #8f3f06
             accent_link: Color32::from_rgb(0x1d, 0x5b, 0x79),       // #1d5b79
-            markup_emphasis_fg: Color32::from_rgb(0xa1, 0x48, 0x07),// #a14807
-            markup_code_fg: Color32::from_rgb(0xb8, 0x32, 0x32),    // #b83232
+            markup_bold_fg: Color32::from_rgb(0x8f, 0x3f, 0x06),    // #8f3f06
+            markup_emphasis_fg: Color32::from_rgb(0x9b, 0x37, 0x4b),// #9b374b
+            markup_code_fg: Color32::from_rgb(0x1e, 0x56, 0x70),    // #1e5670
             markup_codeblock_fg: Color32::from_rgb(0x1d, 0x5b, 0x79),// #1d5b79
-            markup_list_marker: Color32::from_rgb(0xa1, 0x48, 0x07),// #a14807
-            markup_task_done: Color32::from_rgb(0x27, 0x67, 0x49),  // #276749
-            markup_quote_bar: Color32::from_rgb(0xa1, 0x48, 0x07),  // #a14807
-            markup_quote_fg: Color32::from_rgb(0x5c, 0x50, 0x42),   // #5c5042
-            markup_link_url: Color32::from_rgb(0x52, 0x79, 0x8c),   // #52798c
+            markup_list_marker: Color32::from_rgb(0x8f, 0x3f, 0x06),// #8f3f06
+            markup_task_done: Color32::from_rgb(0x2f, 0x7a, 0x4d),  // #2f7a4d
+            markup_quote_bar: Color32::from_rgb(0x8f, 0x3f, 0x06),  // #8f3f06
+            markup_quote_fg: Color32::from_rgb(0x52, 0x46, 0x38),   // #524638
+            markup_link_url: Color32::from_rgb(0x46, 0x6e, 0x82),   // #466e82
             bg_table_header: Color32::from_rgb(0xe2, 0xd9, 0xc5),   // #e2d9c5
             spellcheck_red: Color32::from_rgb(0xb8, 0x3b, 0x2a),    // #b83b2a
             scrollbar_thumb: Color32::from_rgb(0xc6, 0xbc, 0xae),   // #c6bcae
@@ -221,31 +226,32 @@ impl AccentPalette {
     /// Amber & Coral (mdfried-inspired) — Semi-Dark (*Soft Anthracite & Warm Gold*)
     pub const fn amber_semi_dark() -> Self {
         Self {
-            bg_canvas: Color32::from_rgb(0x2e, 0x31, 0x35),         // #2e3135
-            bg_headerbar: Color32::from_rgb(0x27, 0x2a, 0x2e),      // #272a2e
-            border_headerbar: Color32::from_rgb(0x3f, 0x43, 0x49),  // #3f4349
-            fg_primary: Color32::from_rgb(0xd8, 0xdb, 0xdf),        // #d8dbdf
-            fg_heading: Color32::from_rgb(0xee, 0xf0, 0xf3),        // #eef0f3
-            fg_subheading: Color32::from_rgb(0x8e, 0xb0, 0xcc),     // #8eb0cc
-            fg_muted: Color32::from_rgb(0x8a, 0x91, 0x9b),          // #8a919b
-            bg_code_block: Color32::from_rgb(0x36, 0x3a, 0x40),     // #363a40
-            bg_code_inline: Color32::from_rgb(0x3c, 0x40, 0x47),    // #3c4047
-            bg_pill_button: Color32::from_rgb(0x3b, 0x3f, 0x45),    // #3b3f45
-            bg_popover: Color32::from_rgb(0x34, 0x38, 0x3e),        // #34383e
-            bg_preview: Color32::from_rgb(0x2a, 0x2d, 0x31),        // #2a2d31
-            divider_preview: Color32::from_rgb(0x3f, 0x43, 0x49),   // #3f4349
-            accent_orange: Color32::from_rgb(0xeb, 0xbc, 0x22),     // #ebbc22
-            accent_link: Color32::from_rgb(0x8e, 0xb0, 0xcc),       // #8eb0cc
-            markup_emphasis_fg: Color32::from_rgb(0xeb, 0xbc, 0x22),// #ebbc22
-            markup_code_fg: Color32::from_rgb(0xe6, 0x7a, 0x82),    // #e67a82
-            markup_codeblock_fg: Color32::from_rgb(0x8e, 0xb0, 0xcc),// #8eb0cc
-            markup_list_marker: Color32::from_rgb(0xeb, 0xbc, 0x22),// #ebbc22
-            markup_task_done: Color32::from_rgb(0x9e, 0xc9, 0x82),  // #9ec982
-            markup_quote_bar: Color32::from_rgb(0xeb, 0xbc, 0x22),  // #ebbc22
-            markup_quote_fg: Color32::from_rgb(0xbe, 0xc5, 0x76),   // #bec576
+            bg_canvas: Color32::from_rgb(0x2b, 0x2e, 0x33),         // #2b2e33
+            bg_headerbar: Color32::from_rgb(0x23, 0x26, 0x2a),      // #23262a
+            border_headerbar: Color32::from_rgb(0x3c, 0x40, 0x47),  // #3c4047
+            fg_primary: Color32::from_rgb(0xec, 0xee, 0xf2),        // #eceef2
+            fg_heading: Color32::from_rgb(0xf5, 0xf7, 0xfa),        // #f5f7fa
+            fg_subheading: Color32::from_rgb(0x81, 0xa2, 0xbe),     // #81a2be
+            fg_muted: Color32::from_rgb(0x8e, 0x95, 0xa0),          // #8e95a0
+            bg_code_block: Color32::from_rgb(0x33, 0x37, 0x3e),     // #33373e
+            bg_code_inline: Color32::from_rgb(0x38, 0x3d, 0x45),    // #383d45
+            bg_pill_button: Color32::from_rgb(0x39, 0x3e, 0x46),    // #393e46
+            bg_popover: Color32::from_rgb(0x31, 0x35, 0x3b),        // #31353b
+            bg_preview: Color32::from_rgb(0x27, 0x2a, 0x2e),        // #272a2e
+            divider_preview: Color32::from_rgb(0x3c, 0x40, 0x47),   // #3c4047
+            accent_orange: Color32::from_rgb(0xf2, 0xc1, 0x2e),     // #f2c12e
+            accent_link: Color32::from_rgb(0x81, 0xa2, 0xbe),       // #81a2be
+            markup_bold_fg: Color32::from_rgb(0xf2, 0xc1, 0x2e),    // #f2c12e
+            markup_emphasis_fg: Color32::from_rgb(0xeb, 0x85, 0x7e),// #eb857e
+            markup_code_fg: Color32::from_rgb(0xf0, 0x85, 0x8d),    // #f0858d
+            markup_codeblock_fg: Color32::from_rgb(0x81, 0xa2, 0xbe),// #81a2be
+            markup_list_marker: Color32::from_rgb(0xf2, 0xc1, 0x2e),// #f2c12e
+            markup_task_done: Color32::from_rgb(0x98, 0xc3, 0x79),  // #98c379
+            markup_quote_bar: Color32::from_rgb(0xe0, 0x7a, 0x38),  // #e07a38
+            markup_quote_fg: Color32::from_rgb(0xd6, 0xcf, 0xc4),   // #d6cfc4
             markup_link_url: Color32::from_rgb(0x73, 0x91, 0xa8),   // #7391a8
-            bg_table_header: Color32::from_rgb(0x39, 0x3d, 0x44),   // #393d44
-            spellcheck_red: Color32::from_rgb(0xe6, 0x7a, 0x82),    // #e67a82
+            bg_table_header: Color32::from_rgb(0x37, 0x3b, 0x42),   // #373b42
+            spellcheck_red: Color32::from_rgb(0xeb, 0x85, 0x7e),    // #eb857e
             scrollbar_thumb: Color32::from_rgb(0x55, 0x5b, 0x64),   // #555b64
         }
     }
@@ -253,31 +259,32 @@ impl AccentPalette {
     /// Amber & Coral (mdfried-inspired) — Dark (*Charcoal Night*): exact mdfried palette
     pub const fn amber_dark() -> Self {
         Self {
-            bg_canvas: Color32::from_rgb(0x1d, 0x1f, 0x21),         // #1d1f21
-            bg_headerbar: Color32::from_rgb(0x17, 0x19, 0x1b),      // #17191b
-            border_headerbar: Color32::from_rgb(0x2e, 0x32, 0x37),  // #2e3237
-            fg_primary: Color32::from_rgb(0xc5, 0xc8, 0xc6),        // #c5c8c6
-            fg_heading: Color32::from_rgb(0xe6, 0xe8, 0xeb),        // #e6e8eb
+            bg_canvas: Color32::from_rgb(0x18, 0x1a, 0x1d),         // #181a1d
+            bg_headerbar: Color32::from_rgb(0x13, 0x15, 0x18),      // #131518
+            border_headerbar: Color32::from_rgb(0x28, 0x2c, 0x32),  // #282c32
+            fg_primary: Color32::from_rgb(0xe6, 0xe8, 0xeb),        // #e6e8eb
+            fg_heading: Color32::from_rgb(0xf0, 0xf2, 0xf5),        // #f0f2f5
             fg_subheading: Color32::from_rgb(0x81, 0xa2, 0xbe),     // #81a2be
-            fg_muted: Color32::from_rgb(0x69, 0x70, 0x79),          // #697079
-            bg_code_block: Color32::from_rgb(0x25, 0x28, 0x2d),     // #25282d
-            bg_code_inline: Color32::from_rgb(0x2c, 0x2f, 0x35),    // #2c2f35
-            bg_pill_button: Color32::from_rgb(0x2a, 0x2d, 0x32),    // #2a2d32
-            bg_popover: Color32::from_rgb(0x23, 0x26, 0x2a),        // #23262a
-            bg_preview: Color32::from_rgb(0x1a, 0x1c, 0x1e),        // #1a1c1e
-            divider_preview: Color32::from_rgb(0x2e, 0x32, 0x37),   // #2e3237
+            fg_muted: Color32::from_rgb(0x74, 0x7c, 0x87),          // #747c87
+            bg_code_block: Color32::from_rgb(0x22, 0x25, 0x2a),     // #22252a
+            bg_code_inline: Color32::from_rgb(0x26, 0x2a, 0x30),    // #262a30
+            bg_pill_button: Color32::from_rgb(0x27, 0x2b, 0x31),    // #272b31
+            bg_popover: Color32::from_rgb(0x1e, 0x21, 0x26),        // #1e2126
+            bg_preview: Color32::from_rgb(0x15, 0x17, 0x1a),        // #15171a
+            divider_preview: Color32::from_rgb(0x28, 0x2c, 0x32),   // #282c32
             accent_orange: Color32::from_rgb(0xea, 0xb7, 0x00),     // #eab700
             accent_link: Color32::from_rgb(0x81, 0xa2, 0xbe),       // #81a2be
-            markup_emphasis_fg: Color32::from_rgb(0xea, 0xb7, 0x00),// #eab700
-            markup_code_fg: Color32::from_rgb(0xe0, 0x6c, 0x75),    // #e06c75
+            markup_bold_fg: Color32::from_rgb(0xea, 0xb7, 0x00),    // #eab700
+            markup_emphasis_fg: Color32::from_rgb(0xe5, 0x7a, 0x74),// #e57a74
+            markup_code_fg: Color32::from_rgb(0xeb, 0x7a, 0x82),    // #eb7a82
             markup_codeblock_fg: Color32::from_rgb(0x81, 0xa2, 0xbe),// #81a2be
             markup_list_marker: Color32::from_rgb(0xea, 0xb7, 0x00),// #eab700
             markup_task_done: Color32::from_rgb(0x98, 0xc3, 0x79),  // #98c379
-            markup_quote_bar: Color32::from_rgb(0xea, 0xb7, 0x00),  // #eab700
-            markup_quote_fg: Color32::from_rgb(0xb5, 0xbd, 0x68),   // #b5bd68
-            markup_link_url: Color32::from_rgb(0x5f, 0x7d, 0x95),   // #5f7d95
-            bg_table_header: Color32::from_rgb(0x28, 0x2c, 0x32),   // #282c32
-            spellcheck_red: Color32::from_rgb(0xe0, 0x6c, 0x75),    // #e06c75
+            markup_quote_bar: Color32::from_rgb(0xe0, 0x7a, 0x38),  // #e07a38
+            markup_quote_fg: Color32::from_rgb(0xce, 0xc6, 0xba),   // #cec6ba
+            markup_link_url: Color32::from_rgb(0x66, 0x85, 0x9e),   // #66859e
+            bg_table_header: Color32::from_rgb(0x24, 0x28, 0x2e),   // #24282e
+            spellcheck_red: Color32::from_rgb(0xe5, 0x7a, 0x74),    // #e57a74
             scrollbar_thumb: Color32::from_rgb(0x45, 0x4a, 0x52),   // #454a52
         }
     }
@@ -300,6 +307,7 @@ impl AccentPalette {
             divider_preview: Color32::from_rgb(0xe2, 0xdf, 0xd7),   // #e2dfd7
             accent_orange: Color32::from_rgb(0x2b, 0x6c, 0xb0),     // #2b6cb0
             accent_link: Color32::from_rgb(0x1d, 0x5b, 0x9e),       // #1d5b9e
+            markup_bold_fg: Color32::from_rgb(0x1a, 0x36, 0x5d),    // #1a365d
             markup_emphasis_fg: Color32::from_rgb(0xb4, 0x53, 0x09),// #b45309
             markup_code_fg: Color32::from_rgb(0xc5, 0x30, 0x30),    // #c53030
             markup_codeblock_fg: Color32::from_rgb(0x1d, 0x5b, 0x9e),// #1d5b9e
@@ -332,6 +340,7 @@ impl AccentPalette {
             divider_preview: Color32::from_rgb(0xdd, 0xd4, 0xc3),   // #ddd4c3
             accent_orange: Color32::from_rgb(0x2c, 0x6e, 0x63),     // #2c6e63
             accent_link: Color32::from_rgb(0x23, 0x5e, 0x54),       // #235e54
+            markup_bold_fg: Color32::from_rgb(0x23, 0x4e, 0x52),    // #234e52
             markup_emphasis_fg: Color32::from_rgb(0x9c, 0x42, 0x21),// #9c4221
             markup_code_fg: Color32::from_rgb(0xb8, 0x32, 0x32),    // #b83232
             markup_codeblock_fg: Color32::from_rgb(0x23, 0x5e, 0x54),// #235e54
@@ -364,6 +373,7 @@ impl AccentPalette {
             divider_preview: Color32::from_rgb(0x3c, 0x42, 0x4e),   // #3c424e
             accent_orange: Color32::from_rgb(0x4b, 0x8d, 0xf8),     // #4b8df8
             accent_link: Color32::from_rgb(0x6e, 0xb0, 0xfb),       // #6eb0fb
+            markup_bold_fg: Color32::from_rgb(0xa3, 0xcf, 0xfe),    // #a3cffe
             markup_emphasis_fg: Color32::from_rgb(0xec, 0xbe, 0x24),// #ecbe24
             markup_code_fg: Color32::from_rgb(0xf2, 0x7d, 0x84),    // #f27d84
             markup_codeblock_fg: Color32::from_rgb(0x6e, 0xb0, 0xfb),// #6eb0fb
@@ -396,6 +406,7 @@ impl AccentPalette {
             divider_preview: Color32::from_rgb(0x28, 0x2d, 0x37),   // #282d37
             accent_orange: Color32::from_rgb(0x3b, 0x82, 0xf6),     // #3b82f6
             accent_link: Color32::from_rgb(0x60, 0xa5, 0xfa),       // #60a5fa
+            markup_bold_fg: Color32::from_rgb(0x93, 0xc5, 0xfd),    // #93c5fd
             markup_emphasis_fg: Color32::from_rgb(0xea, 0xb7, 0x00),// #eab700
             markup_code_fg: Color32::from_rgb(0xf0, 0x71, 0x78),    // #f07178
             markup_codeblock_fg: Color32::from_rgb(0x60, 0xa5, 0xfa),// #60a5fa
@@ -428,6 +439,7 @@ impl AccentPalette {
             divider_preview: Color32::from_rgb(0xdc, 0xe3, 0xec),   // #dce3ec
             accent_orange: Color32::from_rgb(0x4c, 0x78, 0xa8),     // #4c78a8
             accent_link: Color32::from_rgb(0x3b, 0x69, 0x98),       // #3b6998
+            markup_bold_fg: Color32::from_rgb(0x2b, 0x4c, 0x7e),    // #2b4c7e
             markup_emphasis_fg: Color32::from_rgb(0xb4, 0x53, 0x09),// #b45309
             markup_code_fg: Color32::from_rgb(0xa3, 0x48, 0x57),    // #a34857
             markup_codeblock_fg: Color32::from_rgb(0x3b, 0x69, 0x98),// #3b6998
@@ -460,6 +472,7 @@ impl AccentPalette {
             divider_preview: Color32::from_rgb(0xdc, 0xd1, 0xb8),   // #dcd1b8
             accent_orange: Color32::from_rgb(0x3a, 0x94, 0x85),     // #3a9485
             accent_link: Color32::from_rgb(0x2d, 0x7d, 0x6f),       // #2d7d6f
+            markup_bold_fg: Color32::from_rgb(0x2d, 0x5a, 0x4c),    // #2d5a4c
             markup_emphasis_fg: Color32::from_rgb(0xa8, 0x50, 0x48),// #a85048
             markup_code_fg: Color32::from_rgb(0xb8, 0x3b, 0x3b),    // #b83b3b
             markup_codeblock_fg: Color32::from_rgb(0x2d, 0x7d, 0x6f),// #2d7d6f
@@ -492,6 +505,7 @@ impl AccentPalette {
             divider_preview: Color32::from_rgb(0x3b, 0x42, 0x52),   // #3b4252
             accent_orange: Color32::from_rgb(0x68, 0x8b, 0xb5),     // #688bb5
             accent_link: Color32::from_rgb(0x88, 0xc0, 0xd0),       // #88c0d0
+            markup_bold_fg: Color32::from_rgb(0x8f, 0xbc, 0xbb),    // #8fbcbb
             markup_emphasis_fg: Color32::from_rgb(0xeb, 0xcb, 0x8b),// #ebcb8b
             markup_code_fg: Color32::from_rgb(0xe4, 0x7a, 0x82),    // #e47a82
             markup_codeblock_fg: Color32::from_rgb(0x88, 0xc0, 0xd0),// #88c0d0
@@ -524,6 +538,7 @@ impl AccentPalette {
             divider_preview: Color32::from_rgb(0x2e, 0x34, 0x40),   // #2e3440
             accent_orange: Color32::from_rgb(0x5e, 0x81, 0xac),     // #5e81ac
             accent_link: Color32::from_rgb(0x88, 0xc0, 0xd0),       // #88c0d0
+            markup_bold_fg: Color32::from_rgb(0x88, 0xc0, 0xd0),    // #88c0d0
             markup_emphasis_fg: Color32::from_rgb(0xeb, 0xcb, 0x8b),// #ebcb8b
             markup_code_fg: Color32::from_rgb(0xe0, 0x6c, 0x75),    // #e06c75
             markup_codeblock_fg: Color32::from_rgb(0x88, 0xc0, 0xd0),// #88c0d0
@@ -556,6 +571,7 @@ impl AccentPalette {
             divider_preview: Color32::from_rgb(0xe4, 0xd8, 0xce),   // #e4d8ce
             accent_orange: Color32::from_rgb(0x28, 0x69, 0x83),     // #286983
             accent_link: Color32::from_rgb(0x28, 0x69, 0x83),       // #286983
+            markup_bold_fg: Color32::from_rgb(0x28, 0x69, 0x83),    // #286983
             markup_emphasis_fg: Color32::from_rgb(0xc0, 0x6c, 0x30),// #c06c30
             markup_code_fg: Color32::from_rgb(0xb4, 0x63, 0x7a),    // #b4637a
             markup_codeblock_fg: Color32::from_rgb(0x28, 0x69, 0x83),// #286983
@@ -588,6 +604,7 @@ impl AccentPalette {
             divider_preview: Color32::from_rgb(0xdd, 0xd0, 0xba),   // #ddd0ba
             accent_orange: Color32::from_rgb(0x9b, 0x5b, 0x4a),     // #9b5b4a
             accent_link: Color32::from_rgb(0x28, 0x69, 0x83),       // #286983
+            markup_bold_fg: Color32::from_rgb(0x7a, 0x3e, 0x32),    // #7a3e32
             markup_emphasis_fg: Color32::from_rgb(0xa1, 0x48, 0x07),// #a14807
             markup_code_fg: Color32::from_rgb(0xb4, 0x4c, 0x5c),    // #b44c5c
             markup_codeblock_fg: Color32::from_rgb(0x28, 0x69, 0x83),// #286983
@@ -620,6 +637,7 @@ impl AccentPalette {
             divider_preview: Color32::from_rgb(0x3f, 0x3b, 0x50),   // #3f3b50
             accent_orange: Color32::from_rgb(0x4b, 0x9c, 0xbd),     // #4b9cbd
             accent_link: Color32::from_rgb(0xa6, 0xd5, 0xdd),       // #a6d5dd
+            markup_bold_fg: Color32::from_rgb(0xcd, 0xb4, 0xec),    // #cdb4ec
             markup_emphasis_fg: Color32::from_rgb(0xf6, 0xc1, 0x77),// #f6c177
             markup_code_fg: Color32::from_rgb(0xee, 0x7c, 0x9c),    // #ee7c9c
             markup_codeblock_fg: Color32::from_rgb(0xa6, 0xd5, 0xdd),// #a6d5dd
@@ -652,6 +670,7 @@ impl AccentPalette {
             divider_preview: Color32::from_rgb(0x2d, 0x2a, 0x3b),   // #2d2a3b
             accent_orange: Color32::from_rgb(0x3e, 0x8f, 0xb0),     // #3e8fb0
             accent_link: Color32::from_rgb(0x9c, 0xcf, 0xd8),       // #9ccfd8
+            markup_bold_fg: Color32::from_rgb(0xc4, 0xa7, 0xe7),    // #c4a7e7
             markup_emphasis_fg: Color32::from_rgb(0xf6, 0xc1, 0x77),// #f6c177
             markup_code_fg: Color32::from_rgb(0xeb, 0x6f, 0x92),    // #eb6f92
             markup_codeblock_fg: Color32::from_rgb(0x9c, 0xcf, 0xd8),// #9ccfd8
@@ -684,6 +703,7 @@ impl AccentPalette {
             divider_preview: Color32::from_rgb(0xe4, 0xe4, 0xe4),   // #e4e4e4
             accent_orange: Color32::from_rgb(0xdb, 0x63, 0x2c),     // #db632c
             accent_link: Color32::from_rgb(0x1c, 0x71, 0xd8),       // #1c71d8
+            markup_bold_fg: Color32::from_rgb(0x2e, 0x34, 0x36),    // #2e3436
             markup_emphasis_fg: Color32::from_rgb(0xb4, 0x53, 0x09),// #b45309
             markup_code_fg: Color32::from_rgb(0xc5, 0x30, 0x30),    // #c53030
             markup_codeblock_fg: Color32::from_rgb(0x1c, 0x71, 0xd8),// #1c71d8
@@ -716,6 +736,7 @@ impl AccentPalette {
             divider_preview: Color32::from_rgb(0xda, 0xd5, 0xcb),   // #dad5cb
             accent_orange: Color32::from_rgb(0xdb, 0x63, 0x2c),     // #db632c
             accent_link: Color32::from_rgb(0x00, 0x80, 0x80),       // #008080
+            markup_bold_fg: Color32::from_rgb(0x7a, 0x33, 0x10),    // #7a3310
             markup_emphasis_fg: Color32::from_rgb(0xa1, 0x48, 0x07),// #a14807
             markup_code_fg: Color32::from_rgb(0xb8, 0x32, 0x32),    // #b83232
             markup_codeblock_fg: Color32::from_rgb(0x00, 0x80, 0x80),// #008080
@@ -748,6 +769,7 @@ impl AccentPalette {
             divider_preview: Color32::from_rgb(0x3c, 0x40, 0x47),   // #3c4047
             accent_orange: Color32::from_rgb(0xe0, 0x6c, 0x35),     // #e06c35
             accent_link: Color32::from_rgb(0x82, 0xb4, 0xf0),       // #82b4f0
+            markup_bold_fg: Color32::from_rgb(0xe6, 0xe8, 0xeb),    // #e6e8eb
             markup_emphasis_fg: Color32::from_rgb(0xec, 0xbe, 0x24),// #ecbe24
             markup_code_fg: Color32::from_rgb(0xe6, 0x78, 0x80),    // #e67880
             markup_codeblock_fg: Color32::from_rgb(0x82, 0xb4, 0xf0),// #82b4f0
@@ -780,6 +802,7 @@ impl AccentPalette {
             divider_preview: Color32::from_rgb(0x16, 0x16, 0x1a),   // #16161a
             accent_orange: Color32::from_rgb(0xdb, 0x63, 0x2c),     // #db632c
             accent_link: Color32::from_rgb(0x78, 0xae, 0xed),       // #78aeed
+            markup_bold_fg: Color32::from_rgb(0xee, 0xee, 0xee),    // #eeeeee
             markup_emphasis_fg: Color32::from_rgb(0xea, 0xb7, 0x00),// #eab700
             markup_code_fg: Color32::from_rgb(0xe0, 0x6c, 0x75),    // #e06c75
             markup_codeblock_fg: Color32::from_rgb(0x78, 0xae, 0xed),// #78aeed

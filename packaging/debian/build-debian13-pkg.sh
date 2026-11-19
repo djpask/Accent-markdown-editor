@@ -43,12 +43,13 @@ fi
 
 prepare_debian13_sysroot() {
     local sysroot_dir="$1"
-    local stamp_file="${sysroot_dir}/.debian13_trixie_sysroot_ready_v1"
+    local stamp_file="${sysroot_dir}/.debian13_trixie_sysroot_ready_v2"
 
     if [[ -f "${stamp_file}" ]] \
         && [[ -f "${sysroot_dir}/usr/lib/x86_64-linux-gnu/Scrt1.o" ]] \
         && [[ -f "${sysroot_dir}/usr/lib/x86_64-linux-gnu/libc.so.6" ]] \
-        && [[ -f "${sysroot_dir}/usr/lib/x86_64-linux-gnu/libgtk-3.so.0" ]]; then
+        && [[ -f "${sysroot_dir}/usr/lib/x86_64-linux-gnu/libgtk-3.so.0" ]] \
+        && [[ -f "${sysroot_dir}/usr/lib/x86_64-linux-gnu/libwebkit2gtk-4.1.so.0" ]]; then
         return 0
     fi
 
@@ -69,7 +70,19 @@ import tempfile
 import urllib.request
 
 mirror, suite, sysroot = sys.argv[1], sys.argv[2], sys.argv[3]
-required_pkgs = ["libc6", "libc6-dev", "libgcc-s1", "libglib2.0-0t64", "libgtk-3-0t64"]
+required_pkgs = [
+    "libc6",
+    "libc6-dev",
+    "libgcc-s1",
+    "libglib2.0-0t64",
+    "libgtk-3-0t64",
+    "libgdk-pixbuf-2.0-0",
+    "libcairo2",
+    "libdbus-1-3",
+    "libsoup-3.0-0",
+    "libjavascriptcoregtk-4.1-0",
+    "libwebkit2gtk-4.1-0",
+]
 
 idx_url = f"{mirror}/dists/{suite}/main/binary-amd64/Packages.xz"
 print(f"    Scaricamento indice pacchetti: {idx_url}")
@@ -130,6 +143,12 @@ PYEOF
     ln -sfn libglib-2.0.so.0 "${libdir}/libglib-2.0.so"
     ln -sfn libgobject-2.0.so.0 "${libdir}/libgobject-2.0.so"
     ln -sfn libgio-2.0.so.0 "${libdir}/libgio-2.0.so"
+    ln -sfn libgdk_pixbuf-2.0.so.0 "${libdir}/libgdk_pixbuf-2.0.so"
+    ln -sfn libcairo.so.2 "${libdir}/libcairo.so"
+    ln -sfn libdbus-1.so.3 "${libdir}/libdbus-1.so"
+    ln -sfn libsoup-3.0.so.0 "${libdir}/libsoup-3.0.so"
+    ln -sfn libjavascriptcoregtk-4.1.so.0 "${libdir}/libjavascriptcoregtk-4.1.so"
+    ln -sfn libwebkit2gtk-4.1.so.0 "${libdir}/libwebkit2gtk-4.1.so"
     printf '/* GNU ld script */\nGROUP ( /lib/x86_64-linux-gnu/libgcc_s.so.1 -lgcc )\n' > "${libdir}/libgcc_s.so"
 
     # Crea archivi statici vuoti per le dipendenze transitive GTK non referenziate direttamente da Accent
@@ -323,7 +342,7 @@ Section: editors
 Priority: optional
 Architecture: ${DEB_ARCH}
 Installed-Size: ${INSTALLED_SIZE}
-Depends: libc6 (>= 2.39), libgcc-s1 (>= 4.2), libglib2.0-0t64 (>= 2.70), libgtk-3-0t64 (>= 3.24), libwayland-client0 (>= 1.20), libxkbcommon0 (>= 1.0), libxkbcommon-x11-0 (>= 1.0), libx11-6, libx11-xcb1, libxcb1, libxcursor1, libxi6, libxrandr2, libegl1, libgl1, fontconfig
+Depends: libc6 (>= 2.39), libgcc-s1 (>= 4.2), libglib2.0-0t64 (>= 2.70), libgtk-3-0t64 (>= 3.24), libwebkit2gtk-4.1-0, libjavascriptcoregtk-4.1-0, libsoup-3.0-0, libdbus-1-3, libgdk-pixbuf-2.0-0, libcairo2, libwayland-client0 (>= 1.20), libxkbcommon0 (>= 1.0), libxkbcommon-x11-0 (>= 1.0), libx11-6, libx11-xcb1, libxcb1, libxcursor1, libxi6, libxrandr2, libegl1, libgl1, fontconfig
 Recommends: hicolor-icon-theme, shared-mime-info, desktop-file-utils, fonts-inter | fonts-cantarell | fonts-dejavu-core
 Provides: accent
 Conflicts: accent

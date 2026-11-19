@@ -502,7 +502,25 @@ mod tests {
             ColorPalettePreset::AmberCoral,
             ThemeMode::SemiDark,
         );
-        assert_eq!(amber_semi.bg_canvas, ui::theme::Color32::from_rgb(0x2e, 0x31, 0x35));
+        assert_eq!(amber_semi.bg_canvas, ui::theme::Color32::from_rgb(0x2b, 0x2e, 0x33));
+        assert_eq!(amber_semi.markup_bold_fg, ui::theme::Color32::from_rgb(0xf2, 0xc1, 0x2e));
+        assert_eq!(amber_semi.markup_emphasis_fg, ui::theme::Color32::from_rgb(0xeb, 0x85, 0x7e));
+
+        let amber_dark = ui::theme::AccentPalette::for_preset(
+            ColorPalettePreset::AmberCoral,
+            ThemeMode::Dark,
+        );
+        assert_eq!(amber_dark.bg_canvas, ui::theme::Color32::from_rgb(0x18, 0x1a, 0x1d));
+        assert_eq!(amber_dark.bg_headerbar, ui::theme::Color32::from_rgb(0x13, 0x15, 0x18));
+        assert_eq!(amber_dark.bg_code_block, ui::theme::Color32::from_rgb(0x22, 0x25, 0x2a));
+        assert_eq!(amber_dark.fg_primary, ui::theme::Color32::from_rgb(0xe6, 0xe8, 0xeb));
+        assert_eq!(amber_dark.markup_bold_fg, ui::theme::Color32::from_rgb(0xea, 0xb7, 0x00));
+        assert_eq!(amber_dark.markup_emphasis_fg, ui::theme::Color32::from_rgb(0xe5, 0x7a, 0x74));
+        assert_eq!(amber_dark.markup_quote_bar, ui::theme::Color32::from_rgb(0xe0, 0x7a, 0x38));
+        assert_eq!(amber_dark.markup_quote_fg, ui::theme::Color32::from_rgb(0xce, 0xc6, 0xba));
+        assert_eq!(amber_dark.markup_code_fg, ui::theme::Color32::from_rgb(0xeb, 0x7a, 0x82));
+        assert_eq!(amber_dark.bg_code_inline, ui::theme::Color32::from_rgb(0x26, 0x2a, 0x30));
+        assert_eq!(amber_dark.accent_link, ui::theme::Color32::from_rgb(0x81, 0xa2, 0xbe));
 
         let ed_light = ui::theme::AccentPalette::for_preset(
             ColorPalettePreset::EditorialSlate,
@@ -612,7 +630,7 @@ mod tests {
 
     #[test]
     fn test_version_system_consistency() {
-        assert_eq!(VERSION, "0.8.20");
+        assert_eq!(VERSION, "0.8.21");
         assert_eq!(accent_core::VERSION, VERSION);
         let version_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../VERSION");
         let file_ver = std::fs::read_to_string(version_file)

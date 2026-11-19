@@ -12,10 +12,10 @@ VERSION="$(tr -d '[:space:]' < "${REPO_ROOT}/VERSION")"
 echo "==> Building Accent v${VERSION} for Windows 11 (x86_64-pc-windows-gnu)..."
 
 SYSROOT_DIR="/tmp/mingw-sysroot"
-if [[ ! -f "${SYSROOT_DIR}/usr/x86_64-w64-mingw32/lib/crt2.o" ]] || [[ ! -f "${SYSROOT_DIR}/usr/bin/x86_64-w64-mingw32-dlltool" ]] || [[ ! -f "${SYSROOT_DIR}/usr/x86_64-w64-mingw32/lib/libgcc.a" ]]; then
+if [[ ! -f "${SYSROOT_DIR}/usr/x86_64-w64-mingw32/lib/crt2.o" ]] || [[ ! -f "${SYSROOT_DIR}/usr/bin/x86_64-w64-mingw32-dlltool" ]] || [[ ! -f "${SYSROOT_DIR}/usr/x86_64-w64-mingw32/lib/libgcc.a" ]] || [[ ! -f "${SYSROOT_DIR}/usr/x86_64-w64-mingw32/include/windows.h" ]]; then
     echo "    Downloading mingw-w64 sysroot components into ${SYSROOT_DIR}..."
     mkdir -p "${SYSROOT_DIR}"
-    for pkg in mingw-w64-crt mingw-w64-winpthreads mingw-w64-binutils; do
+    for pkg in mingw-w64-headers mingw-w64-crt mingw-w64-winpthreads mingw-w64-binutils; do
         url="$(pacman -Sp "$pkg" | tail -n 1)"
         curl -sL "$url" | tar -C "${SYSROOT_DIR}" --zstd -xf -
     done
@@ -29,6 +29,11 @@ rustup target add x86_64-pc-windows-gnu >/dev/null 2>&1 || true
 LINKER_WRAPPER="/tmp/x86_64-w64-mingw32-gcc"
 cat << 'EOF' > "${LINKER_WRAPPER}"
 #!/usr/bin/env bash
+for arg in "$@"; do
+    if [[ "$arg" == "-E" ]]; then
+        exec gcc -I/tmp/mingw-sysroot/usr/x86_64-w64-mingw32/include "$@"
+    fi
+done
 SYSROOT_LLD="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld/ld.lld"
 MINGW_LIB="/tmp/mingw-sysroot/usr/x86_64-w64-mingw32/lib"
 ARGS=()
@@ -66,7 +71,7 @@ fi
 EOF
 chmod +x "${LINKER_WRAPPER}"
 
-export PATH="${SYSROOT_DIR}/usr/bin:${PATH}"
+export PATH="/tmp:${SYSROOT_DIR}/usr/bin:${PATH}"
 cd "${REPO_ROOT}"
 
 CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${LINKER_WRAPPER}" \

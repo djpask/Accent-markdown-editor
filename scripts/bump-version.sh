@@ -51,7 +51,18 @@ if [[ -f "$ROOT_DIR/crates/accent-ui/src/lib.rs" ]]; then
     sed -i -E "s/assert_eq!\(VERSION, \"[0-9]+\.[0-9]+\.[0-9]+\"\);/assert_eq!(VERSION, \"${SEMVER}\");/" "$ROOT_DIR/crates/accent-ui/src/lib.rs"
 fi
 
-# 7. Synchronize Cargo.lock with the new workspace version (required by `cargo build --locked` in PKGBUILD)
+# 7. Frontend package.json, tauri.conf.json, and App.svelte About dialog
+if [[ -f "$ROOT_DIR/package.json" ]]; then
+    sed -i -E "s/\"version\": \"[0-9]+\.[0-9]+\.[0-9]+\"/\"version\": \"${SEMVER}\"/" "$ROOT_DIR/package.json"
+fi
+if [[ -f "$ROOT_DIR/crates/accent-ui/tauri.conf.json" ]]; then
+    sed -i -E "s/\"version\": \"[0-9]+\.[0-9]+\.[0-9]+\"/\"version\": \"${SEMVER}\"/" "$ROOT_DIR/crates/accent-ui/tauri.conf.json"
+fi
+if [[ -f "$ROOT_DIR/src/App.svelte" ]]; then
+    sed -i -E "s/Accent Markdown Editor v[0-9]+\.[0-9]+\.[0-9]+/Accent Markdown Editor v${SEMVER}/" "$ROOT_DIR/src/App.svelte"
+fi
+
+# 8. Synchronize Cargo.lock with the new workspace version (required by `cargo build --locked` in PKGBUILD)
 (cd "$ROOT_DIR" && cargo update --workspace --offline)
 
 echo "==> Versione aggiornata con successo a ${SEMVER} in tutto il repository."

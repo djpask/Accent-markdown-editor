@@ -13,11 +13,86 @@
     WidgetType,
   } from '@codemirror/view';
   import { defaultKeymap } from '@codemirror/commands';
-  import { markdown } from '@codemirror/lang-markdown';
-  import { syntaxHighlighting, HighlightStyle } from '@codemirror/language';
-  import { tags } from '@lezer/highlight';
+  import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
+  import {
+    syntaxHighlighting,
+    HighlightStyle,
+    StreamLanguage,
+    type Language,
+  } from '@codemirror/language';
+  import { jsonLanguage } from '@codemirror/lang-json';
+  import { rustLanguage } from '@codemirror/lang-rust';
+  import { pythonLanguage } from '@codemirror/lang-python';
+  import { yamlLanguage } from '@codemirror/lang-yaml';
+  import { htmlLanguage } from '@codemirror/lang-html';
+  import { cssLanguage } from '@codemirror/lang-css';
+  import {
+    javascriptLanguage,
+    typescriptLanguage,
+    jsxLanguage,
+    tsxLanguage,
+  } from '@codemirror/lang-javascript';
+  import { shell } from '@codemirror/legacy-modes/mode/shell';
+  import { toml } from '@codemirror/legacy-modes/mode/toml';
+  import { styleTags, tags, Tag } from '@lezer/highlight';
   import { getOrFetchMermaidSvg, renderLatexToHtml } from './mathAndMermaid';
   import type { ThemeMode } from './types';
+
+  const shellLanguage = StreamLanguage.define(shell);
+  const tomlLanguage = StreamLanguage.define(toml);
+  const listMarkerTag = Tag.define();
+
+  function resolveCodeLanguage(info: string): Language | null {
+    const lang = info.trim().toLowerCase().split(/\s+/)[0];
+    switch (lang) {
+      case 'json':
+      case 'jsonc':
+      case 'json5':
+        return jsonLanguage;
+      case 'rust':
+      case 'rs':
+        return rustLanguage;
+      case 'bash':
+      case 'sh':
+      case 'shell':
+      case 'zsh':
+      case 'console':
+        return shellLanguage;
+      case 'python':
+      case 'py':
+        return pythonLanguage;
+      case 'toml':
+      case 'ini':
+        return tomlLanguage;
+      case 'yaml':
+      case 'yml':
+        return yamlLanguage;
+      case 'html':
+      case 'htm':
+      case 'xml':
+      case 'svg':
+        return htmlLanguage;
+      case 'css':
+      case 'scss':
+      case 'less':
+        return cssLanguage;
+      case 'js':
+      case 'javascript':
+      case 'mjs':
+      case 'cjs':
+        return javascriptLanguage;
+      case 'ts':
+      case 'typescript':
+      case 'mts':
+        return typescriptLanguage;
+      case 'jsx':
+        return jsxLanguage;
+      case 'tsx':
+        return tsxLanguage;
+      default:
+        return null;
+    }
+  }
 
   interface Props {
     activeTabId: number;
@@ -34,6 +109,7 @@
     lineHeight: number;
     columnMaxWidth: string;
     columnPaddingX: string;
+    chromeHidden?: boolean;
     readOnly?: boolean;
     onEdit: (text: string, selPrimary: number, selSecondary: number, isDocChanged: boolean) => void;
   }
@@ -53,6 +129,7 @@
     lineHeight,
     columnMaxWidth,
     columnPaddingX,
+    chromeHidden = false,
     readOnly = false,
     onEdit,
   }: Props = $props();
@@ -195,10 +272,6 @@
     enabled: boolean,
     currentTheme: ThemeMode
   ): DecorationSet {
-    if (!enabled) {
-      return Decoration.none;
-    }
-
     const state = view.state;
     const doc = state.doc;
     const sel = state.selection.main;
@@ -247,7 +320,7 @@
         if (endLineNum > startLineNum) {
           const caretInsideBlock = isCaretOnLines(startLineNum, endLineNum);
 
-          if (fenceLang === 'mermaid' && !caretInsideBlock) {
+          if (enabled && fenceLang === 'mermaid' && !caretInsideBlock) {
             const mermaidCode = bodyLines.join('\n');
             const firstLine = doc.line(startLineNum);
             ranges.push(
@@ -266,7 +339,7 @@
             for (let ln = startLineNum; ln <= endLineNum; ln++) {
               const l = doc.line(ln);
               const isFenceBoundary = ln === startLineNum || ln === endLineNum;
-              if (isFenceBoundary && !caretInsideBlock) {
+              if (enabled && isFenceBoundary && !caretInsideBlock) {
                 ranges.push(
                   Decoration.line({
                     class: 'cm-live-codeblock-line cm-live-fence-muted',
@@ -283,6 +356,11 @@
           lineNum = endLineNum + 1;
           continue;
         }
+      }
+
+      if (!enabled) {
+        lineNum++;
+        continue;
       }
 
       // 2. Check for multi-line Display Math Block ($$ ... $$)
@@ -371,7 +449,7 @@
         }
       }
 
-      // 6. Task Lists (- [ ] / - [x])
+      // 6. Task Lists (- [ ] / - [x]) & Bullet/Ordered List Markers
       const taskMatch = text.match(/^(\s*[-*+]\s+\[([ xX])\]\s+)/);
       if (taskMatch && !isCaretOnLines(lineNum, lineNum)) {
         const prefixLen = taskMatch[1].length;
@@ -381,6 +459,16 @@
             widget: new TaskCheckboxWidget(checked, line.from),
           }).range(line.from, line.from + prefixLen)
         );
+      } else {
+        const listMarkerMatch = text.match(/^(\s*(?:[-*+]|\d+[.)]))(\s+)/);
+        if (listMarkerMatch) {
+          ranges.push(
+            Decoration.mark({ class: 'cm-live-list-marker' }).range(
+              line.from,
+              line.from + listMarkerMatch[1].length
+            )
+          );
+        }
       }
 
       // 7. Inline constructs (non-overlapping intervals on this line)
@@ -527,6 +615,7 @@
   }
 
   const accentMarkdownHighlight = HighlightStyle.define([
+    { tag: tags.quote, color: 'var(--markup-quote-fg)', fontStyle: 'italic' },
     { tag: tags.heading1, color: 'var(--fg-heading)', fontWeight: '700' },
     { tag: tags.heading2, color: 'var(--fg-heading)', fontWeight: '700' },
     { tag: tags.heading3, color: 'var(--fg-subheading)', fontWeight: '700' },
@@ -535,7 +624,7 @@
       color: 'var(--fg-subheading)',
       fontWeight: '700',
     },
-    { tag: tags.strong, fontWeight: '700', color: 'var(--fg-primary)' },
+    { tag: tags.strong, fontWeight: '700', color: 'var(--markup-bold-fg)' },
     { tag: tags.emphasis, fontStyle: 'italic', color: 'var(--markup-emphasis-fg)' },
     { tag: tags.strikethrough, textDecoration: 'line-through', color: 'var(--fg-muted)' },
     {
@@ -547,10 +636,67 @@
     },
     { tag: tags.link, color: 'var(--accent-link)', textDecoration: 'underline' },
     { tag: tags.url, color: 'var(--markup-link-url)' },
-    { tag: tags.quote, color: 'var(--markup-quote-fg)', fontStyle: 'italic' },
-    { tag: tags.list, color: 'var(--markup-list-marker)' },
+    { tag: listMarkerTag, color: 'var(--markup-list-marker)', fontWeight: '700' },
     { tag: tags.processingInstruction, color: 'var(--fg-muted)' },
     { tag: tags.meta, color: 'var(--fg-muted)' },
+    // Code block syntax highlighting (JSON, Rust, Bash, Python, TOML, YAML, HTML, CSS, JS/TS)
+    {
+      tag: [
+        tags.propertyName,
+        tags.attributeName,
+        tags.definition(tags.propertyName),
+        tags.labelName,
+      ],
+      color: 'var(--syntax-key)',
+    },
+    {
+      tag: [tags.string, tags.special(tags.string), tags.attributeValue, tags.regexp],
+      color: 'var(--syntax-string)',
+    },
+    {
+      tag: [tags.number, tags.bool, tags.null, tags.atom],
+      color: 'var(--syntax-number)',
+    },
+    {
+      tag: [
+        tags.keyword,
+        tags.controlKeyword,
+        tags.operatorKeyword,
+        tags.definitionKeyword,
+        tags.moduleKeyword,
+        tags.modifier,
+      ],
+      color: 'var(--syntax-keyword)',
+      fontWeight: '600',
+    },
+    {
+      tag: [
+        tags.function(tags.variableName),
+        tags.function(tags.propertyName),
+        tags.macroName,
+      ],
+      color: 'var(--syntax-function)',
+    },
+    {
+      tag: [tags.typeName, tags.className, tags.namespace, tags.tagName],
+      color: 'var(--syntax-type)',
+    },
+    {
+      tag: [tags.comment, tags.lineComment, tags.blockComment, tags.docComment],
+      color: 'var(--syntax-comment)',
+      fontStyle: 'italic',
+    },
+    {
+      tag: [
+        tags.punctuation,
+        tags.separator,
+        tags.brace,
+        tags.squareBracket,
+        tags.paren,
+        tags.operator,
+      ],
+      color: 'var(--syntax-punctuation)',
+    },
   ]);
 
   function buildEditorTheme() {
@@ -567,12 +713,14 @@
         overflow: 'auto',
         fontFamily: 'var(--prose-font-stack)',
         lineHeight: `${lineHeight}`,
-        paddingTop: '84px',
+        paddingTop: '76px',
         paddingBottom: '96px',
+        transition: 'padding-top 0.18s cubic-bezier(0.22, 1, 0.36, 1)',
       },
       '.cm-content': {
         maxWidth: columnMaxWidth,
         margin: '0 auto',
+        paddingTop: '0',
         paddingLeft: columnPaddingX,
         paddingRight: columnPaddingX,
         caretColor: 'var(--fg-primary)',
@@ -580,6 +728,10 @@
       },
       '.cm-line': {
         padding: '1px 0',
+      },
+      '.cm-line:first-child': {
+        marginTop: '0 !important',
+        paddingTop: '0 !important',
       },
       '&.cm-focused': {
         outline: 'none',
@@ -604,7 +756,7 @@
     suppressOutgoing = true;
     view.dispatch({
       selection: { anchor: clamped, head: clamped },
-      effects: EditorView.scrollIntoView(clamped, { y: 'start', yMargin: 96 }),
+      effects: EditorView.scrollIntoView(clamped, { y: 'start', yMargin: 84 }),
     });
     suppressOutgoing = false;
     view.focus();
@@ -627,7 +779,22 @@
         highlightSpecialChars(),
         drawSelection(),
         EditorView.lineWrapping,
-        markdown(),
+        markdown({
+          base: markdownLanguage,
+          codeLanguages: resolveCodeLanguage,
+          extensions: [
+            {
+              props: [
+                styleTags({
+                  'OrderedList/... BulletList/...': tags.content,
+                  ListMark: listMarkerTag,
+                  CodeText: tags.content,
+                  InlineCode: tags.monospace,
+                }),
+              ],
+            },
+          ],
+        }),
         syntaxHighlighting(accentMarkdownHighlight),
         keymap.of([...defaultKeymap]),
         themeCompartment.of(buildEditorTheme()),
@@ -724,13 +891,30 @@
   });
 </script>
 
-<div class="cm-editor-host" bind:this={hostEl} data-testid="codemirror-surface"></div>
+<div
+  class="cm-editor-host"
+  class:is-chrome-hidden={chromeHidden}
+  bind:this={hostEl}
+  data-testid="codemirror-surface"
+></div>
 
 <style>
   .cm-editor-host {
     width: 100%;
     height: 100%;
     overflow: clip;
+  }
+
+  .cm-editor-host.is-chrome-hidden :global(.cm-scroller) {
+    padding-top: 36px !important;
+  }
+
+  :global(.cm-content > .cm-line:first-child),
+  :global(.cm-line:first-child.cm-live-h1),
+  :global(.cm-line:first-child.cm-live-h2),
+  :global(.cm-line:first-child.cm-live-heading-line) {
+    margin-top: 0 !important;
+    padding-top: 0 !important;
   }
 
   :global(.cm-live-heading-line) {
@@ -792,22 +976,31 @@
     overflow: clip;
   }
 
-  :global(.cm-live-inline-code) {
+  :global(.cm-live-inline-code),
+  :global(.cm-live-inline-code *) {
     font-family: var(--code-font-stack);
-    color: var(--markup-code-fg);
+    color: var(--markup-code-fg) !important;
     background-color: var(--bg-code-inline);
     padding: 1px 5px;
     border-radius: 4px;
   }
 
-  :global(.cm-live-bold) {
+  :global(.cm-live-bold),
+  :global(.cm-live-bold *) {
     font-weight: 700;
-    color: var(--fg-primary);
+    color: var(--markup-bold-fg) !important;
   }
 
-  :global(.cm-live-italic) {
+  :global(.cm-live-italic),
+  :global(.cm-live-italic *) {
     font-style: italic;
-    color: var(--markup-emphasis-fg);
+    color: var(--markup-emphasis-fg) !important;
+  }
+
+  :global(.cm-live-list-marker),
+  :global(.cm-live-list-marker *) {
+    color: var(--markup-list-marker) !important;
+    font-weight: 700;
   }
 
   :global(.cm-live-strike) {

@@ -122,6 +122,7 @@ export function applyPaletteToRoot(tokens: PaletteCssTokens, theme: ThemeMode): 
   root.style.setProperty('--divider-preview', tokens.divider_preview);
   root.style.setProperty('--accent-orange', tokens.accent_orange);
   root.style.setProperty('--accent-link', tokens.accent_link);
+  root.style.setProperty('--markup-bold-fg', tokens.markup_bold_fg);
   root.style.setProperty('--markup-emphasis-fg', tokens.markup_emphasis_fg);
   root.style.setProperty('--markup-code-fg', tokens.markup_code_fg);
   root.style.setProperty('--markup-codeblock-fg', tokens.markup_codeblock_fg);
@@ -134,4 +135,14 @@ export function applyPaletteToRoot(tokens: PaletteCssTokens, theme: ThemeMode): 
   root.style.setProperty('--spellcheck-red', tokens.spellcheck_red);
   root.style.setProperty('--scrollbar-thumb', tokens.scrollbar_thumb);
   root.style.setProperty('--scrollbar-track', 'transparent');
+
+  // Code block syntax highlighting semantic tokens (JSON keys in periwinkle blue, strings in sage green)
+  root.style.setProperty('--syntax-key', isDark ? '#81a2be' : '#1d5b79');
+  root.style.setProperty('--syntax-string', isDark ? '#98c379' : '#2f7a4d');
+  root.style.setProperty('--syntax-number', isDark ? '#d19a66' : '#9a4708');
+  root.style.setProperty('--syntax-keyword', isDark ? '#c678dd' : '#7c3aed');
+  root.style.setProperty('--syntax-function', isDark ? '#61afef' : '#1e5670');
+  root.style.setProperty('--syntax-type', isDark ? '#eab700' : '#8f3f06');
+  root.style.setProperty('--syntax-comment', tokens.fg_muted);
+  root.style.setProperty('--syntax-punctuation', tokens.fg_primary);
 }

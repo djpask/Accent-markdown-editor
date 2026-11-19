@@ -73,6 +73,7 @@ export interface PaletteCssTokens {
   divider_preview: string;
   accent_orange: string;
   accent_link: string;
+  markup_bold_fg: string;
   markup_emphasis_fg: string;
   markup_code_fg: string;
   markup_codeblock_fg: string;

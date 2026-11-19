@@ -1,12 +1,12 @@
 # Maintainer: Accent Developers
 pkgname=accent-markdown-editor
-pkgver=0.8.20
+pkgver=0.8.21
 pkgrel=1
 pkgdesc="Multiplatform distraction-free Markdown editor and viewer written in 100% pure Rust"
 arch=('x86_64')
 url="https://github.com/accent-editor/accent"
 license=('MIT' 'Apache-2.0')
-depends=('gcc-libs' 'glibc' 'gtk3' 'libxkbcommon-x11' 'wayland')
+depends=('gcc-libs' 'glibc' 'gtk3' 'webkit2gtk-4.1' 'libsoup3' 'libxkbcommon-x11' 'wayland')
 makedepends=('cargo')
 provides=('accent')
 conflicts=('accent')

@@ -41,7 +41,7 @@
   }
 
   const PALETTE_SWATCHES: Record<ColorPalettePreset, [string, string, string]> = {
-    AmberCoral: ['#faf8f5', '#b45309', '#c53030'],
+    AmberCoral: ['#181a1d', '#eab700', '#e57a74'],
     EditorialSlate: ['#faf9f5', '#2b6cb0', '#2c6e63'],
     NordicForest: ['#f7f9fc', '#3a9485', '#5e81ac'],
     VelvetDawn: ['#faf4ed', '#9b5b4a', '#c4a7e7'],
@@ -53,7 +53,7 @@
   let outlineOpen = $state(false);
   let themesModalOpen = $state(false);
   let draftTheme: ThemeMode = $state('Sepia');
-  let draftPreset: ColorPalettePreset = $state('EditorialSlate');
+  let draftPreset: ColorPalettePreset = $state('AmberCoral');
   let draftPreviewTokens: PaletteCssTokens | null = $state(null);
   let prefsTab: 'typography' | 'editor' = $state('typography');
   let prefsRollback: PreferencesRollbackState | null = $state(null);
@@ -77,11 +77,11 @@
     const root = document.documentElement;
     root.style.setProperty(
       '--prose-font-stack',
-      `'${next.typography.prose_font_family}', 'Inter', 'Segoe UI', system-ui, sans-serif`
+      `"${next.typography.prose_font_family}", "FreeMono", "Cascadia Mono", "DejaVu Sans Mono", monospace`
     );
     root.style.setProperty(
       '--code-font-stack',
-      `'${next.typography.code_font_family}', 'JetBrains Mono', 'Consolas', monospace`
+      `"${next.typography.code_font_family}", "FreeMono", "Cascadia Mono", "DejaVu Sans Mono", monospace`
     );
     if (next.preview_active) {
       void refreshPreviewHtml();
@@ -375,8 +375,8 @@
   }
 
   async function restoreTypographyDefaults() {
-    await send({ SetProseFont: 'Nimbus Mono PS' });
-    await send({ SetCodeFont: 'Nimbus Mono PS' });
+    await send({ SetProseFont: 'FreeMono' });
+    await send({ SetCodeFont: 'FreeMono' });
     await send({ SetFontSize: 17.35 });
     await send({ SetLineHeight: 1.505 });
     await send({ SetLineWidth: 'Compact' });
@@ -504,6 +504,8 @@
   <div
     class="window-shell"
     class:is-maximized={isMaximized || snapshot.fullscreen}
+    class:is-chrome-hidden={chromeHidden}
+    class:has-banner={snapshot.recovery_banner_active || snapshot.disk_modified_banner_active}
     data-testid="accent-window-shell"
   >
     <!-- Edge & Corner Resize Handles for Frameless Window -->
@@ -941,6 +943,7 @@
                 snapshot.line_width,
                 snapshot.fluid_margin_pct
               )}
+              chromeHidden={chromeHidden}
               onEdit={handleEditorEdit}
             />
           </div>
@@ -1613,7 +1616,8 @@
                   # Titolo Markdown ({draftTheme})
                 </h3>
                 <p style="margin: 0 0 10px 0;">
-                  Scrittura calma con <em style={`color: ${draftPreviewTokens.markup_emphasis_fg};`}>enfasi</em>,
+                  Scrittura calma con <strong style={`color: ${draftPreviewTokens.markup_bold_fg};`}>grassetto</strong>,
+                  <em style={`color: ${draftPreviewTokens.markup_emphasis_fg};`}>corsivo</em>,
                   <code
                     style={`background-color: ${draftPreviewTokens.bg_code_inline}; color: ${draftPreviewTokens.markup_code_fg}; padding: 2px 6px; border-radius: 4px;`}
                   >
@@ -2097,7 +2101,7 @@
               <div><span>{tr('fullscreen_mode')}</span><b>F11</b></div>
             </div>
           {:else}
-            <p style="margin: 0 0 8px 0; font-weight: 700;">Accent Markdown Editor v0.8.14</p>
+            <p style="margin: 0 0 8px 0; font-weight: 700;">Accent Markdown Editor v0.8.21</p>
             <p style="margin: 0; color: var(--fg-muted);">
               Rust Backend (L1–L4) • Tauri v2 • Svelte 5 • CodeMirror 6 • Offline KaTeX &amp; Mermaid
             </p>
@@ -2149,6 +2153,10 @@
 
   /* 1. Integrated CSD Top Bar */
   .csd-topbar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
     height: 38px;
     min-height: 38px;
     display: flex;
@@ -2292,6 +2300,10 @@
 
   /* 2. Always-Visible Multi-Tab Bar */
   .multitab-bar {
+    position: absolute;
+    top: 38px;
+    left: 0;
+    right: 0;
     height: 32px;
     min-height: 32px;
     display: flex;
@@ -2430,6 +2442,10 @@
 
   /* 3. Notification Banners */
   .notification-banner {
+    position: absolute;
+    top: 70px;
+    left: 0;
+    right: 0;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -2440,6 +2456,14 @@
     font-size: 13px;
     font-weight: 600;
     z-index: 28;
+  }
+
+  .window-shell.has-banner :global(.cm-scroller) {
+    padding-top: 114px !important;
+  }
+
+  .window-shell.has-banner .preview-pane {
+    padding-top: 114px;
   }
 
   .banner-actions {
@@ -2477,7 +2501,7 @@
     flex-direction: column;
     overflow-y: auto;
     overscroll-behavior: contain;
-    padding: 12px 8px 72px 8px;
+    padding: 78px 8px 72px 8px;
     z-index: 20;
   }
 
@@ -2577,17 +2601,38 @@
     overscroll-behavior: contain;
     background-color: var(--bg-preview);
     border-left: 1px solid var(--divider-preview);
-    padding: 36px 32px 96px 32px;
+    padding: 76px 32px 96px 32px;
+    transition: padding-top 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .window-shell.is-chrome-hidden .preview-pane {
+    padding-top: 36px;
   }
 
   .editor-workspace.split-bottom .preview-pane {
     border-left: none;
     border-top: 1px solid var(--divider-preview);
+    padding-top: 24px;
   }
 
   .preview-prose {
     margin: 0 auto;
     font-family: var(--prose-font-stack);
+  }
+
+  :global(.preview-prose > :first-child) {
+    margin-top: 0 !important;
+    padding-top: 0 !important;
+  }
+
+  :global(.preview-prose strong) {
+    color: var(--markup-bold-fg);
+    font-weight: 700;
+  }
+
+  :global(.preview-prose em) {
+    color: var(--markup-emphasis-fg);
+    font-style: italic;
   }
 
   :global(.preview-prose h1),

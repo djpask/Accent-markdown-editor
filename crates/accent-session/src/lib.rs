@@ -547,8 +547,8 @@ pub struct TypographyConfig {
 impl Default for TypographyConfig {
     fn default() -> Self {
         Self {
-            prose_font_family: "Nimbus Mono PS".to_string(),
-            code_font_family: "Nimbus Mono PS".to_string(),
+            prose_font_family: "FreeMono".to_string(),
+            code_font_family: "FreeMono".to_string(),
             font_size: DEFAULT_FONT_SIZE,
             line_height: 1.505,
         }
@@ -576,6 +576,7 @@ impl SystemFontCatalog {
     /// Preferences dialog is opened.
     pub fn default_curated() -> Self {
         let prose_presets = vec![
+            "FreeMono".to_string(),
             "Nimbus Mono PS".to_string(),
             "Segoe UI".to_string(),
             "Inter".to_string(),
@@ -586,6 +587,7 @@ impl SystemFontCatalog {
             "FreeSans".to_string(),
         ];
         let code_presets = vec![
+            "FreeMono".to_string(),
             "Nimbus Mono PS".to_string(),
             "Consolas".to_string(),
             "JetBrains Mono".to_string(),
@@ -625,6 +627,7 @@ impl SystemFontCatalog {
         }
 
         let prose_curated = [
+            "FreeMono",
             "Nimbus Mono PS",
             "Segoe UI",
             "Adwaita Sans",
@@ -638,19 +641,24 @@ impl SystemFontCatalog {
             "FreeSans",
         ];
         let code_curated = [
+            "FreeMono",
             "Nimbus Mono PS",
             "Consolas",
             "Cascadia Mono",
             "JetBrains Mono",
             "Adwaita Mono",
-            "FreeMono",
             "DejaVu Sans Mono",
             "Courier New",
         ];
 
         let mut prose_presets = Vec::new();
         for &c in &prose_curated {
-            if set.contains(c) || c == "Nimbus Mono PS" || c == "Inter" || c == "Literata" {
+            if set.contains(c)
+                || c == "FreeMono"
+                || c == "Nimbus Mono PS"
+                || c == "Inter"
+                || c == "Literata"
+            {
                 prose_presets.push(c.to_string());
             }
         }
@@ -662,7 +670,11 @@ impl SystemFontCatalog {
 
         let mut code_presets = Vec::new();
         for &c in &code_curated {
-            if set.contains(c) || c == "Nimbus Mono PS" || c == "JetBrains Mono" {
+            if set.contains(c)
+                || c == "FreeMono"
+                || c == "Nimbus Mono PS"
+                || c == "JetBrains Mono"
+            {
                 code_presets.push(c.to_string());
             }
         }
@@ -856,7 +868,7 @@ impl Default for PersistedSettings {
     fn default() -> Self {
         Self {
             theme: ThemeMode::Sepia,
-            palette_preset: ColorPalettePreset::EditorialSlate,
+            palette_preset: ColorPalettePreset::AmberCoral,
             locale: Locale::It,
             dialect: MarkdownDialect::Gfm,
             line_width: LineWidthMode::Compact,
@@ -1095,7 +1107,7 @@ impl Session {
             status_message: None,
             buffer: default_buf,
             theme: ThemeMode::Sepia,
-            palette_preset: ColorPalettePreset::EditorialSlate,
+            palette_preset: ColorPalettePreset::AmberCoral,
             locale: Locale::It,
             dialect: MarkdownDialect::Gfm,
             line_width: LineWidthMode::Compact,
