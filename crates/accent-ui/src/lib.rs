@@ -1,229 +1,257 @@
 pub mod ui;
 
-use accent_session::{Action, Session};
+use accent_mermaid::MermaidTheme;
+use accent_session::{Action, ColorPalettePreset, Session, ThemeMode};
 use accent_storage::{
     FocusedFileWatcher, IpcRequest, SingleInstanceGuard, SingleInstanceOutcome,
 };
-use eframe::egui;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter, Manager, State};
+use ui::{
+    MermaidSvgPayload, UiSessionSnapshot, build_session_snapshot,
+    theme::{AccentPalette, PaletteCssTokens},
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct LaunchOptions {
     pub file_path: Option<PathBuf>,
 }
 
-pub struct AccentApp {
-    pub session: Session,
-    frame_count: u32,
-    sync_cursor_to_widget: bool,
-    single_instance: Option<SingleInstanceGuard>,
-    file_watcher: Option<FocusedFileWatcher>,
-    last_watched_path: Option<PathBuf>,
-    last_fullscreen: bool,
+pub struct TauriAppState {
+    pub session: Mutex<Session>,
+    pub single_instance: Mutex<Option<SingleInstanceGuard>>,
+    pub file_watcher: Mutex<Option<FocusedFileWatcher>>,
+    pub last_watched_path: Mutex<Option<PathBuf>>,
 }
 
-impl AccentApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, opts: LaunchOptions) -> Self {
-        Self::with_single_instance(cc, opts, None)
-    }
-
-    pub fn with_single_instance(
-        cc: &eframe::CreationContext<'_>,
-        opts: LaunchOptions,
-        single_instance: Option<SingleInstanceGuard>,
-    ) -> Self {
-        ui::theme::configure_fonts(&cc.egui_ctx);
-
-        if let Some(ref guard) = single_instance {
-            let egui_ctx = cc.egui_ctx.clone();
-            guard.set_waker(move || {
-                egui_ctx.request_repaint();
-            });
+impl TauriAppState {
+    pub fn sync_file_watcher(&self, current_file_path: Option<PathBuf>, suppress_ms: Option<u64>) {
+        if let Some(ms) = suppress_ms {
+            if let Ok(guard) = self.file_watcher.lock() {
+                if let Some(ref watcher) = *guard {
+                    watcher.suppress_notifications_for(ms);
+                }
+            }
         }
-
-        let mut session = Session::default();
-        if let Some(fp) = opts.file_path {
-            session.apply(Action::OpenFile(fp));
-        }
-
-        let file_watcher = FocusedFileWatcher::new().ok();
-        if let Some(ref watcher) = file_watcher {
-            let egui_ctx = cc.egui_ctx.clone();
-            watcher.set_waker(move || {
-                egui_ctx.request_repaint();
-            });
-            watcher.set_watched_file(session.current_file_path.clone());
-        }
-        let last_watched_path = session.current_file_path.clone();
-        let last_fullscreen = session.fullscreen;
-
-        Self {
-            session,
-            frame_count: 0,
-            sync_cursor_to_widget: true,
-            single_instance,
-            file_watcher,
-            last_watched_path,
-            last_fullscreen,
-        }
-    }
-}
-
-impl eframe::App for AccentApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.frame_count += 1;
-        if self.frame_count <= 3 {
-            ctx.set_cursor_icon(egui::CursorIcon::Default);
-        }
-
-        // Process any incoming single-instance IPC requests from secondary `accent [file.md]` launches
-        if let Some(ref guard) = self.single_instance {
-            let ipc_requests = guard.drain_requests();
-            if !ipc_requests.is_empty() {
-                for req in ipc_requests {
-                    if let IpcRequest::OpenFile(path) = req {
-                        self.session.apply(Action::OpenFile(path));
-                        self.sync_cursor_to_widget = true;
+        if let Ok(mut last_guard) = self.last_watched_path.lock() {
+            if *last_guard != current_file_path {
+                *last_guard = current_file_path.clone();
+                if let Ok(w_guard) = self.file_watcher.lock() {
+                    if let Some(ref watcher) = *w_guard {
+                        watcher.set_watched_file(current_file_path);
                     }
                 }
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                ctx.request_repaint();
             }
         }
+    }
+}
 
-        // Check OS-driven file modification notification or window focus regain (zero continuous polling)
-        let watcher_notified = self
-            .file_watcher
-            .as_ref()
-            .is_some_and(|w| w.take_change_notification());
-        let window_gained_focus = ctx.input(|i| {
-            i.events
-                .iter()
-                .any(|e| matches!(e, egui::Event::WindowFocused(true)))
-        });
-        if watcher_notified || window_gained_focus {
-            self.session.apply(Action::CheckExternalFileModification);
+#[tauri::command]
+fn get_session_snapshot(state: State<'_, Arc<TauriAppState>>) -> Result<UiSessionSnapshot, String> {
+    let session = state.session.lock().map_err(|e| e.to_string())?;
+    Ok(build_session_snapshot(&session))
+}
+
+#[tauri::command]
+fn dispatch_action(
+    app: AppHandle,
+    state: State<'_, Arc<TauriAppState>>,
+    action: Action,
+) -> Result<UiSessionSnapshot, String> {
+    let is_save = matches!(
+        action,
+        Action::SaveDocument | Action::SaveAsFile(_) | Action::ConfirmRecoverySave
+    );
+    let is_fullscreen_action = matches!(
+        action,
+        Action::ToggleFullscreen | Action::SetFullscreen(_)
+    );
+
+    let (snapshot, current_path, fullscreen_state) = {
+        let mut session = state.session.lock().map_err(|e| e.to_string())?;
+        if is_save {
+            state.sync_file_watcher(session.current_file_path.clone(), Some(180));
         }
+        session.apply(action);
+        let snap = build_session_snapshot(&session);
+        (snap, session.current_file_path.clone(), session.fullscreen)
+    };
 
-        // Borrow-Checker Rule (AGENTS.md Section 3):
-        // Treat Session as read-only during UI rendering, collect Actions into a frame-local Vec,
-        // and drain/apply all actions at the end of update().
-        let rendered_tab_id = self
-            .session
-            .tabs
-            .get(self.session.active_tab_index)
-            .map(|t| t.tab_id);
-        let atlas_before = ctx.fonts(|f| f.font_image_size());
-        let mut actions = Vec::new();
-        ui::render_ui(
-            ctx,
-            &self.session,
-            &mut actions,
-            &mut self.sync_cursor_to_widget,
-        );
-        let atlas_after = ctx.fonts(|f| f.font_image_size());
-        let had_non_cursor_actions = actions
-            .iter()
-            .any(|a| !matches!(a, Action::SetSelection(_, _)));
-        for action in actions {
-            let current_tab_id = self
-                .session
-                .tabs
-                .get(self.session.active_tab_index)
-                .map(|t| t.tab_id);
-            if matches!(
-                action,
-                Action::UpdateBufferText(_) | Action::SetSelection(_, _) | Action::MoveCursor(_)
-            ) && current_tab_id != rendered_tab_id
-            {
-                // Never apply buffer or cursor mutations from a previous tab's widget onto a newly switched tab
-                continue;
-            }
-            if matches!(
-                action,
-                Action::MoveCursor(_)
-                    | Action::ApplyFormat(_)
-                    | Action::NewDocument
-                    | Action::NewTab
-                    | Action::SwitchTab(_)
-                    | Action::CloseTab(_)
-                    | Action::NextTab
-                    | Action::PrevTab
-                    | Action::Undo
-                    | Action::Redo
-                    | Action::OpenFile(_)
-                    | Action::OpenTutorial
-                    | Action::ConfirmRecoverySave
-                    | Action::DiscardRecovery
-                    | Action::ReloadFromDisk
-                    | Action::FindNext
-                    | Action::FindPrev
-                    | Action::InsertText(_)
-                    | Action::ReplaceNext
-            ) {
-                self.sync_cursor_to_widget = true;
-            }
-            if matches!(
-                action,
-                Action::SaveDocument | Action::SaveAsFile(_) | Action::ConfirmRecoverySave
-            ) {
-                if let Some(ref watcher) = self.file_watcher {
-                    watcher.suppress_notifications_for(180);
-                }
-            }
-            self.session.apply(action);
+    state.sync_file_watcher(current_path, None);
+
+    if is_fullscreen_action {
+        if let Some(win) = app.get_webview_window("main") {
+            let _ = win.set_fullscreen(fullscreen_state);
         }
+    }
 
-        // Update OS file watcher target whenever the active tab's file path changes
-        if self.session.current_file_path != self.last_watched_path {
-            self.last_watched_path = self.session.current_file_path.clone();
-            if let Some(ref watcher) = self.file_watcher {
-                watcher.set_watched_file(self.last_watched_path.clone());
-            }
-        }
+    Ok(snapshot)
+}
 
-        // Synchronize fullscreen viewport command when toggled via menu or F11
-        if self.session.fullscreen != self.last_fullscreen {
-            self.last_fullscreen = self.session.fullscreen;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.session.fullscreen));
-        }
+#[tauri::command]
+fn update_editor_buffer(
+    state: State<'_, Arc<TauriAppState>>,
+    tab_id: u64,
+    text: String,
+    selection_primary: usize,
+    selection_secondary: usize,
+) -> Result<UiSessionSnapshot, String> {
+    let mut session = state.session.lock().map_err(|e| e.to_string())?;
+    let active_tab_id = session
+        .tabs
+        .get(session.active_tab_index)
+        .map(|t| t.tab_id);
+    if active_tab_id == Some(tab_id) {
+        session.apply(Action::UpdateBufferText(text));
+        session.apply(Action::SetSelection(selection_primary, selection_secondary));
+    }
+    Ok(build_session_snapshot(&session))
+}
 
-        // Phase 4: Poll < 300ms debounced Write-Ahead Recovery Journal (WAL) and settings flushes
-        let now = Instant::now();
-        let _ = self.session.poll_journal_flush(now);
-        self.session.poll_settings_flush(now);
-        let next_wait = match (
-            self.session.time_until_next_journal_flush(now),
-            self.session.time_until_next_settings_flush(now),
-        ) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
+#[tauri::command]
+fn open_native_file_dialog(
+    state: State<'_, Arc<TauriAppState>>,
+) -> Result<UiSessionSnapshot, String> {
+    let dir = {
+        let session = state.session.lock().map_err(|e| e.to_string())?;
+        session.file_dialog_dir.clone()
+    };
+    let is_headless_xvfb = std::env::var("DISPLAY").as_deref() == Ok(":99");
+    if is_headless_xvfb {
+        let mut session = state.session.lock().map_err(|e| e.to_string())?;
+        session.apply(Action::SetOverlay(accent_session::ActiveOverlay::OpenFileDialog));
+        return Ok(build_session_snapshot(&session));
+    }
+    let picked = rfd::FileDialog::new()
+        .add_filter("Markdown", &["md", "markdown", "txt"])
+        .set_directory(&dir)
+        .pick_file();
+    let mut session = state.session.lock().map_err(|e| e.to_string())?;
+    if let Some(path) = picked {
+        session.apply(Action::OpenFile(path));
+    }
+    let cur_path = session.current_file_path.clone();
+    let snap = build_session_snapshot(&session);
+    drop(session);
+    state.sync_file_watcher(cur_path, None);
+    Ok(snap)
+}
+
+#[tauri::command]
+fn save_as_native_file_dialog(
+    state: State<'_, Arc<TauriAppState>>,
+) -> Result<UiSessionSnapshot, String> {
+    let (dir, file_name) = {
+        let session = state.session.lock().map_err(|e| e.to_string())?;
+        (session.file_dialog_dir.clone(), session.document_title.clone())
+    };
+    let is_headless_xvfb = std::env::var("DISPLAY").as_deref() == Ok(":99");
+    if is_headless_xvfb {
+        let mut session = state.session.lock().map_err(|e| e.to_string())?;
+        let target = dir.join(&file_name);
+        state.sync_file_watcher(Some(target.clone()), Some(180));
+        session.apply(Action::SaveAsFile(target.clone()));
+        let snap = build_session_snapshot(&session);
+        drop(session);
+        state.sync_file_watcher(Some(target), None);
+        return Ok(snap);
+    }
+    let saved = rfd::FileDialog::new()
+        .add_filter("Markdown", &["md", "markdown"])
+        .set_directory(&dir)
+        .set_file_name(&file_name)
+        .save_file();
+    let mut session = state.session.lock().map_err(|e| e.to_string())?;
+    if let Some(path) = saved {
+        state.sync_file_watcher(Some(path.clone()), Some(180));
+        session.apply(Action::SaveAsFile(path));
+    }
+    let cur_path = session.current_file_path.clone();
+    let snap = build_session_snapshot(&session);
+    drop(session);
+    state.sync_file_watcher(cur_path, None);
+    Ok(snap)
+}
+
+#[tauri::command]
+fn preview_palette_tokens(
+    preset: ColorPalettePreset,
+    mode: ThemeMode,
+) -> PaletteCssTokens {
+    AccentPalette::for_preset(preset, mode).to_css_tokens()
+}
+
+#[tauri::command]
+fn render_mermaid_diagram(
+    state: State<'_, Arc<TauriAppState>>,
+    source: String,
+    theme_override: Option<ThemeMode>,
+) -> Result<MermaidSvgPayload, String> {
+    let session = state.session.lock().map_err(|e| e.to_string())?;
+    let diagram = if let Some(mode) = theme_override {
+        let m_theme = match mode {
+            ThemeMode::Light => MermaidTheme::Light,
+            ThemeMode::Sepia => MermaidTheme::Sepia,
+            ThemeMode::SemiDark => MermaidTheme::SemiDark,
+            ThemeMode::Dark => MermaidTheme::Dark,
         };
-        if let Some(wait) = next_wait {
-            ctx.request_repaint_after(
-                wait.max(Duration::from_millis(16))
-                    .min(Duration::from_millis(300)),
-            );
+        session
+            .mermaid_cache
+            .borrow_mut()
+            .get_or_render_screen_themed(&source, m_theme)
+    } else {
+        session.render_mermaid(&source)
+    };
+    Ok(MermaidSvgPayload {
+        content_hash: diagram.content_hash,
+        svg: diagram.svg.clone(),
+        width: diagram.width,
+        height: diagram.height,
+    })
+}
+
+fn html_unescape_basic(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+fn inject_rust_mermaid_svgs(raw_html: &str, session: &Session) -> String {
+    let open_tag = "<pre><code class=\"language-mermaid\">";
+    let close_tag = "</code></pre>";
+    let mut out = String::with_capacity(raw_html.len() + 1024);
+    let mut rest = raw_html;
+    while let Some(start) = rest.find(open_tag) {
+        out.push_str(&rest[..start]);
+        let after_open = &rest[start + open_tag.len()..];
+        if let Some(end) = after_open.find(close_tag) {
+            let escaped_code = &after_open[..end];
+            let code = html_unescape_basic(escaped_code);
+            let diagram = session.render_mermaid(&code);
+            out.push_str("<div class=\"accent-mermaid-block\" data-testid=\"mermaid-svg-block\">");
+            out.push_str(&diagram.svg);
+            out.push_str("</div>");
+            rest = &after_open[end + close_tag.len()..];
+        } else {
+            out.push_str(&rest[start..]);
+            rest = "";
+            break;
         }
-
-        if had_non_cursor_actions || atlas_before != atlas_after || self.frame_count <= 3 {
-            ctx.request_repaint();
-        }
     }
+    out.push_str(rest);
+    out
+}
 
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0]
-    }
-
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.session.on_clean_exit();
-        self.file_watcher = None;
-        self.single_instance = None;
-    }
+#[tauri::command]
+fn render_preview_html(state: State<'_, Arc<TauriAppState>>) -> Result<String, String> {
+    let session = state.session.lock().map_err(|e| e.to_string())?;
+    let raw_html = accent_export::render_markdown_to_html(session.buffer.as_str());
+    Ok(inject_rust_mermaid_svgs(&raw_html, &session))
 }
 
 pub fn parse_cli_args(args: &[String]) -> LaunchOptions {
@@ -239,22 +267,13 @@ pub fn parse_cli_args(args: &[String]) -> LaunchOptions {
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const OFFICIAL_ICON_SVG: &str = include_str!("../resources/icon.svg");
 
-pub fn load_app_icon() -> Option<egui::IconData> {
-    let (width, height, rgba) = accent_mermaid::rasterize_svg_rgba(OFFICIAL_ICON_SVG, 0.25)?;
-    Some(egui::IconData {
-        rgba,
-        width,
-        height,
-    })
-}
-
 /// Generates a multi-resolution Windows `.ico` file (`256x256`, `64x64`, `32x32`, `16x16` PNG frames)
 /// directly from the official Accent SVG logo.
 pub fn generate_windows_ico() -> Option<Vec<u8>> {
     let scales = [
-        (0u8, 0.5_f32),     // 256x256 (0 in ICONDIRENTRY means 256px)
-        (64u8, 0.125_f32),  // 64x64
-        (32u8, 0.0625_f32), // 32x32
+        (0u8, 0.5_f32),      // 256x256 (0 in ICONDIRENTRY means 256px)
+        (64u8, 0.125_f32),   // 64x64
+        (32u8, 0.0625_f32),  // 32x32
         (16u8, 0.03125_f32), // 16x16
     ];
     let mut png_frames = Vec::with_capacity(scales.len());
@@ -265,22 +284,21 @@ pub fn generate_windows_ico() -> Option<Vec<u8>> {
 
     let count = png_frames.len() as u16;
     let mut ico = Vec::new();
-    // ICONDIR header (6 bytes)
-    ico.extend_from_slice(&0u16.to_le_bytes()); // idReserved = 0
-    ico.extend_from_slice(&1u16.to_le_bytes()); // idType = 1 (ICO)
-    ico.extend_from_slice(&count.to_le_bytes()); // idCount
+    ico.extend_from_slice(&0u16.to_le_bytes());
+    ico.extend_from_slice(&1u16.to_le_bytes());
+    ico.extend_from_slice(&count.to_le_bytes());
 
     let mut data_offset: u32 = 6 + (16 * png_frames.len() as u32);
     for (dim_byte, png_bytes) in &png_frames {
         let size = png_bytes.len() as u32;
-        ico.push(*dim_byte); // bWidth
-        ico.push(*dim_byte); // bHeight
-        ico.push(0); // bColorCount
-        ico.push(0); // bReserved
-        ico.extend_from_slice(&1u16.to_le_bytes()); // wPlanes = 1
-        ico.extend_from_slice(&32u16.to_le_bytes()); // wBitCount = 32
-        ico.extend_from_slice(&size.to_le_bytes()); // dwBytesInRes
-        ico.extend_from_slice(&data_offset.to_le_bytes()); // dwImageOffset
+        ico.push(*dim_byte);
+        ico.push(*dim_byte);
+        ico.push(0);
+        ico.push(0);
+        ico.extend_from_slice(&1u16.to_le_bytes());
+        ico.extend_from_slice(&32u16.to_le_bytes());
+        ico.extend_from_slice(&size.to_le_bytes());
+        ico.extend_from_slice(&data_offset.to_le_bytes());
         data_offset += size;
     }
 
@@ -290,9 +308,7 @@ pub fn generate_windows_ico() -> Option<Vec<u8>> {
     Some(ico)
 }
 
-pub fn run_app(opts: LaunchOptions) -> eframe::Result {
-    // Clear any inherited XDG/X11 startup notification ID so desktop compositors
-    // never leave the mouse pointer in the 15-second spinning "busy" state.
+pub fn run_app(opts: LaunchOptions) -> Result<(), String> {
     unsafe {
         std::env::remove_var("DESKTOP_STARTUP_ID");
     }
@@ -309,46 +325,144 @@ pub fn run_app(opts: LaunchOptions) -> eframe::Result {
             Err(_) => None,
         };
 
-    // If DISPLAY=:99 is requested or running headless, force X11 on :99 with software GL
+    // If DISPLAY=:99 is requested or running headless, force X11 on :99 with software compositing
     let want_xvfb_99 = std::env::var("DISPLAY").as_deref() == Ok(":99")
         || (std::env::var("DISPLAY").is_err() && std::env::var("WAYLAND_DISPLAY").is_err());
     if want_xvfb_99 && std::path::Path::new("/tmp/.X11-unix/X99").exists() {
         unsafe {
             std::env::set_var("DISPLAY", ":99");
-            std::env::set_var("WAYLAND_DISPLAY", "");
-            std::env::set_var("WINIT_UNIX_BACKEND", "x11");
+            std::env::remove_var("WAYLAND_DISPLAY");
+            std::env::remove_var("XAUTHORITY");
+            std::env::set_var("GDK_BACKEND", "x11");
+            std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
             std::env::set_var("LIBGL_ALWAYS_SOFTWARE", "1");
         }
     }
 
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_app_id("accent")
-        .with_title("Accent")
-        .with_inner_size([1200.0, 1100.0])
-        .with_min_inner_size([600.0, 400.0])
-        .with_decorations(false)
-        .with_transparent(true);
-    if let Some(icon) = load_app_icon() {
-        viewport = viewport.with_icon(std::sync::Arc::new(icon));
+    let mut session = Session::default();
+    if let Some(fp) = opts.file_path {
+        session.apply(Action::OpenFile(fp));
+    }
+    let initial_watched_path = session.current_file_path.clone();
+    let file_watcher = FocusedFileWatcher::new().ok();
+    if let Some(ref watcher) = file_watcher {
+        watcher.set_watched_file(initial_watched_path.clone());
     }
 
-    let native_options = eframe::NativeOptions {
-        viewport,
-        renderer: eframe::Renderer::Glow,
-        ..Default::default()
-    };
+    let app_state = Arc::new(TauriAppState {
+        session: Mutex::new(session),
+        single_instance: Mutex::new(single_instance),
+        file_watcher: Mutex::new(file_watcher),
+        last_watched_path: Mutex::new(initial_watched_path),
+    });
 
-    eframe::run_native(
-        "Accent",
-        native_options,
-        Box::new(move |cc| {
-            Ok(Box::new(AccentApp::with_single_instance(
-                cc,
-                opts,
-                single_instance,
-            )))
-        }),
-    )
+    let state_for_setup = Arc::clone(&app_state);
+    let state_for_exit = Arc::clone(&app_state);
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .manage(app_state)
+        .invoke_handler(tauri::generate_handler![
+            get_session_snapshot,
+            dispatch_action,
+            update_editor_buffer,
+            open_native_file_dialog,
+            save_as_native_file_dialog,
+            preview_palette_tokens,
+            render_mermaid_diagram,
+            render_preview_html,
+        ])
+        .setup(move |app| {
+            let handle = app.handle().clone();
+            let bg_state = Arc::clone(&state_for_setup);
+            std::thread::Builder::new()
+                .name("accent-wal-and-ipc-worker".to_string())
+                .spawn(move || {
+                    loop {
+                        std::thread::sleep(Duration::from_millis(60));
+                        let mut emit_snapshot: Option<UiSessionSnapshot> = None;
+                        let mut should_focus_window = false;
+
+                        // 1. Check Single-Instance IPC requests
+                        let mut forwarded_files = Vec::new();
+                        if let Ok(si_guard) = bg_state.single_instance.lock() {
+                            if let Some(ref guard) = *si_guard {
+                                let reqs = guard.drain_requests();
+                                if !reqs.is_empty() {
+                                    should_focus_window = true;
+                                    for req in reqs {
+                                        if let IpcRequest::OpenFile(path) = req {
+                                            forwarded_files.push(path);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 2. Check OS-native FocusedFileWatcher notification
+                        let file_changed = bg_state
+                            .file_watcher
+                            .lock()
+                            .ok()
+                            .and_then(|g| g.as_ref().map(|w| w.take_change_notification()))
+                            .unwrap_or(false);
+
+                        // 3. Poll < 300ms WAL journal flush and debounced settings flush
+                        let mut updated_watched_path: Option<Option<PathBuf>> = None;
+                        if let Ok(mut session) = bg_state.session.lock() {
+                            let now = Instant::now();
+                            let _ = session.poll_journal_flush(now);
+                            let _ = session.poll_settings_flush(now);
+
+                            if !forwarded_files.is_empty() {
+                                for path in forwarded_files {
+                                    session.apply(Action::OpenFile(path));
+                                }
+                                updated_watched_path = Some(session.current_file_path.clone());
+                                emit_snapshot = Some(build_session_snapshot(&session));
+                            } else if file_changed {
+                                let prev_banner = session.disk_modified_banner_active;
+                                session.apply(Action::CheckExternalFileModification);
+                                if session.disk_modified_banner_active != prev_banner
+                                    || session.disk_modified_banner_active
+                                {
+                                    emit_snapshot = Some(build_session_snapshot(&session));
+                                }
+                            }
+                        }
+
+                        if let Some(new_path) = updated_watched_path {
+                            bg_state.sync_file_watcher(new_path, None);
+                        }
+
+                        if should_focus_window {
+                            if let Some(win) = handle.get_webview_window("main") {
+                                let _ = win.unminimize();
+                                let _ = win.set_focus();
+                            }
+                        }
+
+                        if let Some(snap) = emit_snapshot {
+                            let _ = handle.emit("accent://session-updated", snap);
+                        }
+                    }
+                })
+                .ok();
+            Ok(())
+        })
+        .on_window_event(move |_window, event| {
+            if matches!(
+                event,
+                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
+            ) {
+                if let Ok(mut session) = state_for_exit.session.lock() {
+                    session.on_clean_exit();
+                }
+            }
+        })
+        .run(tauri::generate_context!())
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -366,51 +480,114 @@ mod tests {
     #[test]
     fn test_theme_palettes_match_sampled_hex_values() {
         let light = ui::theme::AccentPalette::for_mode(ThemeMode::Light);
-        assert_eq!(light.bg_canvas, egui::Color32::from_rgb(0xff, 0xff, 0xff));
-        assert_eq!(light.fg_primary, egui::Color32::from_rgb(0x2e, 0x34, 0x36));
+        assert_eq!(light.bg_canvas, ui::theme::Color32::from_rgb(0xff, 0xff, 0xff));
+        assert_eq!(light.fg_primary, ui::theme::Color32::from_rgb(0x2e, 0x34, 0x36));
 
         let sepia = ui::theme::AccentPalette::for_mode(ThemeMode::Sepia);
-        assert_eq!(sepia.bg_canvas, egui::Color32::from_rgb(0xf9, 0xf3, 0xe9));
-        assert_eq!(sepia.fg_primary, egui::Color32::from_rgb(0x4f, 0x39, 0x15));
+        assert_eq!(sepia.bg_canvas, ui::theme::Color32::from_rgb(0xf9, 0xf3, 0xe9));
+        assert_eq!(sepia.fg_primary, ui::theme::Color32::from_rgb(0x4f, 0x39, 0x15));
+
+        let semi_dark = ui::theme::AccentPalette::for_mode(ThemeMode::SemiDark);
+        assert_eq!(semi_dark.bg_canvas, ui::theme::Color32::from_rgb(0x2e, 0x31, 0x36));
+        assert_eq!(semi_dark.fg_primary, ui::theme::Color32::from_rgb(0xe6, 0xe8, 0xeb));
 
         let dark = ui::theme::AccentPalette::for_mode(ThemeMode::Dark);
-        assert_eq!(dark.bg_canvas, egui::Color32::from_rgb(0x2b, 0x2b, 0x2f));
-        assert_eq!(dark.fg_primary, egui::Color32::from_rgb(0xee, 0xee, 0xee));
+        assert_eq!(dark.bg_canvas, ui::theme::Color32::from_rgb(0x2b, 0x2b, 0x2f));
+        assert_eq!(dark.fg_primary, ui::theme::Color32::from_rgb(0xee, 0xee, 0xee));
     }
 
     #[test]
     fn test_ergonomic_palette_presets() {
+        let amber_semi = ui::theme::AccentPalette::for_preset(
+            ColorPalettePreset::AmberCoral,
+            ThemeMode::SemiDark,
+        );
+        assert_eq!(amber_semi.bg_canvas, ui::theme::Color32::from_rgb(0x2e, 0x31, 0x35));
+
         let ed_light = ui::theme::AccentPalette::for_preset(
             ColorPalettePreset::EditorialSlate,
             ThemeMode::Light,
         );
-        assert_eq!(ed_light.bg_canvas, egui::Color32::from_rgb(0xfa, 0xf9, 0xf5));
-        assert_eq!(ed_light.accent_orange, egui::Color32::from_rgb(0x2b, 0x6c, 0xb0));
+        assert_eq!(ed_light.bg_canvas, ui::theme::Color32::from_rgb(0xfa, 0xf9, 0xf5));
+        assert_eq!(ed_light.accent_orange, ui::theme::Color32::from_rgb(0x2b, 0x6c, 0xb0));
 
         let ed_sepia = ui::theme::AccentPalette::for_preset(
             ColorPalettePreset::EditorialSlate,
             ThemeMode::Sepia,
         );
-        assert_eq!(ed_sepia.bg_canvas, egui::Color32::from_rgb(0xf4, 0xef, 0xe6));
-        assert_eq!(ed_sepia.accent_orange, egui::Color32::from_rgb(0x2c, 0x6e, 0x63));
+        assert_eq!(ed_sepia.bg_canvas, ui::theme::Color32::from_rgb(0xf4, 0xef, 0xe6));
+        assert_eq!(ed_sepia.accent_orange, ui::theme::Color32::from_rgb(0x2c, 0x6e, 0x63));
+
+        let ed_semi = ui::theme::AccentPalette::for_preset(
+            ColorPalettePreset::EditorialSlate,
+            ThemeMode::SemiDark,
+        );
+        assert_eq!(ed_semi.bg_canvas, ui::theme::Color32::from_rgb(0x2c, 0x30, 0x38));
 
         let ed_dark = ui::theme::AccentPalette::for_preset(
             ColorPalettePreset::EditorialSlate,
             ThemeMode::Dark,
         );
-        assert_eq!(ed_dark.bg_canvas, egui::Color32::from_rgb(0x19, 0x1c, 0x22));
+        assert_eq!(ed_dark.bg_canvas, ui::theme::Color32::from_rgb(0x19, 0x1c, 0x22));
 
         let nordic_sepia = ui::theme::AccentPalette::for_preset(
             ColorPalettePreset::NordicForest,
             ThemeMode::Sepia,
         );
-        assert_eq!(nordic_sepia.bg_canvas, egui::Color32::from_rgb(0xf3, 0xea, 0xd3));
+        assert_eq!(nordic_sepia.bg_canvas, ui::theme::Color32::from_rgb(0xf3, 0xea, 0xd3));
+
+        let nordic_semi = ui::theme::AccentPalette::for_preset(
+            ColorPalettePreset::NordicForest,
+            ThemeMode::SemiDark,
+        );
+        assert_eq!(nordic_semi.bg_canvas, ui::theme::Color32::from_rgb(0x2e, 0x34, 0x40));
+
+        let velvet_semi = ui::theme::AccentPalette::for_preset(
+            ColorPalettePreset::VelvetDawn,
+            ThemeMode::SemiDark,
+        );
+        assert_eq!(velvet_semi.bg_canvas, ui::theme::Color32::from_rgb(0x2f, 0x2c, 0x3c));
 
         let velvet_dark = ui::theme::AccentPalette::for_preset(
             ColorPalettePreset::VelvetDawn,
             ThemeMode::Dark,
         );
-        assert_eq!(velvet_dark.bg_canvas, egui::Color32::from_rgb(0x1f, 0x1d, 0x29));
+        assert_eq!(velvet_dark.bg_canvas, ui::theme::Color32::from_rgb(0x1f, 0x1d, 0x29));
+
+        let classic_semi = ui::theme::AccentPalette::for_preset(
+            ColorPalettePreset::Classic,
+            ThemeMode::SemiDark,
+        );
+        assert_eq!(classic_semi.bg_canvas, ui::theme::Color32::from_rgb(0x2e, 0x31, 0x36));
+    }
+
+    #[test]
+    fn test_build_session_snapshot_completeness() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "accent_ui_snap_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        let mut session = Session::with_recovery_dir(test_dir.clone());
+        session.apply(Action::SetPalettePreset(ColorPalettePreset::EditorialSlate));
+        session.apply(Action::SetTheme(ThemeMode::SemiDark));
+        let snap = build_session_snapshot(&session);
+        assert_eq!(snap.theme, ThemeMode::SemiDark);
+        assert!(!snap.tabs.is_empty());
+        assert!(!snap.outline_headings.is_empty());
+        assert_eq!(snap.palette_css.bg_canvas, "#2c3038");
+        assert_eq!(snap.i18n.get("open").map(String::as_str), Some("Apri"));
+
+        // Verify Mermaid SVG injection in preview HTML
+        let raw_html = accent_export::render_markdown_to_html(
+            "# Titolo\n\n```mermaid\nflowchart LR\n  A[Start] --> B[End]\n```\n",
+        );
+        let with_svg = inject_rust_mermaid_svgs(&raw_html, &session);
+        assert!(with_svg.contains("class=\"accent-mermaid-block\""));
+        assert!(with_svg.contains("<svg"));
+        assert!(with_svg.contains("#2B2E33"));
+
+        let _ = std::fs::remove_dir_all(&test_dir);
     }
 
     #[test]
@@ -435,7 +612,7 @@ mod tests {
 
     #[test]
     fn test_version_system_consistency() {
-        assert_eq!(VERSION, "0.8.14");
+        assert_eq!(VERSION, "0.8.20");
         assert_eq!(accent_core::VERSION, VERSION);
         let version_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../VERSION");
         let file_ver = std::fs::read_to_string(version_file)

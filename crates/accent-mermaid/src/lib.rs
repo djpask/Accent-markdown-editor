@@ -5,12 +5,13 @@ use std::sync::{Arc, OnceLock};
 
 const MAX_MERMAID_CACHE_ENTRIES: usize = 8;
 
-/// Visual theme for Mermaid diagram rendering, matching Accent's 3 themes.
+/// Visual theme for Mermaid diagram rendering, matching Accent's 4 themes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum MermaidTheme {
     Light,
     #[default]
     Sepia,
+    SemiDark,
     Dark,
 }
 
@@ -48,6 +49,16 @@ impl MermaidTheme {
                 edge_stroke: "#6B4F24",
                 label_bg: "#EFE4D2",
                 text_fg: "#4F3915",
+            },
+            MermaidTheme::SemiDark => DiagramColors {
+                bg: "#2B2E33",
+                node_fill: "#363A40",
+                node_stroke: "#9CA7B5",
+                diamond_fill: "#433930",
+                diamond_stroke: "#E69545",
+                edge_stroke: "#A8B3C2",
+                label_bg: "#32363C",
+                text_fg: "#E4E6EB",
             },
             MermaidTheme::Dark => DiagramColors {
                 bg: "#232327",
@@ -983,5 +994,10 @@ mod tests {
         assert!(rendered.svg.contains("Utente"));
         assert!(rendered.svg.contains("Live Preview + WAL"));
         assert!(rendered.png_bytes.len() > 1000);
+
+        let semi_rendered = cache.get_or_render_themed(seq, MermaidTheme::SemiDark);
+        assert_eq!(semi_rendered.theme, MermaidTheme::SemiDark);
+        assert!(semi_rendered.svg.contains("#2B2E33"));
+        assert!(semi_rendered.png_bytes.len() > 1000);
     }
 }

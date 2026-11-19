@@ -1,114 +1,70 @@
 # Accent — Agent Operations, Technical Architecture & Constraints (`AGENTS.md`)
 
-**Accent** is a multiplatform Markdown editor and viewer written in **100% pure Rust** using **`eframe` / `egui`**.
-This document defines the **technical architecture, operational rules, clean-room constraints, and non-functional requirements**. For functional features and the milestone tracker, you MUST read **`SPECS.md`**.
+**Accent** is a local-first, multiplatform Markdown editor and viewer combining a **pure-Rust backend (`L1`–`L4`)** with a **Tauri v2 + Svelte 5 + Vite + CodeMirror 6** desktop frontend (`L5`).
+This document defines the **technical architecture, operational rules, clean-room constraints, and verification standards**. For functional specifications and the reengineering roadmap, read **`SPECS.md`**.
 
 ---
 
 ## 0. Start Every Session Here (MANDATORY BOOTSTRAP)
 
-At the beginning of **every** coding session, before writing or modifying any Rust code, follow this exact checklist:
+At the beginning of **every** coding session, before writing or modifying code, follow this checklist:
 
-1. **Read Functional Specs & Roadmap:** Open and read **`SPECS.md`** to identify the active Milestone (`[ ]` or `[~]`) and functional requirements. Never jump ahead to later phases before the current phase compiles, passes `cargo test`, and passes live interactive GUI verification.
-2. **Inspect Reference Screenshots:** Check `img/Apostrophe_screenshots/`. If the directory is empty or missing reference views for the current task, attach to the running **Apostrophe** instance and capture them first (see Section 1.3).
-3. **Verify Baseline Health:** If the Cargo workspace already exists, run `cargo test --workspace` to ensure you are starting from a green state.
-4. **Work Incrementally & Test Interactively:** Implement one sub-feature at a time, launch Accent inside `Xvfb :99`, interact with it as a real human user via `xdotool` (mouse clicks, window dragging, keyboard typing), capture external screenshots via `maim` into `img/Accent_screenshots/` (Section 2), visually inspect them against `img/Apostrophe_screenshots/`, and update the checkboxes in **`SPECS.md`** as milestones are completed.
+1. **Read Functional Specs & Roadmap:** Open and read **`SPECS.md`** to identify the active phase (`[ ]` or `[~]`). Never jump ahead before the active phase compiles, passes tests, and passes interactive GUI verification.
+2. **Verify Workspace Baseline:** Run `cargo test --workspace` (and frontend type-check/build checks once the Tauri/Svelte frontend is initialized) to confirm a clean starting state.
+3. **Work Incrementally & Verify Visually:** Implement one cohesive sub-feature at a time, run live verification against the actual Tauri app window, capture external screenshots into `img/Accent_screenshots/`, visually inspect them, and update **`SPECS.md`** checkboxes as phases complete.
 
 ---
 
-## 1. Clean Room & Reference Observation Protocol (CRITICAL)
-
-Accent is a **clean-room implementation**. You (the AI Agent) must replicate the visual appearance, color palettes, spacing, and user-facing behaviors of **Apostrophe** strictly through empirical black-box observation:
+## 1. Clean-Room & Sovereignty Rules (CRITICAL)
 
 1. **Strict Source Code Ban:**
-   - **NEVER** read, inspect, search, or copy any source code, Python files, Blueprint/XML `.ui` templates, CSS stylesheets, or git repositories of *Apostrophe* (GPLv3), *Pandoc*, or any other GPL/LGPL/AGPL Markdown editor.
-   - Do not inspect `/usr/share/apostrophe`, Flatpak bundles (`org.gnome.gitlab.somas.Apostrophe`), or system Python packages.
-
-2. **Autonomous Visual Observation of Apostrophe (The Oracle):**
-   - A live instance of **Apostrophe** is running (or can be launched by you) on the host Linux environment.
-   - You will NOT be provided with pre-made screenshots by the user. **You must autonomously interact with the running Apostrophe instance, explore its views/menus/modes, capture screenshots, and save them into `img/Apostrophe_screenshots/`**.
-   - Ensure `img/Apostrophe_screenshots/` is listed in `.gitignore` (never commit reference screenshots captured from external software into the git history, though keep them in the workspace directory for visual comparison).
-
-3. **How to Interact with and Capture Apostrophe on Arch Linux (Headless Xvfb `:99` Sandbox):**
-   - **CRITICAL:** Never run `xdotool` against the user's live GNOME Wayland/XWayland session, as GNOME Mutter blocks synthetic XTEST input with a Remote Desktop portal popup.
-   - Instead, always run and control Apostrophe inside an isolated **Xvfb virtual display (`:99`)** with software rendering (`GSK_RENDERER=cairo`):
-     ```bash
-     # Start Xvfb :99 if not already running:
-     pgrep -f "Xvfb :99" || (Xvfb :99 -screen 0 1920x1200x24 -ac +extension GLX +render -noreset &)
-     # Launch Apostrophe on :99:
-     DISPLAY=:99 GDK_BACKEND=x11 GSK_RENDERER=cairo apostrophe <sample_file.md> &
-     ```
-   - **Find Window ID on `:99`:**
-     `WIN_ID=$(DISPLAY=:99 xdotool search --onlyvisible --class "apostrophe" | head -n 1)`
-   - **Switch Themes / Modes Deterministically:**
-     In addition to `DISPLAY=:99 xdotool` keystrokes (`F10`, `ctrl+comma`, `ctrl+shift+p`, `ctrl+d`) and mouse clicks, you can inspect and toggle Apostrophe's live state directly via **`gsettings`** (`gsettings list-recursively | grep -i apostrophe` or `dconf`) so the window updates immediately without fragile popover coordinates.
-   - **Capture Clean Window Screenshot on `:99`:**
-     `DISPLAY=:99 maim --window "$WIN_ID" --hidecursor "$PWD/img/Apostrophe_screenshots/<descriptive_name>.png"`
-   - **Inspect your captured PNGs:** Always view the saved PNGs in `img/Apostrophe_screenshots/` using your multimodal vision capabilities to extract exact hex color palettes, padding ratios, typography contrast, and UI behaviors before implementing them in Accent.
+   - **NEVER** read, inspect, search, or copy source code, `.ui`/`.blp` templates, CSS, or repositories of *Apostrophe* (GPLv3), *Pandoc*, or any GPL/LGPL/AGPL Markdown editor.
+2. **Local-First & Zero Telemetry:**
+   - All document parsing, persistence, WAL crash recovery, Mermaid rendering, exports, KaTeX math rendering, and settings stay 100% local and offline.
+   - Do not add external CDN links, analytics, telemetry, or cloud dependencies.
 
 ---
 
-## 2. Unified Live GUI Verification Protocol (`Xvfb :99` + `xdotool` + `maim`)
+## 2. Layered Architecture & Non-Functional Invariants (STRICT)
 
-Never guess whether your `egui` UI code looks right or responds to user input. Compilation (`cargo check`) only proves syntax and types—it does NOT prove visual correctness or real interactivity. **For all UI work, you must run Accent as a live desktop app inside `Xvfb :99`, drive it with `xdotool`, capture external screenshots with `maim`, and visually inspect the PNGs.**
+Lower layers must **NEVER** depend on higher layers:
 
-### 2.1 Strictly No CLI State-Shortcut or Screenshot Flags
-- **CRITICAL BAN:** Building or maintaining CLI state-shortcut or one-frame screenshot flags (such as `--shot`, `--overlay`, `--theme`, `--width`, `--dialect`, `--script`, or `--control`) inside `accent-ui` is **strictly prohibited**, as they encourage static visual mockups ("Potëmkin UI") disconnected from real mouse and keyboard events.
-- **Clean Production CLI Surface:** `accent-ui` must ONLY accept an optional file path argument (`accent-ui [path/to/file.md]`). All UI states (themes, line widths, popovers, Preferences modal, preview modes) must be reached exclusively through real user interaction or persisted user preferences.
+- **L1 — `accent-core` (Buffer, AST & Caret-Aware Spans):**
+  - `ropey::Rope` buffer, `comrak` AST parser (`CommonMark`, `GFM`, `GLFM`), byte/char/line conversions, document & selection statistics, and caret-aware live spans.
+  - **INVARIANT:** Zero GUI or Tauri dependencies. 100% unit-tested via `cargo test`.
 
-### 2.2 The Mandatory External Black-Box UI Workflow
-Whenever you implement or modify a UI feature in Accent:
-1. Look at the corresponding reference screenshot in `img/Apostrophe_screenshots/` (or capture a new one from the running Apostrophe instance if missing).
-2. Implement the feature in Rust (`accent-ui` / `accent-core`) with full mouse `.clicked()` and keyboard handlers.
-3. Launch Accent normally inside `Xvfb :99` (`DISPLAY=:99 cargo run -p accent-ui -- <sample.md> &`), interact with it using `DISPLAY=:99 xdotool` (clicking buttons, opening popovers, typing text), and capture the live window using `DISPLAY=:99 maim --window "$ACCENT_WIN" --hidecursor "$PWD/img/Accent_screenshots/<descriptive_name>.png"`.
-4. **View the captured PNGs in `img/Accent_screenshots/` and compare them side-by-side with `img/Apostrophe_screenshots/*.png`.**
-5. Iterate on the Rust code until Accent matches or exceeds the reference quality and responds to every mouse/keyboard action.
+- **L2 — `accent-storage` (Atomic I/O, WAL Recovery, Single-Instance & File Watcher):**
+  - `< 300ms` debounced write-ahead recovery journal, crash detection on startup, `write-temp -> fsync -> atomic rename` persistence, single-instance IPC, and OS-native focused-file change notifications.
 
----
+- **L3 — `accent-mermaid` & `accent-export` (Diagram Renderer & Exporters):**
+  - Pure-Rust Mermaid-to-SVG/raster renderer (`resvg` + LRU cache) supporting `Light`, `Sepia`, `SemiDark`, and `Dark`.
+  - Pure-Rust document exporters for **PDF**, **DOCX**, **ODT**, **LaTeX (`.tex`)**, **EPUB**, and **HTML** consuming the L1 AST.
 
-## 3. Layered Workspace Architecture & Non-Functional Constraints (STRICT)
+- **L4 — `accent-session` (Session State, Actions, Persistence & i18n):**
+  - Manages multi-tab state, per-tab undo/redo, `ThemeMode` (`Light`, `Sepia`, `SemiDark`, `Dark`), `ColorPalettePreset`, `LineWidthMode`, `TypographyConfig` + `fontdb` discovery, `Locale` (`en`, `it`, `es`), `settings.json` persistence, and `session.apply(Action)`.
+  - **INVARIANT:** Modes `Hemingway` and `FocusMode` (line dimming) are **removed** and must not be reintroduced.
 
-To prevent spaghetti code and `egui` borrow-checker conflicts, Accent is organized into strict architectural layers. **Lower layers must NEVER depend on higher layers.**
-
-- **L1 — `accent-core` (Document Model, AST, & Live-Span Engine):**
-  - Rope/piece-table text buffer (`ropey`), Markdown parser (`comrak`), AST-to-byte-offset mapping, and the Caret-Aware Live Preview span calculator.
-  - **INVARIANT:** Zero GUI dependencies (`no egui`, `no eframe`, `no winit`). 100% unit-tested via `cargo test`.
-
-- **L2 — `accent-storage` (Atomic I/O & Crash Recovery WAL):**
-  - **Zero Data Loss Constraint:** Handles the `< 300ms` debounced write-ahead recovery journal, crash detection on startup, and `write-temp -> fsync -> atomic rename` file persistence. Never overwrite user files non-atomically.
-
-- **L3 — `accent-export` & `accent-mermaid` (Renderers & Exporters):**
-  - **Zero External Runtime Dependencies:** Everything is compiled into the single Rust binary (no Pandoc, no WebView).
-  - **Pure Rust Mermaid-to-SVG/Pixmap renderer (`resvg`)** with content-hash caching.
-  - **Pure Rust exporters** for PDF (krilla/typst), DOCX (docx-rs), ODT (ODF 1.2 XML packaged via the zip crate with uncompressed mimetype header), LaTeX (.tex AST serializer with strict special-character escaping), and EPUB (epub-builder) consuming the L1 AST.
-
-- **L4 — `accent-session` (Commands, Config, & i18n):**
-  - Holds `Session` state, user preferences, undo/redo history, i18n localization (`en`, `it`, `es`), and the central `Action` / `Command` dispatcher (`session.apply(Action)`).
-
-- **L5 — `accent-ui` (Thin `eframe` / `egui` Shell):**
-  - Implements `eframe::App`.
-  - **Borrow-Checker Rule:** During `egui` panel rendering, treat `Session` as read-only where possible and push user interactions into a frame-local `Vec<Action>`. Drain and apply all actions at the end of `update()`.
-  - Centralizes all Apostrophe-inspired color palettes, custom headers, rounded popovers, and typography inside `ui/theme.rs`.
+- **L5 — `accent-ui` / Tauri v2 Shell + Svelte 5 + CodeMirror 6:**
+  - Tauri v2 commands expose `Session` actions/queries cleanly over IPC without duplicating business logic in JavaScript/TypeScript.
+  - **Svelte 5** renders the integrated CSD headerbar, always-visible multi-tab bar, optional Document Outline drawer, dual floating bottom islands, popovers, and dedicated modal dialogs (*Preferences*, *Themes & Palettes*, *Export*, *Shortcuts*, *About*).
+  - **CodeMirror 6** provides native OS text shaping/hinting (DirectWrite/ClearType on Windows, WebKitGTK/HarfBuzz on Linux), caret-aware *View-while-typing*, inline KaTeX math rendering, and Rust-rendered Mermaid SVG blocks.
 
 ---
 
-## 4. No "Potëmkin UI" Rule & Mandatory Human-Simulation Testing (CRITICAL)
+## 3. UI & Interaction Invariants (No "Potëmkin UI")
 
-Never build static, non-interactive visual mockups. The application MUST be 100% operable by a human using mouse and keyboard, with zero reliance on CLI flags to open menus or change views.
+1. **Real Editable Surface:** The editor must always be a live, interactive **CodeMirror 6** instance supporting real typing, selection, cursor navigation, clipboard, undo/redo, and scrolling.
+2. **Real CSD Window Controls:** With native decorations disabled (`decorations: false`), the top bar provides native drag (`data-tauri-drag-region`), double-click maximize toggle, edge/corner resize support, and working window buttons: **Minimize `─`**, **Maximize/Restore `□`**, and **Close `×`**.
+3. **Full Typing Auto-Hide:** As soon as the user types in the editor (even when the window is not fullscreen), **all chrome**—CSD bar (including `─ □ ×`), multi-tab bar, Outline panel, and both floating bottom bars—fades out cleanly (`opacity: 0; pointer-events: none`) until pointer movement or command/navigation/escape keys restore it.
+4. **No CLI State-Shortcut Flags:** Never add CLI flags that force overlays, themes, or modes for screenshots. The production binary accepts only an optional file path argument (`accent [path/to/file.md]`).
 
-### 4.1 Architectural Interactivity Requirements
-1. **Real Editable Text Widget:** The editor canvas must always be a genuinely interactive `egui::TextEdit` (with custom AST `layouter`) supporting mouse click cursor placement, text selection, keyboard typing, copy/paste, and scrolling—never static `ui.label()` rows.
-2. **Real CSD Window Controls:** Dragging the top headerbar background must trigger `ViewportCommand::StartDrag`, double-clicking must toggle maximize, window edges must support resizing (`ViewportCommand::BeginResize`), and the `-`, `□`, `×` buttons must dispatch real viewport commands.
-3. **Every Button Must Work on Click:** Every button, pill (`80ch`/`110ch`/`140ch`/`Fluid`), and counter in the headerbar, bottom toolbar, and modals must have a working `.clicked()` handler that toggles its popover, dialog, or formatting action interactively with the mouse.
+---
 
-### 4.2 Mandatory Live Human-Simulation Verification (`xdotool` + `maim` on Accent)
-Before marking any UI milestone as `[x]`, you MUST launch Accent as a normal interactive desktop app inside `Xvfb :99` (`DISPLAY=:99 cargo run -p accent-ui -- <sample.md> &`) and simulate a real human user interacting with it via `DISPLAY=:99 xdotool`:
-1. **Launch Live Accent on `:99`:**
-   `DISPLAY=:99 cargo run -p accent-ui &` and locate its X11 window via `ACCENT_WIN=$(DISPLAY=:99 xdotool search --onlyvisible --name ".*" | tail -n 1)`.
-2. **Simulate Human Window Dragging:**
-   Use `DISPLAY=:99 xdotool` to drag the headerbar and verify via `xdotool getwindowgeometry "$ACCENT_WIN"` (or `xwininfo -id "$ACCENT_WIN"`) that the window coordinates actually changed.
-3. **Simulate Human Mouse Clicks on Headerbar & Bottom Bar:**
-   Move the mouse cursor and perform real left-clicks (`xdotool mousemove --window "$ACCENT_WIN" <x> <y> click 1`) on the Line-Width pill, Preview button (book icon), Main Menu (`☰`), and bottom formatting buttons, capturing screenshots with `DISPLAY=:99 maim --window "$ACCENT_WIN" --hidecursor` into `img/Accent_screenshots/human_sim_*.png` to prove the popovers open from real mouse clicks.
-4. **Simulate Human Typing & Caret Movement in the Editor:**
-   Click inside the editor canvas (`xdotool mousemove --window "$ACCENT_WIN" 600 400 click 1`), type live Markdown (`xdotool type --delay 20 " **live human test**"`), move the caret with arrow keys (`xdotool key Left Left`), and capture `img/Accent_screenshots/human_sim_typing.png` to visually verify that typed characters appear in the buffer and Caret-Aware *View-while-typing* reacts to real keyboard navigation.
-5. Kill the background test instance cleanly once verified.
+## 4. Live GUI Verification Protocol (`Xvfb :99` + `xdotool` + `maim`)
+
+Before marking any UI milestone as `[x]`, run the built Tauri application inside the isolated **`Xvfb :99`** display (never driving the user's live GNOME desktop session directly with `xdotool`):
+
+1. Ensure `Xvfb :99` is active (`1920x1200x24`), launch Accent inside `:99`, and locate the window ID via `xdotool`.
+2. Verify real mouse clicks on CSD controls (`─`, `□`, `×`), tab switching/creation, menu `☰` + the 4 theme circles + opening the **Temi e palette** modal + opening **Preferenze**, formatting pills, and statistics popover.
+3. Click inside CodeMirror 6, type live Markdown, verify full UI auto-hide while typing and smooth restoration on pointer/key input, and save external screenshots to `img/Accent_screenshots/*.png` for visual inspection.
+4. Terminate temporary test processes cleanly once verification completes.

@@ -4,23 +4,25 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[build-dependencies]
+tauri-build.workspace = true
+
 [dependencies]
 accent-core = { path = "../accent-core" }
 accent-storage = { path = "../accent-storage" }
 accent-mermaid = { path = "../accent-mermaid" }
 accent-export = { path = "../accent-export" }
 accent-session = { path = "../accent-session" }
-eframe.workspace = true
-egui.workspace = true
 fontdb.workspace = true
 ttf-parser.workspace = true
 image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rfd.workspace = true
+tauri.workspace = true
+tauri-plugin-dialog.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-eframe = { workspace = true, features = ["x11", "wayland"] }
 rfd = { workspace = true, features = ["gtk3"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]

@@ -1,10 +1,65 @@
 use accent_session::{ColorPalettePreset, ThemeMode};
-use egui::{
-    epaint::StrokeKind, Color32, Context, FontData, FontDefinitions, FontFamily, FontId, Painter,
-    Pos2, Rect, CornerRadius, Stroke, Vec2, Visuals,
-};
-use std::fs;
-use std::sync::Arc;
+use serde::{Deserialize, Serialize};
+
+/// Pure-Rust RGBA8 color value used for theme palette definitions and CSS token generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Color32(pub u8, pub u8, pub u8, pub u8);
+
+impl Color32 {
+    pub const fn from_rgb(r: u8, g: u8, b: u8) -> Self {
+        Self(r, g, b, 255)
+    }
+
+    pub const fn r(self) -> u8 {
+        self.0
+    }
+
+    pub const fn g(self) -> u8 {
+        self.1
+    }
+
+    pub const fn b(self) -> u8 {
+        self.2
+    }
+
+    pub const fn a(self) -> u8 {
+        self.3
+    }
+
+    pub fn to_hex(self) -> String {
+        format!("#{:02x}{:02x}{:02x}", self.0, self.1, self.2)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaletteCssTokens {
+    pub bg_canvas: String,
+    pub bg_headerbar: String,
+    pub border_headerbar: String,
+    pub fg_primary: String,
+    pub fg_heading: String,
+    pub fg_subheading: String,
+    pub fg_muted: String,
+    pub bg_code_block: String,
+    pub bg_code_inline: String,
+    pub bg_pill_button: String,
+    pub bg_popover: String,
+    pub bg_preview: String,
+    pub divider_preview: String,
+    pub accent_orange: String,
+    pub accent_link: String,
+    pub markup_emphasis_fg: String,
+    pub markup_code_fg: String,
+    pub markup_codeblock_fg: String,
+    pub markup_list_marker: String,
+    pub markup_task_done: String,
+    pub markup_quote_bar: String,
+    pub markup_quote_fg: String,
+    pub markup_link_url: String,
+    pub bg_table_header: String,
+    pub spellcheck_red: String,
+    pub scrollbar_thumb: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AccentPalette {
@@ -15,7 +70,6 @@ pub struct AccentPalette {
     pub fg_heading: Color32,
     pub fg_subheading: Color32,
     pub fg_muted: Color32,
-    pub fg_focus_dimmed: Color32,
     pub bg_code_block: Color32,
     pub bg_code_inline: Color32,
     pub bg_pill_button: Color32,
@@ -42,6 +96,7 @@ impl AccentPalette {
         match mode {
             ThemeMode::Light => Self::light(),
             ThemeMode::Sepia => Self::sepia(),
+            ThemeMode::SemiDark => Self::semi_dark(),
             ThemeMode::Dark => Self::dark(),
         }
     }
@@ -50,17 +105,52 @@ impl AccentPalette {
         match (preset, mode) {
             (ColorPalettePreset::AmberCoral, ThemeMode::Light) => Self::amber_light(),
             (ColorPalettePreset::AmberCoral, ThemeMode::Sepia) => Self::amber_sepia(),
+            (ColorPalettePreset::AmberCoral, ThemeMode::SemiDark) => Self::amber_semi_dark(),
             (ColorPalettePreset::AmberCoral, ThemeMode::Dark) => Self::amber_dark(),
             (ColorPalettePreset::EditorialSlate, ThemeMode::Light) => Self::editorial_light(),
             (ColorPalettePreset::EditorialSlate, ThemeMode::Sepia) => Self::editorial_sepia(),
+            (ColorPalettePreset::EditorialSlate, ThemeMode::SemiDark) => Self::editorial_semi_dark(),
             (ColorPalettePreset::EditorialSlate, ThemeMode::Dark) => Self::editorial_dark(),
             (ColorPalettePreset::NordicForest, ThemeMode::Light) => Self::nordic_light(),
             (ColorPalettePreset::NordicForest, ThemeMode::Sepia) => Self::nordic_sepia(),
+            (ColorPalettePreset::NordicForest, ThemeMode::SemiDark) => Self::nordic_semi_dark(),
             (ColorPalettePreset::NordicForest, ThemeMode::Dark) => Self::nordic_dark(),
             (ColorPalettePreset::VelvetDawn, ThemeMode::Light) => Self::velvet_light(),
             (ColorPalettePreset::VelvetDawn, ThemeMode::Sepia) => Self::velvet_sepia(),
+            (ColorPalettePreset::VelvetDawn, ThemeMode::SemiDark) => Self::velvet_semi_dark(),
             (ColorPalettePreset::VelvetDawn, ThemeMode::Dark) => Self::velvet_dark(),
             (ColorPalettePreset::Classic, _) => Self::for_mode(mode),
+        }
+    }
+
+    pub fn to_css_tokens(&self) -> PaletteCssTokens {
+        PaletteCssTokens {
+            bg_canvas: self.bg_canvas.to_hex(),
+            bg_headerbar: self.bg_headerbar.to_hex(),
+            border_headerbar: self.border_headerbar.to_hex(),
+            fg_primary: self.fg_primary.to_hex(),
+            fg_heading: self.fg_heading.to_hex(),
+            fg_subheading: self.fg_subheading.to_hex(),
+            fg_muted: self.fg_muted.to_hex(),
+            bg_code_block: self.bg_code_block.to_hex(),
+            bg_code_inline: self.bg_code_inline.to_hex(),
+            bg_pill_button: self.bg_pill_button.to_hex(),
+            bg_popover: self.bg_popover.to_hex(),
+            bg_preview: self.bg_preview.to_hex(),
+            divider_preview: self.divider_preview.to_hex(),
+            accent_orange: self.accent_orange.to_hex(),
+            accent_link: self.accent_link.to_hex(),
+            markup_emphasis_fg: self.markup_emphasis_fg.to_hex(),
+            markup_code_fg: self.markup_code_fg.to_hex(),
+            markup_codeblock_fg: self.markup_codeblock_fg.to_hex(),
+            markup_list_marker: self.markup_list_marker.to_hex(),
+            markup_task_done: self.markup_task_done.to_hex(),
+            markup_quote_bar: self.markup_quote_bar.to_hex(),
+            markup_quote_fg: self.markup_quote_fg.to_hex(),
+            markup_link_url: self.markup_link_url.to_hex(),
+            bg_table_header: self.bg_table_header.to_hex(),
+            spellcheck_red: self.spellcheck_red.to_hex(),
+            scrollbar_thumb: self.scrollbar_thumb.to_hex(),
         }
     }
 
@@ -74,7 +164,6 @@ impl AccentPalette {
             fg_heading: Color32::from_rgb(0x1e, 0x29, 0x3b),        // #1e293b
             fg_subheading: Color32::from_rgb(0x2b, 0x6c, 0xb0),     // #2b6cb0
             fg_muted: Color32::from_rgb(0x86, 0x8a, 0x92),          // #868a92
-            fg_focus_dimmed: Color32::from_rgb(0x9b, 0x9f, 0xa8),   // #9b9fa8
             bg_code_block: Color32::from_rgb(0xef, 0xeb, 0xe4),     // #efebe4
             bg_code_inline: Color32::from_rgb(0xe9, 0xe3, 0xd9),    // #e9e3d9
             bg_pill_button: Color32::from_rgb(0xe6, 0xe0, 0xd6),    // #e6e0d6
@@ -83,9 +172,9 @@ impl AccentPalette {
             divider_preview: Color32::from_rgb(0xe0, 0xda, 0xd1),   // #e0dad1
             accent_orange: Color32::from_rgb(0xb4, 0x53, 0x09),     // #b45309
             accent_link: Color32::from_rgb(0x25, 0x63, 0xeb),       // #2563eb
-            markup_emphasis_fg: Color32::from_rgb(0xb4, 0x53, 0x09),// #b45309 (Warm Ochre/Gold)
-            markup_code_fg: Color32::from_rgb(0xc5, 0x30, 0x30),    // #c53030 (Coral Crimson)
-            markup_codeblock_fg: Color32::from_rgb(0x25, 0x63, 0xeb),// #2563eb (Cornflower Blue)
+            markup_emphasis_fg: Color32::from_rgb(0xb4, 0x53, 0x09),// #b45309
+            markup_code_fg: Color32::from_rgb(0xc5, 0x30, 0x30),    // #c53030
+            markup_codeblock_fg: Color32::from_rgb(0x25, 0x63, 0xeb),// #2563eb
             markup_list_marker: Color32::from_rgb(0xb4, 0x53, 0x09),// #b45309
             markup_task_done: Color32::from_rgb(0x2f, 0x85, 0x5a),  // #2f855a
             markup_quote_bar: Color32::from_rgb(0xb4, 0x53, 0x09),  // #b45309
@@ -107,7 +196,6 @@ impl AccentPalette {
             fg_heading: Color32::from_rgb(0x29, 0x21, 0x1a),        // #29211a
             fg_subheading: Color32::from_rgb(0x1d, 0x5b, 0x79),     // #1d5b79
             fg_muted: Color32::from_rgb(0x8a, 0x7f, 0x70),          // #8a7f70
-            fg_focus_dimmed: Color32::from_rgb(0x9e, 0x93, 0x84),   // #9e9384
             bg_code_block: Color32::from_rgb(0xe8, 0xe0, 0xcf),     // #e8e0cf
             bg_code_inline: Color32::from_rgb(0xe4, 0xdb, 0xc7),    // #e4dbc7
             bg_pill_button: Color32::from_rgb(0xe0, 0xd6, 0xc3),    // #e0d6c3
@@ -116,9 +204,9 @@ impl AccentPalette {
             divider_preview: Color32::from_rgb(0xda, 0xcf, 0xb8),   // #dacfb8
             accent_orange: Color32::from_rgb(0xa1, 0x48, 0x07),     // #a14807
             accent_link: Color32::from_rgb(0x1d, 0x5b, 0x79),       // #1d5b79
-            markup_emphasis_fg: Color32::from_rgb(0xa1, 0x48, 0x07),// #a14807 (Burnt Amber)
-            markup_code_fg: Color32::from_rgb(0xb8, 0x32, 0x32),    // #b83232 (Warm Coral Red)
-            markup_codeblock_fg: Color32::from_rgb(0x1d, 0x5b, 0x79),// #1d5b79 (Deep Petrol Blue)
+            markup_emphasis_fg: Color32::from_rgb(0xa1, 0x48, 0x07),// #a14807
+            markup_code_fg: Color32::from_rgb(0xb8, 0x32, 0x32),    // #b83232
+            markup_codeblock_fg: Color32::from_rgb(0x1d, 0x5b, 0x79),// #1d5b79
             markup_list_marker: Color32::from_rgb(0xa1, 0x48, 0x07),// #a14807
             markup_task_done: Color32::from_rgb(0x27, 0x67, 0x49),  // #276749
             markup_quote_bar: Color32::from_rgb(0xa1, 0x48, 0x07),  // #a14807
@@ -127,6 +215,38 @@ impl AccentPalette {
             bg_table_header: Color32::from_rgb(0xe2, 0xd9, 0xc5),   // #e2d9c5
             spellcheck_red: Color32::from_rgb(0xb8, 0x3b, 0x2a),    // #b83b2a
             scrollbar_thumb: Color32::from_rgb(0xc6, 0xbc, 0xae),   // #c6bcae
+        }
+    }
+
+    /// Amber & Coral (mdfried-inspired) — Semi-Dark (*Soft Anthracite & Warm Gold*)
+    pub const fn amber_semi_dark() -> Self {
+        Self {
+            bg_canvas: Color32::from_rgb(0x2e, 0x31, 0x35),         // #2e3135
+            bg_headerbar: Color32::from_rgb(0x27, 0x2a, 0x2e),      // #272a2e
+            border_headerbar: Color32::from_rgb(0x3f, 0x43, 0x49),  // #3f4349
+            fg_primary: Color32::from_rgb(0xd8, 0xdb, 0xdf),        // #d8dbdf
+            fg_heading: Color32::from_rgb(0xee, 0xf0, 0xf3),        // #eef0f3
+            fg_subheading: Color32::from_rgb(0x8e, 0xb0, 0xcc),     // #8eb0cc
+            fg_muted: Color32::from_rgb(0x8a, 0x91, 0x9b),          // #8a919b
+            bg_code_block: Color32::from_rgb(0x36, 0x3a, 0x40),     // #363a40
+            bg_code_inline: Color32::from_rgb(0x3c, 0x40, 0x47),    // #3c4047
+            bg_pill_button: Color32::from_rgb(0x3b, 0x3f, 0x45),    // #3b3f45
+            bg_popover: Color32::from_rgb(0x34, 0x38, 0x3e),        // #34383e
+            bg_preview: Color32::from_rgb(0x2a, 0x2d, 0x31),        // #2a2d31
+            divider_preview: Color32::from_rgb(0x3f, 0x43, 0x49),   // #3f4349
+            accent_orange: Color32::from_rgb(0xeb, 0xbc, 0x22),     // #ebbc22
+            accent_link: Color32::from_rgb(0x8e, 0xb0, 0xcc),       // #8eb0cc
+            markup_emphasis_fg: Color32::from_rgb(0xeb, 0xbc, 0x22),// #ebbc22
+            markup_code_fg: Color32::from_rgb(0xe6, 0x7a, 0x82),    // #e67a82
+            markup_codeblock_fg: Color32::from_rgb(0x8e, 0xb0, 0xcc),// #8eb0cc
+            markup_list_marker: Color32::from_rgb(0xeb, 0xbc, 0x22),// #ebbc22
+            markup_task_done: Color32::from_rgb(0x9e, 0xc9, 0x82),  // #9ec982
+            markup_quote_bar: Color32::from_rgb(0xeb, 0xbc, 0x22),  // #ebbc22
+            markup_quote_fg: Color32::from_rgb(0xbe, 0xc5, 0x76),   // #bec576
+            markup_link_url: Color32::from_rgb(0x73, 0x91, 0xa8),   // #7391a8
+            bg_table_header: Color32::from_rgb(0x39, 0x3d, 0x44),   // #393d44
+            spellcheck_red: Color32::from_rgb(0xe6, 0x7a, 0x82),    // #e67a82
+            scrollbar_thumb: Color32::from_rgb(0x55, 0x5b, 0x64),   // #555b64
         }
     }
 
@@ -140,7 +260,6 @@ impl AccentPalette {
             fg_heading: Color32::from_rgb(0xe6, 0xe8, 0xeb),        // #e6e8eb
             fg_subheading: Color32::from_rgb(0x81, 0xa2, 0xbe),     // #81a2be
             fg_muted: Color32::from_rgb(0x69, 0x70, 0x79),          // #697079
-            fg_focus_dimmed: Color32::from_rgb(0x56, 0x5c, 0x64),   // #565c64
             bg_code_block: Color32::from_rgb(0x25, 0x28, 0x2d),     // #25282d
             bg_code_inline: Color32::from_rgb(0x2c, 0x2f, 0x35),    // #2c2f35
             bg_pill_button: Color32::from_rgb(0x2a, 0x2d, 0x32),    // #2a2d32
@@ -149,11 +268,11 @@ impl AccentPalette {
             divider_preview: Color32::from_rgb(0x2e, 0x32, 0x37),   // #2e3237
             accent_orange: Color32::from_rgb(0xea, 0xb7, 0x00),     // #eab700
             accent_link: Color32::from_rgb(0x81, 0xa2, 0xbe),       // #81a2be
-            markup_emphasis_fg: Color32::from_rgb(0xea, 0xb7, 0x00),// #eab700 (mdfried Warm Gold)
-            markup_code_fg: Color32::from_rgb(0xe0, 0x6c, 0x75),    // #e06c75 (mdfried Coral Rose)
-            markup_codeblock_fg: Color32::from_rgb(0x81, 0xa2, 0xbe),// #81a2be (mdfried Periwinkle Blue)
-            markup_list_marker: Color32::from_rgb(0xea, 0xb7, 0x00),// #eab700 (Gold numbers & pipes)
-            markup_task_done: Color32::from_rgb(0x98, 0xc3, 0x79),  // #98c379 (Sage Green)
+            markup_emphasis_fg: Color32::from_rgb(0xea, 0xb7, 0x00),// #eab700
+            markup_code_fg: Color32::from_rgb(0xe0, 0x6c, 0x75),    // #e06c75
+            markup_codeblock_fg: Color32::from_rgb(0x81, 0xa2, 0xbe),// #81a2be
+            markup_list_marker: Color32::from_rgb(0xea, 0xb7, 0x00),// #eab700
+            markup_task_done: Color32::from_rgb(0x98, 0xc3, 0x79),  // #98c379
             markup_quote_bar: Color32::from_rgb(0xea, 0xb7, 0x00),  // #eab700
             markup_quote_fg: Color32::from_rgb(0xb5, 0xbd, 0x68),   // #b5bd68
             markup_link_url: Color32::from_rgb(0x5f, 0x7d, 0x95),   // #5f7d95
@@ -173,7 +292,6 @@ impl AccentPalette {
             fg_heading: Color32::from_rgb(0x1a, 0x36, 0x5d),        // #1a365d
             fg_subheading: Color32::from_rgb(0x2c, 0x52, 0x82),     // #2c5282
             fg_muted: Color32::from_rgb(0x82, 0x8a, 0x95),          // #828a95
-            fg_focus_dimmed: Color32::from_rgb(0x9a, 0xa0, 0xa6),   // #9aa0a6
             bg_code_block: Color32::from_rgb(0xef, 0xec, 0xe6),     // #efece6
             bg_code_inline: Color32::from_rgb(0xea, 0xe6, 0xdf),    // #eae6df
             bg_pill_button: Color32::from_rgb(0xe8, 0xe5, 0xde),    // #e8e5de
@@ -206,7 +324,6 @@ impl AccentPalette {
             fg_heading: Color32::from_rgb(0x23, 0x4e, 0x52),        // #234e52
             fg_subheading: Color32::from_rgb(0x6b, 0x42, 0x26),     // #6b4226
             fg_muted: Color32::from_rgb(0x8a, 0x7f, 0x70),          // #8a7f70
-            fg_focus_dimmed: Color32::from_rgb(0x9e, 0x93, 0x84),   // #9e9384
             bg_code_block: Color32::from_rgb(0xe8, 0xe0, 0xd0),     // #e8e0d0
             bg_code_inline: Color32::from_rgb(0xe3, 0xda, 0xc8),    // #e3dac8
             bg_pill_button: Color32::from_rgb(0xe2, 0xd9, 0xc8),    // #e2d9c8
@@ -229,6 +346,38 @@ impl AccentPalette {
         }
     }
 
+    /// Editorial Paper & Slate — Semi-Dark (*Anthracite Slate*)
+    pub const fn editorial_semi_dark() -> Self {
+        Self {
+            bg_canvas: Color32::from_rgb(0x2c, 0x30, 0x38),         // #2c3038
+            bg_headerbar: Color32::from_rgb(0x25, 0x29, 0x31),      // #252931
+            border_headerbar: Color32::from_rgb(0x3c, 0x42, 0x4e),  // #3c424e
+            fg_primary: Color32::from_rgb(0xe1, 0xe5, 0xec),        // #e1e5ec
+            fg_heading: Color32::from_rgb(0xa3, 0xcf, 0xfe),        // #a3cffe
+            fg_subheading: Color32::from_rgb(0x7e, 0xec, 0xfa),     // #7eecfa
+            fg_muted: Color32::from_rgb(0x8e, 0x97, 0xa6),          // #8e97a6
+            bg_code_block: Color32::from_rgb(0x35, 0x3a, 0x44),     // #353a44
+            bg_code_inline: Color32::from_rgb(0x3b, 0x41, 0x4c),    // #3b414c
+            bg_pill_button: Color32::from_rgb(0x3a, 0x40, 0x4b),    // #3a404b
+            bg_popover: Color32::from_rgb(0x33, 0x38, 0x42),        // #333842
+            bg_preview: Color32::from_rgb(0x28, 0x2c, 0x34),        // #282c34
+            divider_preview: Color32::from_rgb(0x3c, 0x42, 0x4e),   // #3c424e
+            accent_orange: Color32::from_rgb(0x4b, 0x8d, 0xf8),     // #4b8df8
+            accent_link: Color32::from_rgb(0x6e, 0xb0, 0xfb),       // #6eb0fb
+            markup_emphasis_fg: Color32::from_rgb(0xec, 0xbe, 0x24),// #ecbe24
+            markup_code_fg: Color32::from_rgb(0xf2, 0x7d, 0x84),    // #f27d84
+            markup_codeblock_fg: Color32::from_rgb(0x6e, 0xb0, 0xfb),// #6eb0fb
+            markup_list_marker: Color32::from_rgb(0x6e, 0xb0, 0xfb),// #6eb0fb
+            markup_task_done: Color32::from_rgb(0x54, 0xc4, 0x84),  // #54c484
+            markup_quote_bar: Color32::from_rgb(0x5c, 0x85, 0xc4),  // #5c85c4
+            markup_quote_fg: Color32::from_rgb(0xb2, 0xbf, 0xd0),   // #b2bfd0
+            markup_link_url: Color32::from_rgb(0x62, 0x8e, 0xd4),   // #628ed4
+            bg_table_header: Color32::from_rgb(0x35, 0x3e, 0x4d),   // #353e4d
+            spellcheck_red: Color32::from_rgb(0xe8, 0x62, 0x5a),    // #e8625a
+            scrollbar_thumb: Color32::from_rgb(0x55, 0x5d, 0x6c),   // #555d6c
+        }
+    }
+
     /// Editorial Paper & Slate — Dark (*Midnight Slate*): anti-halation silk text on deep slate
     pub const fn editorial_dark() -> Self {
         Self {
@@ -239,7 +388,6 @@ impl AccentPalette {
             fg_heading: Color32::from_rgb(0x93, 0xc5, 0xfd),        // #93c5fd
             fg_subheading: Color32::from_rgb(0x67, 0xe8, 0xf9),     // #67e8f9
             fg_muted: Color32::from_rgb(0x75, 0x7e, 0x8c),          // #757e8c
-            fg_focus_dimmed: Color32::from_rgb(0x5e, 0x66, 0x73),   // #5e6673
             bg_code_block: Color32::from_rgb(0x22, 0x26, 0x30),     // #222630
             bg_code_inline: Color32::from_rgb(0x28, 0x2d, 0x38),    // #282d38
             bg_pill_button: Color32::from_rgb(0x28, 0x2d, 0x37),    // #282d37
@@ -272,7 +420,6 @@ impl AccentPalette {
             fg_heading: Color32::from_rgb(0x2b, 0x4c, 0x7e),        // #2b4c7e
             fg_subheading: Color32::from_rgb(0x3b, 0x69, 0x78),     // #3b6978
             fg_muted: Color32::from_rgb(0x7b, 0x88, 0xa1),          // #7b88a1
-            fg_focus_dimmed: Color32::from_rgb(0x90, 0x9c, 0xb3),   // #909cb3
             bg_code_block: Color32::from_rgb(0xe7, 0xed, 0xf4),     // #e7edf4
             bg_code_inline: Color32::from_rgb(0xe1, 0xe8, 0xf1),    // #e1e8f1
             bg_pill_button: Color32::from_rgb(0xe1, 0xe8, 0xf0),    // #e1e8f0
@@ -305,7 +452,6 @@ impl AccentPalette {
             fg_heading: Color32::from_rgb(0x2d, 0x5a, 0x4c),        // #2d5a4c
             fg_subheading: Color32::from_rgb(0x3a, 0x7d, 0x6c),     // #3a7d6c
             fg_muted: Color32::from_rgb(0x85, 0x92, 0x89),          // #859289
-            fg_focus_dimmed: Color32::from_rgb(0x9d, 0xa9, 0xa0),   // #9da9a0
             bg_code_block: Color32::from_rgb(0xe6, 0xde, 0xc8),     // #e6dec8
             bg_code_inline: Color32::from_rgb(0xe1, 0xd8, 0xc0),    // #e1d8c0
             bg_pill_button: Color32::from_rgb(0xe0, 0xd7, 0xc0),    // #e0d7c0
@@ -328,6 +474,38 @@ impl AccentPalette {
         }
     }
 
+    /// Nordic Zen & Forest — Semi-Dark (*Polar Anthracite*)
+    pub const fn nordic_semi_dark() -> Self {
+        Self {
+            bg_canvas: Color32::from_rgb(0x2e, 0x34, 0x40),         // #2e3440
+            bg_headerbar: Color32::from_rgb(0x27, 0x2c, 0x36),      // #272c36
+            border_headerbar: Color32::from_rgb(0x3b, 0x42, 0x52),  // #3b4252
+            fg_primary: Color32::from_rgb(0xe5, 0xe9, 0xf0),        // #e5e9f0
+            fg_heading: Color32::from_rgb(0x8f, 0xbc, 0xbb),        // #8fbcbb
+            fg_subheading: Color32::from_rgb(0x88, 0xc0, 0xd0),     // #88c0d0
+            fg_muted: Color32::from_rgb(0x90, 0x9c, 0xb3),          // #909cb3
+            bg_code_block: Color32::from_rgb(0x37, 0x3e, 0x4c),     // #373e4c
+            bg_code_inline: Color32::from_rgb(0x3b, 0x42, 0x52),    // #3b4252
+            bg_pill_button: Color32::from_rgb(0x3f, 0x47, 0x58),    // #3f4758
+            bg_popover: Color32::from_rgb(0x35, 0x3c, 0x4a),        // #353c4a
+            bg_preview: Color32::from_rgb(0x2a, 0x30, 0x3b),        // #2a303b
+            divider_preview: Color32::from_rgb(0x3b, 0x42, 0x52),   // #3b4252
+            accent_orange: Color32::from_rgb(0x68, 0x8b, 0xb5),     // #688bb5
+            accent_link: Color32::from_rgb(0x88, 0xc0, 0xd0),       // #88c0d0
+            markup_emphasis_fg: Color32::from_rgb(0xeb, 0xcb, 0x8b),// #ebcb8b
+            markup_code_fg: Color32::from_rgb(0xe4, 0x7a, 0x82),    // #e47a82
+            markup_codeblock_fg: Color32::from_rgb(0x88, 0xc0, 0xd0),// #88c0d0
+            markup_list_marker: Color32::from_rgb(0xeb, 0xcb, 0x8b),// #ebcb8b
+            markup_task_done: Color32::from_rgb(0xa3, 0xbe, 0x8c),  // #a3be8c
+            markup_quote_bar: Color32::from_rgb(0x68, 0x8b, 0xb5),  // #688bb5
+            markup_quote_fg: Color32::from_rgb(0xb8, 0xc2, 0xd1),   // #b8c2d1
+            markup_link_url: Color32::from_rgb(0x6e, 0x99, 0xae),   // #6e99ae
+            bg_table_header: Color32::from_rgb(0x39, 0x42, 0x53),   // #394253
+            spellcheck_red: Color32::from_rgb(0xbf, 0x61, 0x6a),    // #bf616a
+            scrollbar_thumb: Color32::from_rgb(0x59, 0x64, 0x7a),   // #59647a
+        }
+    }
+
     /// Nordic Zen & Forest — Dark (*Nordic Night*)
     pub const fn nordic_dark() -> Self {
         Self {
@@ -338,7 +516,6 @@ impl AccentPalette {
             fg_heading: Color32::from_rgb(0x88, 0xc0, 0xd0),        // #88c0d0
             fg_subheading: Color32::from_rgb(0x81, 0xa1, 0xc1),     // #81a1c1
             fg_muted: Color32::from_rgb(0x7b, 0x88, 0xa1),          // #7b88a1
-            fg_focus_dimmed: Color32::from_rgb(0x61, 0x6e, 0x88),   // #616e88
             bg_code_block: Color32::from_rgb(0x29, 0x2e, 0x3b),     // #292e3b
             bg_code_inline: Color32::from_rgb(0x2e, 0x34, 0x42),    // #2e3442
             bg_pill_button: Color32::from_rgb(0x32, 0x38, 0x46),    // #323846
@@ -371,7 +548,6 @@ impl AccentPalette {
             fg_heading: Color32::from_rgb(0x28, 0x69, 0x83),        // #286983
             fg_subheading: Color32::from_rgb(0x6e, 0x56, 0x90),     // #6e5690
             fg_muted: Color32::from_rgb(0x79, 0x75, 0x93),          // #797593
-            fg_focus_dimmed: Color32::from_rgb(0x98, 0x93, 0xa5),   // #9893a5
             bg_code_block: Color32::from_rgb(0xef, 0xe6, 0xdd),     // #efe6dd
             bg_code_inline: Color32::from_rgb(0xec, 0xe1, 0xd7),    // #ece1d7
             bg_pill_button: Color32::from_rgb(0xea, 0xe0, 0xd6),    // #eae0d6
@@ -404,7 +580,6 @@ impl AccentPalette {
             fg_heading: Color32::from_rgb(0x7a, 0x3e, 0x32),        // #7a3e32
             fg_subheading: Color32::from_rgb(0x28, 0x69, 0x83),     // #286983
             fg_muted: Color32::from_rgb(0x87, 0x7b, 0x70),          // #877b70
-            fg_focus_dimmed: Color32::from_rgb(0x9c, 0x90, 0x85),   // #9c9085
             bg_code_block: Color32::from_rgb(0xe8, 0xdc, 0xc8),     // #e8dcc8
             bg_code_inline: Color32::from_rgb(0xe5, 0xd8, 0xc3),    // #e5d8c3
             bg_pill_button: Color32::from_rgb(0xe2, 0xd5, 0xc0),    // #e2d5c0
@@ -427,6 +602,38 @@ impl AccentPalette {
         }
     }
 
+    /// Rosé Pine & Solarized Modern — Semi-Dark (*Moon Anthracite*)
+    pub const fn velvet_semi_dark() -> Self {
+        Self {
+            bg_canvas: Color32::from_rgb(0x2f, 0x2c, 0x3c),         // #2f2c3c
+            bg_headerbar: Color32::from_rgb(0x28, 0x25, 0x34),      // #282534
+            border_headerbar: Color32::from_rgb(0x3f, 0x3b, 0x50),  // #3f3b50
+            fg_primary: Color32::from_rgb(0xe6, 0xe4, 0xf6),        // #e6e4f6
+            fg_heading: Color32::from_rgb(0xcd, 0xb4, 0xec),        // #cdb4ec
+            fg_subheading: Color32::from_rgb(0xa6, 0xd5, 0xdd),     // #a6d5dd
+            fg_muted: Color32::from_rgb(0x96, 0x92, 0xb0),          // #9692b0
+            bg_code_block: Color32::from_rgb(0x37, 0x34, 0x47),     // #373447
+            bg_code_inline: Color32::from_rgb(0x3d, 0x39, 0x4e),    // #3d394e
+            bg_pill_button: Color32::from_rgb(0x41, 0x3d, 0x54),    // #413d54
+            bg_popover: Color32::from_rgb(0x36, 0x32, 0x46),        // #363246
+            bg_preview: Color32::from_rgb(0x2b, 0x28, 0x37),        // #2b2837
+            divider_preview: Color32::from_rgb(0x3f, 0x3b, 0x50),   // #3f3b50
+            accent_orange: Color32::from_rgb(0x4b, 0x9c, 0xbd),     // #4b9cbd
+            accent_link: Color32::from_rgb(0xa6, 0xd5, 0xdd),       // #a6d5dd
+            markup_emphasis_fg: Color32::from_rgb(0xf6, 0xc1, 0x77),// #f6c177
+            markup_code_fg: Color32::from_rgb(0xee, 0x7c, 0x9c),    // #ee7c9c
+            markup_codeblock_fg: Color32::from_rgb(0xa6, 0xd5, 0xdd),// #a6d5dd
+            markup_list_marker: Color32::from_rgb(0xf6, 0xc1, 0x77),// #f6c177
+            markup_task_done: Color32::from_rgb(0x4b, 0x9c, 0xbd),  // #4b9cbd
+            markup_quote_bar: Color32::from_rgb(0x9c, 0x86, 0xb5),  // #9c86b5
+            markup_quote_fg: Color32::from_rgb(0xc2, 0xbe, 0xd8),   // #c2bed8
+            markup_link_url: Color32::from_rgb(0x7c, 0xad, 0xb8),   // #7cadb8
+            bg_table_header: Color32::from_rgb(0x3c, 0x38, 0x50),   // #3c3850
+            spellcheck_red: Color32::from_rgb(0xeb, 0x6f, 0x92),    // #eb6f92
+            scrollbar_thumb: Color32::from_rgb(0x5e, 0x5a, 0x75),   // #5e5a75
+        }
+    }
+
     /// Rosé Pine & Solarized Modern — Dark (*Velvet Dusk*)
     pub const fn velvet_dark() -> Self {
         Self {
@@ -437,7 +644,6 @@ impl AccentPalette {
             fg_heading: Color32::from_rgb(0xc4, 0xa7, 0xe7),        // #c4a7e7
             fg_subheading: Color32::from_rgb(0x9c, 0xcf, 0xd8),     // #9ccfd8
             fg_muted: Color32::from_rgb(0x82, 0x7e, 0x9c),          // #827e9c
-            fg_focus_dimmed: Color32::from_rgb(0x6e, 0x6a, 0x86),   // #6e6a86
             bg_code_block: Color32::from_rgb(0x26, 0x23, 0x34),     // #262334
             bg_code_inline: Color32::from_rgb(0x2c, 0x28, 0x3b),    // #2c283b
             bg_pill_button: Color32::from_rgb(0x31, 0x2e, 0x42),    // #312e42
@@ -470,7 +676,6 @@ impl AccentPalette {
             fg_heading: Color32::from_rgb(0x1a, 0x4b, 0x84),        // #1a4b84
             fg_subheading: Color32::from_rgb(0x2b, 0x6c, 0xb0),     // #2b6cb0
             fg_muted: Color32::from_rgb(0x9a, 0x9a, 0x9a),          // #9a9a9a
-            fg_focus_dimmed: Color32::from_rgb(0x88, 0x8a, 0x85),   // #888a85
             bg_code_block: Color32::from_rgb(0xe0, 0xe0, 0xe0),     // #e0e0e0
             bg_code_inline: Color32::from_rgb(0xeb, 0xeb, 0xeb),    // #ebebeb
             bg_pill_button: Color32::from_rgb(0xf1, 0xf1, 0xf1),    // #f1f1f1
@@ -503,7 +708,6 @@ impl AccentPalette {
             fg_heading: Color32::from_rgb(0x7a, 0x33, 0x10),        // #7a3310
             fg_subheading: Color32::from_rgb(0x00, 0x66, 0x66),     // #006666
             fg_muted: Color32::from_rgb(0x9e, 0x90, 0x78),          // #9e9078
-            fg_focus_dimmed: Color32::from_rgb(0x80, 0x80, 0x80),   // #808080
             bg_code_block: Color32::from_rgb(0xdf, 0xd7, 0xc9),     // #dfd7c9
             bg_code_inline: Color32::from_rgb(0xe5, 0xdd, 0xd0),    // #e5ddd0
             bg_pill_button: Color32::from_rgb(0xec, 0xe5, 0xda),    // #ece5da
@@ -526,6 +730,38 @@ impl AccentPalette {
         }
     }
 
+    /// Classic — Semi-Dark (*Soft Anthracite*)
+    pub const fn semi_dark() -> Self {
+        Self {
+            bg_canvas: Color32::from_rgb(0x2e, 0x31, 0x36),         // #2e3136
+            bg_headerbar: Color32::from_rgb(0x28, 0x2b, 0x30),      // #282b30
+            border_headerbar: Color32::from_rgb(0x3c, 0x40, 0x47),  // #3c4047
+            fg_primary: Color32::from_rgb(0xe6, 0xe8, 0xeb),        // #e6e8eb
+            fg_heading: Color32::from_rgb(0x96, 0xc5, 0xf8),        // #96c5f8
+            fg_subheading: Color32::from_rgb(0xf5, 0xa6, 0x76),     // #f5a676
+            fg_muted: Color32::from_rgb(0x8a, 0x90, 0x99),          // #8a9099
+            bg_code_block: Color32::from_rgb(0x38, 0x3c, 0x42),     // #383c42
+            bg_code_inline: Color32::from_rgb(0x3d, 0x41, 0x48),    // #3d4148
+            bg_pill_button: Color32::from_rgb(0x3c, 0x40, 0x47),    // #3c4047
+            bg_popover: Color32::from_rgb(0x35, 0x39, 0x40),        // #353940
+            bg_preview: Color32::from_rgb(0x2a, 0x2d, 0x32),        // #2a2d32
+            divider_preview: Color32::from_rgb(0x3c, 0x40, 0x47),   // #3c4047
+            accent_orange: Color32::from_rgb(0xe0, 0x6c, 0x35),     // #e06c35
+            accent_link: Color32::from_rgb(0x82, 0xb4, 0xf0),       // #82b4f0
+            markup_emphasis_fg: Color32::from_rgb(0xec, 0xbe, 0x24),// #ecbe24
+            markup_code_fg: Color32::from_rgb(0xe6, 0x78, 0x80),    // #e67880
+            markup_codeblock_fg: Color32::from_rgb(0x82, 0xb4, 0xf0),// #82b4f0
+            markup_list_marker: Color32::from_rgb(0xec, 0xbe, 0x24),// #ecbe24
+            markup_task_done: Color32::from_rgb(0x62, 0xe0, 0x92),  // #62e092
+            markup_quote_bar: Color32::from_rgb(0xe0, 0x6c, 0x35),  // #e06c35
+            markup_quote_fg: Color32::from_rgb(0xc0, 0xc4, 0xcc),   // #c0c4cc
+            markup_link_url: Color32::from_rgb(0x68, 0x91, 0xc2),   // #6891c2
+            bg_table_header: Color32::from_rgb(0x39, 0x3d, 0x45),   // #393d45
+            spellcheck_red: Color32::from_rgb(0xc4, 0x45, 0x4b),    // #c4454b
+            scrollbar_thumb: Color32::from_rgb(0x5c, 0x61, 0x6a),   // #5c616a
+        }
+    }
+
     /// Classic — Dark
     pub const fn dark() -> Self {
         Self {
@@ -536,7 +772,6 @@ impl AccentPalette {
             fg_heading: Color32::from_rgb(0x8c, 0xc0, 0xf8),        // #8cc0f8
             fg_subheading: Color32::from_rgb(0xf5, 0x9e, 0x6c),     // #f59e6c
             fg_muted: Color32::from_rgb(0x6e, 0x6e, 0x74),          // #6e6e74
-            fg_focus_dimmed: Color32::from_rgb(0x80, 0x80, 0x80),   // #808080
             bg_code_block: Color32::from_rgb(0x3c, 0x3c, 0x42),     // #3c3c42
             bg_code_inline: Color32::from_rgb(0x3a, 0x3a, 0x40),    // #3a3a40
             bg_pill_button: Color32::from_rgb(0x3a, 0x3a, 0x3d),    // #3a3a3d
@@ -560,1248 +795,6 @@ impl AccentPalette {
     }
 }
 
-static FAM_EDITOR_REG: std::sync::LazyLock<FontFamily> =
-    std::sync::LazyLock::new(|| FontFamily::Name("EditorRegular".into()));
-static FAM_EDITOR_BOLD: std::sync::LazyLock<FontFamily> =
-    std::sync::LazyLock::new(|| FontFamily::Name("EditorBold".into()));
-static FAM_EDITOR_ITALIC: std::sync::LazyLock<FontFamily> =
-    std::sync::LazyLock::new(|| FontFamily::Name("EditorItalic".into()));
-static FAM_EDITOR_BOLD_ITALIC: std::sync::LazyLock<FontFamily> =
-    std::sync::LazyLock::new(|| FontFamily::Name("EditorBoldItalic".into()));
-static FAM_UI_BOLD: std::sync::LazyLock<FontFamily> =
-    std::sync::LazyLock::new(|| FontFamily::Name("UiBold".into()));
-static FAM_PROSE_SERIF: std::sync::LazyLock<FontFamily> =
-    std::sync::LazyLock::new(|| FontFamily::Name("ProseSerif".into()));
-static FAM_PROSE_SERIF_BOLD: std::sync::LazyLock<FontFamily> =
-    std::sync::LazyLock::new(|| FontFamily::Name("ProseSerifBold".into()));
-static FAM_EMOJI_SLOT: std::sync::LazyLock<FontFamily> =
-    std::sync::LazyLock::new(|| FontFamily::Name("EmojiSlot".into()));
-
-#[inline]
-fn contains_ascii_icase(haystack: &str, needle_lower: &str) -> bool {
-    let hb = haystack.as_bytes();
-    let nb = needle_lower.as_bytes();
-    if nb.is_empty() {
-        return true;
-    }
-    if hb.len() < nb.len() {
-        return false;
-    }
-    hb.windows(nb.len())
-        .any(|w| w.iter().zip(nb.iter()).all(|(a, b)| a.to_ascii_lowercase() == *b))
-}
-
-pub fn font_editor_regular(size: f32) -> FontId {
-    FontId::new(size, FAM_EDITOR_REG.clone())
-}
-
-pub fn font_editor_bold(size: f32) -> FontId {
-    FontId::new(size, FAM_EDITOR_BOLD.clone())
-}
-
-pub fn font_editor_italic(size: f32) -> FontId {
-    FontId::new(size, FAM_EDITOR_ITALIC.clone())
-}
-
-pub fn font_editor_bold_italic(size: f32) -> FontId {
-    FontId::new(size, FAM_EDITOR_BOLD_ITALIC.clone())
-}
-
-pub fn font_ui_regular(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Proportional)
-}
-
-pub fn font_ui_bold(size: f32) -> FontId {
-    FontId::new(size, FAM_UI_BOLD.clone())
-}
-
-pub fn resolve_prose_font(family: &str, size: f32, bold: bool, italic: bool) -> FontId {
-    if contains_ascii_icase(family, "serif")
-        || contains_ascii_icase(family, "literata")
-        || contains_ascii_icase(family, "charter")
-        || contains_ascii_icase(family, "roman")
-        || contains_ascii_icase(family, "georgia")
-    {
-        if bold {
-            return FontId::new(size, FAM_PROSE_SERIF_BOLD.clone());
-        }
-        return FontId::new(size, FAM_PROSE_SERIF.clone());
-    }
-    if contains_ascii_icase(family, "sans")
-        || contains_ascii_icase(family, "inter")
-        || contains_ascii_icase(family, "cantarell")
-        || contains_ascii_icase(family, "segoe")
-    {
-        if bold {
-            return font_ui_bold(size);
-        }
-        return font_ui_regular(size);
-    }
-    match (bold, italic) {
-        (true, true) => font_editor_bold_italic(size),
-        (true, false) => font_editor_bold(size),
-        (false, true) => font_editor_italic(size),
-        (false, false) => font_editor_regular(size),
-    }
-}
-
-pub fn resolve_code_font(_family: &str, size: f32, bold: bool, italic: bool) -> FontId {
-    match (bold, italic) {
-        (true, true) => font_editor_bold_italic(size),
-        (true, false) => font_editor_bold(size),
-        (false, true) => font_editor_italic(size),
-        (false, false) => font_editor_regular(size),
-    }
-}
-
-fn try_load_font(defs: &mut FontDefinitions, key: &str, paths: &[&str]) -> bool {
-    for p in paths {
-        if let Ok(bytes) = fs::read(p) {
-            defs.font_data
-                .insert(key.to_string(), Arc::new(FontData::from_owned(bytes)));
-            return true;
-        }
-    }
-    false
-}
-
-pub fn configure_fonts(ctx: &Context) {
-    let mut defs = FontDefinitions::default();
-
-    let has_mono_reg = try_load_font(
-        &mut defs,
-        "editor_reg",
-        &[
-            "/usr/share/fonts/gsfonts/NimbusMonoPS-Regular.otf",
-            "/usr/share/fonts/gnu-free/FreeMono.otf",
-            "/usr/share/fonts/Adwaita/AdwaitaMono-Regular.ttf",
-            "C:\\Windows\\Fonts\\consola.ttf",
-        ],
-    );
-    let has_mono_bold = try_load_font(
-        &mut defs,
-        "editor_bold",
-        &[
-            "/usr/share/fonts/gsfonts/NimbusMonoPS-Bold.otf",
-            "/usr/share/fonts/gnu-free/FreeMonoBold.otf",
-            "/usr/share/fonts/Adwaita/AdwaitaMono-Bold.ttf",
-            "C:\\Windows\\Fonts\\consolab.ttf",
-        ],
-    );
-    let has_mono_italic = try_load_font(
-        &mut defs,
-        "editor_italic",
-        &[
-            "/usr/share/fonts/gsfonts/NimbusMonoPS-Italic.otf",
-            "/usr/share/fonts/gnu-free/FreeMonoOblique.otf",
-            "/usr/share/fonts/Adwaita/AdwaitaMono-Italic.ttf",
-            "C:\\Windows\\Fonts\\consolai.ttf",
-        ],
-    );
-    let has_mono_bold_italic = try_load_font(
-        &mut defs,
-        "editor_bold_italic",
-        &[
-            "/usr/share/fonts/gsfonts/NimbusMonoPS-BoldItalic.otf",
-            "/usr/share/fonts/gnu-free/FreeMonoBoldOblique.otf",
-            "/usr/share/fonts/Adwaita/AdwaitaMono-BoldItalic.ttf",
-            "C:\\Windows\\Fonts\\consolaz.ttf",
-        ],
-    );
-
-    let has_ui_reg = try_load_font(
-        &mut defs,
-        "ui_reg",
-        &[
-            "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
-            "/usr/share/fonts/gnu-free/FreeSans.otf",
-            "/usr/share/fonts/gsfonts/NimbusSans-Regular.otf",
-            "C:\\Windows\\Fonts\\segoeui.ttf",
-        ],
-    );
-    let has_ui_bold = try_load_font(
-        &mut defs,
-        "ui_bold",
-        &[
-            "/usr/share/fonts/gnu-free/FreeSansBold.otf",
-            "/usr/share/fonts/gsfonts/NimbusSans-Bold.otf",
-            "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
-            "C:\\Windows\\Fonts\\segoeuib.ttf",
-        ],
-    );
-
-    // Note: Do NOT load C:\Windows\Fonts\seguiemj.ttf (~20 MB COLR/CPAL font) into ab_glyph,
-    // because color emojis are masked as transparent slots and painted via RGBA textures.
-    let has_sys_emoji = try_load_font(
-        &mut defs,
-        "sys_emoji_vec",
-        &[
-            "/usr/share/fonts/noto/NotoEmoji-Regular.ttf",
-            "/usr/share/fonts/TTF/NotoEmoji-Regular.ttf",
-            "/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf",
-        ],
-    );
-    let has_sys_symbols = try_load_font(
-        &mut defs,
-        "sys_symbols_vec",
-        &[
-            "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
-            "/usr/share/fonts/noto/NotoSansSymbols-Regular.ttf",
-            "/usr/share/fonts/TTF/DejaVuSans.ttf",
-            "/usr/share/fonts/gnu-free/FreeSans.otf",
-            "C:\\Windows\\Fonts\\seguisym.ttf",
-        ],
-    );
-
-    if has_sys_emoji {
-        if let Some(mono) = defs.families.get_mut(&FontFamily::Monospace) {
-            mono.push("sys_emoji_vec".to_string());
-        }
-        if let Some(prop) = defs.families.get_mut(&FontFamily::Proportional) {
-            prop.push("sys_emoji_vec".to_string());
-        }
-    }
-    if has_sys_symbols {
-        if let Some(mono) = defs.families.get_mut(&FontFamily::Monospace) {
-            mono.push("sys_symbols_vec".to_string());
-        }
-        if let Some(prop) = defs.families.get_mut(&FontFamily::Proportional) {
-            prop.push("sys_symbols_vec".to_string());
-        }
-    }
-
-    let fallback_mono = defs
-        .families
-        .get(&FontFamily::Monospace)
-        .cloned()
-        .unwrap_or_default();
-    let fallback_prop = defs
-        .families
-        .get(&FontFamily::Proportional)
-        .cloned()
-        .unwrap_or_default();
-
-    let mut reg_vec = Vec::new();
-    if has_mono_reg {
-        reg_vec.push("editor_reg".to_string());
-    }
-    let emoji_slot_vec = if !reg_vec.is_empty() {
-        reg_vec.clone()
-    } else {
-        fallback_mono.clone()
-    };
-    defs.families
-        .insert(FAM_EMOJI_SLOT.clone(), emoji_slot_vec);
-    reg_vec.extend(fallback_mono.clone());
-    defs.families
-        .insert(FAM_EDITOR_REG.clone(), reg_vec.clone());
-    defs.families.insert(FontFamily::Monospace, reg_vec);
-
-    let mut bold_vec = Vec::new();
-    if has_mono_bold {
-        bold_vec.push("editor_bold".to_string());
-    } else if has_mono_reg {
-        bold_vec.push("editor_reg".to_string());
-    }
-    bold_vec.extend(fallback_mono.clone());
-    defs.families.insert(FAM_EDITOR_BOLD.clone(), bold_vec);
-
-    let mut italic_vec = Vec::new();
-    if has_mono_italic {
-        italic_vec.push("editor_italic".to_string());
-    } else if has_mono_reg {
-        italic_vec.push("editor_reg".to_string());
-    }
-    italic_vec.extend(fallback_mono.clone());
-    defs.families.insert(FAM_EDITOR_ITALIC.clone(), italic_vec);
-
-    let mut bi_vec = Vec::new();
-    if has_mono_bold_italic {
-        bi_vec.push("editor_bold_italic".to_string());
-    } else if has_mono_bold {
-        bi_vec.push("editor_bold".to_string());
-    }
-    bi_vec.extend(fallback_mono);
-    defs.families.insert(FAM_EDITOR_BOLD_ITALIC.clone(), bi_vec);
-
-    if has_ui_reg {
-        if let Some(prop) = defs.families.get_mut(&FontFamily::Proportional) {
-            prop.insert(0, "ui_reg".to_string());
-        }
-    }
-
-    let has_serif_reg = try_load_font(
-        &mut defs,
-        "serif_reg",
-        &[
-            "/usr/share/fonts/gnu-free/FreeSerif.otf",
-            "/usr/share/fonts/gsfonts/NimbusRoman-Regular.otf",
-            "C:\\Windows\\Fonts\\georgia.ttf",
-        ],
-    );
-    let has_serif_bold = try_load_font(
-        &mut defs,
-        "serif_bold",
-        &[
-            "/usr/share/fonts/gnu-free/FreeSerifBold.otf",
-            "/usr/share/fonts/gsfonts/NimbusRoman-Bold.otf",
-            "C:\\Windows\\Fonts\\georgiab.ttf",
-        ],
-    );
-
-    let mut ui_bold_vec = Vec::new();
-    if has_ui_bold {
-        ui_bold_vec.push("ui_bold".to_string());
-    } else if has_ui_reg {
-        ui_bold_vec.push("ui_reg".to_string());
-    }
-    ui_bold_vec.extend(fallback_prop.clone());
-    defs.families.insert(FAM_UI_BOLD.clone(), ui_bold_vec);
-
-    let mut serif_vec = Vec::new();
-    if has_serif_reg {
-        serif_vec.push("serif_reg".to_string());
-    }
-    serif_vec.extend(fallback_prop.clone());
-    defs.families.insert(FAM_PROSE_SERIF.clone(), serif_vec);
-
-    let mut serif_bold_vec = Vec::new();
-    if has_serif_bold {
-        serif_bold_vec.push("serif_bold".to_string());
-    } else if has_serif_reg {
-        serif_bold_vec.push("serif_reg".to_string());
-    }
-    serif_bold_vec.extend(fallback_prop);
-    defs.families
-        .insert(FAM_PROSE_SERIF_BOLD.clone(), serif_bold_vec);
-
-    ctx.set_fonts(defs);
-}
-
-pub fn apply_theme(ctx: &Context, preset: ColorPalettePreset, mode: ThemeMode) -> AccentPalette {
-    let pal = AccentPalette::for_preset(preset, mode);
-    let theme_state_id = egui::Id::new("accent_applied_theme_state");
-    let already_applied = ctx.data_mut(|d| {
-        d.get_temp::<(ColorPalettePreset, ThemeMode)>(theme_state_id) == Some((preset, mode))
-    });
-    if already_applied {
-        return pal;
-    }
-
-    let mut visuals = match mode {
-        ThemeMode::Dark => Visuals::dark(),
-        ThemeMode::Light | ThemeMode::Sepia => Visuals::light(),
-    };
-
-    visuals.text_cursor.blink = false;
-    visuals.panel_fill = pal.bg_canvas;
-    visuals.window_fill = pal.bg_popover;
-    visuals.extreme_bg_color = pal.bg_canvas;
-    visuals.faint_bg_color = pal.bg_code_block;
-    visuals.override_text_color = Some(pal.fg_primary);
-    visuals.widgets.noninteractive.bg_fill = pal.bg_canvas;
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, pal.fg_primary);
-    visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.4, pal.fg_primary);
-    visuals.widgets.hovered.bg_fill = pal.bg_pill_button;
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.5, pal.fg_primary);
-    visuals.widgets.active.bg_fill = pal.bg_pill_button;
-    visuals.widgets.active.fg_stroke = Stroke::new(1.6, pal.fg_primary);
-    visuals.selection.bg_fill = pal.accent_orange.gamma_multiply(0.25);
-    visuals.selection.stroke = Stroke::new(1.5, pal.accent_orange);
-
-    ctx.set_visuals(visuals);
-    ctx.data_mut(|d| d.insert_temp(theme_state_id, (preset, mode)));
-    pal
-}
-
-// ============================================================================
-// Crisp Vector Icon Painters matching Apostrophe's GTK symbolic icons
-// ============================================================================
-
-pub fn draw_new_doc_icon(painter: &Painter, center: Pos2, color: Color32) {
-    let s = Stroke::new(1.6, color);
-    // Rounded page outline with top-right fold and bottom-right '+'
-    let r = Rect::from_center_size(Pos2::new(center.x - 1.0, center.y - 1.0), Vec2::new(12.0, 13.0));
-    painter.line_segment([r.left_top(), Pos2::new(r.right() - 4.0, r.top())], s);
-    painter.line_segment(
-        [Pos2::new(r.right() - 4.0, r.top()), Pos2::new(r.right(), r.top() + 4.0)],
-        s,
-    );
-    painter.line_segment([Pos2::new(r.right(), r.top() + 4.0), Pos2::new(r.right(), r.bottom() - 5.0)], s);
-    painter.line_segment([r.left_top(), r.left_bottom()], s);
-    painter.line_segment([r.left_bottom(), Pos2::new(r.right() - 5.0, r.bottom())], s);
-    // Small '+' at bottom right
-    let pc = Pos2::new(r.right() + 0.5, r.bottom() - 0.5);
-    painter.line_segment([Pos2::new(pc.x - 3.5, pc.y), Pos2::new(pc.x + 3.5, pc.y)], s);
-    painter.line_segment([Pos2::new(pc.x, pc.y - 3.5), Pos2::new(pc.x, pc.y + 3.5)], s);
-}
-
-pub fn draw_chevron_down(painter: &Painter, center: Pos2, color: Color32) {
-    let s = Stroke::new(1.6, color);
-    painter.line_segment(
-        [
-            Pos2::new(center.x - 4.0, center.y - 1.5),
-            Pos2::new(center.x, center.y + 2.5),
-        ],
-        s,
-    );
-    painter.line_segment(
-        [
-            Pos2::new(center.x, center.y + 2.5),
-            Pos2::new(center.x + 4.0, center.y - 1.5),
-        ],
-        s,
-    );
-}
-
-pub fn draw_chevron_up(painter: &Painter, center: Pos2, color: Color32) {
-    let s = Stroke::new(1.6, color);
-    painter.line_segment(
-        [
-            Pos2::new(center.x - 4.0, center.y + 2.0),
-            Pos2::new(center.x, center.y - 2.0),
-        ],
-        s,
-    );
-    painter.line_segment(
-        [
-            Pos2::new(center.x, center.y - 2.0),
-            Pos2::new(center.x + 4.0, center.y + 2.0),
-        ],
-        s,
-    );
-}
-
-pub fn draw_chevron_left(painter: &Painter, center: Pos2, color: Color32) {
-    let s = Stroke::new(1.7, color);
-    painter.line_segment(
-        [
-            Pos2::new(center.x + 2.0, center.y - 4.5),
-            Pos2::new(center.x - 2.5, center.y),
-        ],
-        s,
-    );
-    painter.line_segment(
-        [
-            Pos2::new(center.x - 2.5, center.y),
-            Pos2::new(center.x + 2.0, center.y + 4.5),
-        ],
-        s,
-    );
-}
-
-pub fn draw_search_icon(painter: &Painter, center: Pos2, color: Color32) {
-    let s = Stroke::new(1.7, color);
-    let c = Pos2::new(center.x - 1.5, center.y - 1.5);
-    painter.circle_stroke(c, 5.2, s);
-    painter.line_segment(
-        [Pos2::new(c.x + 3.7, c.y + 3.7), Pos2::new(c.x + 7.5, c.y + 7.5)],
-        Stroke::new(2.0, color),
-    );
-}
-
-pub fn draw_preview_book_icon(painter: &Painter, center: Pos2, color: Color32) {
-    let s = Stroke::new(1.5, color);
-    let r = Rect::from_center_size(center, Vec2::new(14.0, 12.0));
-    painter.rect_stroke(r, CornerRadius::same(2), s, StrokeKind::Middle);
-    painter.line_segment(
-        [Pos2::new(center.x, r.top()), Pos2::new(center.x, r.bottom())],
-        s,
-    );
-    for dy in [-2.5_f32, 0.0, 2.5] {
-        painter.line_segment(
-            [
-                Pos2::new(r.left() + 2.2, center.y + dy),
-                Pos2::new(center.x - 1.8, center.y + dy),
-            ],
-            Stroke::new(1.1, color),
-        );
-        painter.line_segment(
-            [
-                Pos2::new(center.x + 1.8, center.y + dy),
-                Pos2::new(r.right() - 2.2, center.y + dy),
-            ],
-            Stroke::new(1.1, color),
-        );
-    }
-}
-
-/// Draws the 5 high-legibility editing/preview mode icons:
-/// 0 = Modifica (Raw source editor)
-/// 1 = Anteprima in-line • (Caret-aware live preview)
-/// 2 = Anteprima split a destra (Half-width split)
-/// 3 = Anteprima split sotto (Half-height split)
-/// 4 = Solo lettura (Full-width read-only book/reader)
-pub fn draw_view_mode_icon(
-    painter: &Painter,
-    center: Pos2,
-    color: Color32,
-    accent_orange: Color32,
-    mode_idx: usize,
-) {
-    let s = Stroke::new(1.5, color);
-    let r = Rect::from_center_size(center, Vec2::new(15.0, 12.5));
-    match mode_idx {
-        // 0: Modifica (Raw source editor: page outline with diagonal pen/stylus)
-        0 => {
-            painter.rect_stroke(r, CornerRadius::same(2), s, StrokeKind::Middle);
-            painter.line_segment(
-                [
-                    Pos2::new(r.left() + 3.0, center.y - 2.2),
-                    Pos2::new(r.left() + 7.5, center.y - 2.2),
-                ],
-                Stroke::new(1.3, color),
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(r.left() + 3.0, center.y + 1.8),
-                    Pos2::new(r.left() + 6.5, center.y + 1.8),
-                ],
-                Stroke::new(1.3, color),
-            );
-            // Crisp diagonal stylus
-            painter.line_segment(
-                [
-                    Pos2::new(center.x + 0.5, center.y + 3.0),
-                    Pos2::new(r.right() - 2.2, r.top() + 2.5),
-                ],
-                Stroke::new(1.8, color),
-            );
-        }
-        // 1: Anteprima in-line • (Live preview: typographic lines + orange live dot)
-        1 => {
-            painter.rect_stroke(r, CornerRadius::same(2), s, StrokeKind::Middle);
-            painter.line_segment(
-                [
-                    Pos2::new(r.left() + 2.8, center.y - 2.5),
-                    Pos2::new(r.right() - 5.5, center.y - 2.5),
-                ],
-                Stroke::new(1.6, color),
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(r.left() + 2.8, center.y + 0.5),
-                    Pos2::new(r.right() - 2.8, center.y + 0.5),
-                ],
-                Stroke::new(1.2, color),
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(r.left() + 2.8, center.y + 3.2),
-                    Pos2::new(r.right() - 4.2, center.y + 3.2),
-                ],
-                Stroke::new(1.2, color),
-            );
-            painter.circle_filled(Pos2::new(r.right() - 2.8, r.top() + 2.8), 2.3, accent_orange);
-        }
-        // 2: Anteprima split a destra (Vertical split with shaded right pane)
-        2 => {
-            let right_half = Rect::from_min_max(Pos2::new(center.x, r.top()), r.right_bottom());
-            painter.rect_filled(
-                right_half,
-                CornerRadius::same(2),
-                color.gamma_multiply(0.24),
-            );
-            painter.rect_stroke(r, CornerRadius::same(2), s, StrokeKind::Middle);
-            painter.line_segment(
-                [Pos2::new(center.x, r.top()), Pos2::new(center.x, r.bottom())],
-                s,
-            );
-        }
-        // 3: Anteprima split sotto (Horizontal split with shaded bottom pane)
-        3 => {
-            let bot_half = Rect::from_min_max(Pos2::new(r.left(), center.y), r.right_bottom());
-            painter.rect_filled(bot_half, CornerRadius::same(2), color.gamma_multiply(0.24));
-            painter.rect_stroke(r, CornerRadius::same(2), s, StrokeKind::Middle);
-            painter.line_segment(
-                [Pos2::new(r.left(), center.y), Pos2::new(r.right(), center.y)],
-                s,
-            );
-        }
-        // 4: Solo lettura (Open book reader icon)
-        _ => {
-            draw_preview_book_icon(painter, center, color);
-        }
-    }
-}
-
-pub fn draw_hamburger_icon(painter: &Painter, center: Pos2, color: Color32) {
-    let s = Stroke::new(1.7, color);
-    for dy in [-4.5_f32, 0.0, 4.5] {
-        painter.line_segment(
-            [
-                Pos2::new(center.x - 6.5, center.y + dy),
-                Pos2::new(center.x + 6.5, center.y + dy),
-            ],
-            s,
-        );
-    }
-}
-
-pub fn draw_window_button(
-    painter: &Painter,
-    center: Pos2,
-    pill_bg: Color32,
-    fg: Color32,
-    kind: char,
-) {
-    painter.circle_filled(center, 12.0, pill_bg);
-    let s = Stroke::new(1.6, fg);
-    match kind {
-        '-' => {
-            painter.line_segment(
-                [
-                    Pos2::new(center.x - 4.0, center.y + 2.5),
-                    Pos2::new(center.x + 4.0, center.y + 2.5),
-                ],
-                s,
-            );
-        }
-        '□' => {
-            let r = Rect::from_center_size(center, Vec2::new(7.5, 7.5));
-            painter.rect_stroke(r, CornerRadius::ZERO, s, StrokeKind::Middle);
-        }
-        'x' => {
-            painter.line_segment(
-                [
-                    Pos2::new(center.x - 3.5, center.y - 3.5),
-                    Pos2::new(center.x + 3.5, center.y + 3.5),
-                ],
-                s,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(center.x - 3.5, center.y + 3.5),
-                    Pos2::new(center.x + 3.5, center.y - 3.5),
-                ],
-                s,
-            );
-        }
-        _ => {}
-    }
-}
-
-/// Draws the 12 bottom formatting toolbar icons (`0..12`) with crisp custom vector geometry
-/// inspired by Apostrophe's typographic `'a'` series (bold `'a'`, italic `'a'`, strikethrough `'a'`)
-/// and precision vector glyphs.
-pub fn draw_toolbar_icon(painter: &Painter, center: Pos2, fg: Color32, idx: usize) {
-    let s = Stroke::new(1.6, fg);
-    match idx {
-        // 0: Bold typographic 'a' (heavy stem + sculpted double-story arch & bowl)
-        0 => {
-            let b_stroke = Stroke::new(2.35, fg);
-            painter.line_segment(
-                [
-                    Pos2::new(center.x - 3.8, center.y - 4.2),
-                    Pos2::new(center.x + 1.8, center.y - 4.8),
-                ],
-                b_stroke,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(center.x + 1.8, center.y - 4.8),
-                    Pos2::new(center.x + 3.6, center.y - 2.6),
-                ],
-                b_stroke,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(center.x + 3.6, center.y - 3.0),
-                    Pos2::new(center.x + 3.6, center.y + 4.8),
-                ],
-                Stroke::new(2.6, fg),
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(center.x + 3.6, center.y + 4.6),
-                    Pos2::new(center.x + 5.4, center.y + 4.6),
-                ],
-                Stroke::new(2.1, fg),
-            );
-            let bowl_r = Rect::from_min_max(
-                Pos2::new(center.x - 4.4, center.y - 0.4),
-                Pos2::new(center.x + 3.4, center.y + 4.8),
-            );
-            painter.rect_stroke(bowl_r, CornerRadius::same(3), b_stroke, StrokeKind::Middle);
-        }
-        // 1: Italic typographic 'a' (slanted cursive single-story 'a' with hook)
-        1 => {
-            let i_stroke = Stroke::new(1.75, fg);
-            let bowl = Rect::from_min_max(
-                Pos2::new(center.x - 4.2, center.y - 3.6),
-                Pos2::new(center.x + 2.2, center.y + 4.6),
-            );
-            painter.rect_stroke(bowl, CornerRadius::same(4), i_stroke, StrokeKind::Middle);
-            painter.line_segment(
-                [
-                    Pos2::new(center.x + 3.6, center.y - 4.2),
-                    Pos2::new(center.x + 1.6, center.y + 4.2),
-                ],
-                Stroke::new(1.9, fg),
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(center.x + 1.6, center.y + 4.2),
-                    Pos2::new(center.x + 4.6, center.y + 3.4),
-                ],
-                Stroke::new(1.6, fg),
-            );
-        }
-        // 2: Strikethrough typographic 'a' (clean 'a' crossed by crisp horizontal bar)
-        2 => {
-            let r_stroke = Stroke::new(1.65, fg);
-            painter.line_segment(
-                [
-                    Pos2::new(center.x - 3.4, center.y - 4.2),
-                    Pos2::new(center.x + 2.2, center.y - 4.6),
-                ],
-                r_stroke,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(center.x + 2.8, center.y - 3.6),
-                    Pos2::new(center.x + 2.8, center.y + 4.8),
-                ],
-                r_stroke,
-            );
-            let bowl_r = Rect::from_min_max(
-                Pos2::new(center.x - 4.0, center.y - 0.2),
-                Pos2::new(center.x + 2.8, center.y + 4.8),
-            );
-            painter.rect_stroke(bowl_r, CornerRadius::same(3), r_stroke, StrokeKind::Middle);
-            painter.line_segment(
-                [
-                    Pos2::new(center.x - 7.0, center.y + 0.2),
-                    Pos2::new(center.x + 7.0, center.y + 0.2),
-                ],
-                Stroke::new(1.85, fg),
-            );
-        }
-        // 3: Heading 'H1' (vector H + subscript 1)
-        3 => {
-            let hs = Stroke::new(1.85, fg);
-            painter.line_segment(
-                [
-                    Pos2::new(center.x - 6.0, center.y - 5.0),
-                    Pos2::new(center.x - 6.0, center.y + 4.8),
-                ],
-                hs,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(center.x + 0.5, center.y - 5.0),
-                    Pos2::new(center.x + 0.5, center.y + 4.8),
-                ],
-                hs,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(center.x - 6.0, center.y - 0.2),
-                    Pos2::new(center.x + 0.5, center.y - 0.2),
-                ],
-                hs,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(center.x + 3.5, center.y - 1.2),
-                    Pos2::new(center.x + 5.5, center.y - 2.6),
-                ],
-                Stroke::new(1.5, fg),
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(center.x + 5.5, center.y - 2.6),
-                    Pos2::new(center.x + 5.5, center.y + 4.8),
-                ],
-                Stroke::new(1.7, fg),
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(center.x + 3.6, center.y + 4.8),
-                    Pos2::new(center.x + 7.2, center.y + 4.8),
-                ],
-                Stroke::new(1.5, fg),
-            );
-        }
-        // 4: Unordered bullet list
-        4 => {
-            for dy in [-4.5_f32, 0.0, 4.5] {
-                painter.circle_filled(Pos2::new(center.x - 5.5, center.y + dy), 1.5, fg);
-                painter.line_segment(
-                    [
-                        Pos2::new(center.x - 2.0, center.y + dy),
-                        Pos2::new(center.x + 6.5, center.y + dy),
-                    ],
-                    s,
-                );
-            }
-        }
-        // 5: Ordered numbered list (1 2 3 + lines)
-        5 => {
-            for (i, dy) in [-4.5_f32, 0.0, 4.5].into_iter().enumerate() {
-                painter.text(
-                    Pos2::new(center.x - 5.5, center.y + dy),
-                    egui::Align2::CENTER_CENTER,
-                    format!("{}", i + 1),
-                    font_ui_bold(7.2),
-                    fg,
-                );
-                painter.line_segment(
-                    [
-                        Pos2::new(center.x - 1.5, center.y + dy),
-                        Pos2::new(center.x + 6.5, center.y + dy),
-                    ],
-                    s,
-                );
-            }
-        }
-        // 6: Task list checkbox [v]
-        6 => {
-            let r = Rect::from_center_size(center, Vec2::new(13.0, 13.0));
-            painter.rect_stroke(r, CornerRadius::same(3), s, StrokeKind::Middle);
-            painter.line_segment(
-                [
-                    Pos2::new(center.x - 3.4, center.y + 0.2),
-                    Pos2::new(center.x - 0.8, center.y + 2.8),
-                ],
-                Stroke::new(1.8, fg),
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(center.x - 0.8, center.y + 2.8),
-                    Pos2::new(center.x + 3.8, center.y - 2.6),
-                ],
-                Stroke::new(1.8, fg),
-            );
-        }
-        // 7: Blockquote (sculptural double curved quotation glyphs)
-        7 => {
-            for dx in [-3.2_f32, 3.0] {
-                let qc = Pos2::new(center.x + dx, center.y - 1.8);
-                painter.circle_filled(qc, 2.2, fg);
-                painter.line_segment(
-                    [
-                        Pos2::new(qc.x + 1.2, qc.y + 0.5),
-                        Pos2::new(qc.x - 1.2, qc.y + 5.2),
-                    ],
-                    Stroke::new(1.8, fg),
-                );
-            }
-        }
-        // 8: Code </>
-        8 => {
-            painter.line_segment(
-                [
-                    Pos2::new(center.x - 2.5, center.y - 4.2),
-                    Pos2::new(center.x - 6.5, center.y),
-                ],
-                s,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(center.x - 6.5, center.y),
-                    Pos2::new(center.x - 2.5, center.y + 4.2),
-                ],
-                s,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(center.x + 2.5, center.y - 4.2),
-                    Pos2::new(center.x + 6.5, center.y),
-                ],
-                s,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(center.x + 6.5, center.y),
-                    Pos2::new(center.x + 2.5, center.y + 4.2),
-                ],
-                s,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(center.x + 1.2, center.y - 5.0),
-                    Pos2::new(center.x - 1.2, center.y + 5.0),
-                ],
-                Stroke::new(1.3, fg),
-            );
-        }
-        // 9: Link icon (interlocking chain capsules)
-        9 => {
-            let l_rect =
-                Rect::from_center_size(Pos2::new(center.x - 2.6, center.y), Vec2::new(7.5, 6.5));
-            let r_rect =
-                Rect::from_center_size(Pos2::new(center.x + 2.6, center.y), Vec2::new(7.5, 6.5));
-            painter.rect_stroke(l_rect, CornerRadius::same(3), s, StrokeKind::Middle);
-            painter.rect_stroke(r_rect, CornerRadius::same(3), s, StrokeKind::Middle);
-            painter.line_segment(
-                [
-                    Pos2::new(center.x - 2.2, center.y),
-                    Pos2::new(center.x + 2.2, center.y),
-                ],
-                Stroke::new(1.8, fg),
-            );
-        }
-        // 10: Image frame icon
-        10 => {
-            let r = Rect::from_center_size(center, Vec2::new(13.5, 11.5));
-            painter.rect_stroke(r, CornerRadius::same(2), s, StrokeKind::Middle);
-            painter.circle_filled(Pos2::new(r.left() + 3.6, r.top() + 3.6), 1.4, fg);
-            painter.line_segment(
-                [
-                    Pos2::new(r.left() + 2.0, r.bottom() - 2.0),
-                    Pos2::new(center.x + 0.5, center.y + 0.2),
-                ],
-                s,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(center.x + 0.5, center.y + 0.2),
-                    Pos2::new(r.right() - 2.0, r.bottom() - 2.0),
-                ],
-                s,
-            );
-        }
-        // 11: Table grid icon
-        _ => {
-            let r = Rect::from_center_size(center, Vec2::new(13.0, 12.0));
-            let hdr_r = Rect::from_min_max(r.left_top(), Pos2::new(r.right(), r.top() + 4.0));
-            painter.rect_filled(hdr_r, CornerRadius::same(2), fg.gamma_multiply(0.24));
-            painter.rect_stroke(r, CornerRadius::same(2), s, StrokeKind::Middle);
-            painter.line_segment(
-                [
-                    Pos2::new(r.left(), r.top() + 4.2),
-                    Pos2::new(r.right(), r.top() + 4.2),
-                ],
-                s,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(r.left(), r.top() + 8.0),
-                    Pos2::new(r.right(), r.top() + 8.0),
-                ],
-                s,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(center.x, r.top() + 4.2),
-                    Pos2::new(center.x, r.bottom()),
-                ],
-                s,
-            );
-        }
-    }
-}
-
-pub use accent_core::{is_color_emoji_char, is_emoji_invisible_combiner};
-
-fn system_color_emoji_font_bytes() -> Option<&'static [u8]> {
-    static BYTES: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
-    BYTES
-        .get_or_init(|| {
-            let paths = [
-                "/usr/share/fonts/noto/NotoColorEmoji.ttf",
-                "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
-                "/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf",
-                "/usr/share/fonts/noto-color-emoji/NotoColorEmoji.ttf",
-            ];
-            for p in paths {
-                if let Ok(data) = fs::read(p) {
-                    return Some(data);
-                }
-            }
-            None
-        })
-        .as_deref()
-}
-
-fn system_color_emoji_face() -> Option<&'static ttf_parser::Face<'static>> {
-    static FACE: std::sync::OnceLock<Option<ttf_parser::Face<'static>>> = std::sync::OnceLock::new();
-    FACE.get_or_init(|| {
-        let bytes = system_color_emoji_font_bytes()?;
-        ttf_parser::Face::parse(bytes, 0).ok()
-    })
-    .as_ref()
-}
-
-fn synthesize_fallback_emoji_image(ch: char) -> Option<egui::ColorImage> {
-    let size = 64usize;
-    let mut pixels = vec![Color32::TRANSPARENT; size * size];
-    let center = (size as f32 - 1.0) * 0.5;
-
-    // Colored circles: 🔴 🟠 🟡 🟢 🔵 🟣 🟤 ⚫ ⚪
-    let circle_colors: Option<([u8; 3], [u8; 3])> = match ch {
-        '🔴' => Some(([0xEF, 0x44, 0x44], [0xB9, 0x1C, 0x1C])),
-        '🟠' | '🦀' | '🔥' => Some(([0xF9, 0x73, 0x16], [0xC2, 0x41, 0x0C])),
-        '🟡' | '💡' => Some(([0xFA, 0xCC, 0x15], [0xCA, 0x8A, 0x04])),
-        '🟢' => Some(([0x22, 0xC5, 0x5E], [0x15, 0x80, 0x3D])),
-        '🔵' | '🚀' => Some(([0x3B, 0x82, 0xF6], [0x1D, 0x4E, 0xD8])),
-        '🟣' => Some(([0xA8, 0x55, 0xF7], [0x7E, 0x22, 0xCE])),
-        '🟤' => Some(([0xA1, 0x62, 0x07], [0x71, 0x3F, 0x12])),
-        '⚫' => Some(([0x37, 0x41, 0x51], [0x11, 0x18, 0x27])),
-        '⚪' => Some(([0xF8, 0xFA, 0xFC], [0x94, 0xA3, 0xB8])),
-        _ => None,
-    };
-
-    let effective_circle = circle_colors.or_else(|| {
-        if !matches!(
-            ch,
-            '🟥' | '🟧' | '🟨' | '🟩' | '🟦' | '🟪' | '🟫' | '⬛' | '◼' | '▪' | '⬜' | '◻' | '▫' | '✅' | '❌' | '⚠' | '⭐' | '✨'
-        ) && is_color_emoji_char(ch)
-        {
-            let palette: [([u8; 3], [u8; 3]); 6] = [
-                ([0x3B, 0x82, 0xF6], [0x1D, 0x4E, 0xD8]),
-                ([0xF9, 0x73, 0x16], [0xC2, 0x41, 0x0C]),
-                ([0x22, 0xC5, 0x5E], [0x15, 0x80, 0x3D]),
-                ([0xFA, 0xCC, 0x15], [0xCA, 0x8A, 0x04]),
-                ([0xA8, 0x55, 0xF7], [0x7E, 0x22, 0xCE]),
-                ([0xEC, 0x48, 0x99], [0xBE, 0x18, 0x5D]),
-            ];
-            Some(palette[(ch as usize) % palette.len()])
-        } else {
-            None
-        }
-    });
-
-    if let Some((fill, border)) = effective_circle {
-        let radius = 26.5_f32;
-        for y in 0..size {
-            for x in 0..size {
-                let dx = x as f32 - center;
-                let dy = y as f32 - center;
-                let dist = (dx * dx + dy * dy).sqrt();
-                if dist <= radius + 0.8 {
-                    let edge_alpha = ((radius + 0.8 - dist).clamp(0.0, 1.0) * 255.0) as u8;
-                    let is_rim = dist >= radius - 2.4;
-                    let base = if is_rim { border } else { fill };
-                    pixels[y * size + x] =
-                        Color32::from_rgba_unmultiplied(base[0], base[1], base[2], edge_alpha);
-                }
-            }
-        }
-        return Some(egui::ColorImage {
-            size: [size, size],
-            pixels,
-        });
-    }
-
-    // Colored squares: 🟥 🟧 🟨 🟩 🟦 🟪 🟫 ⬛ ⬜
-    let square_colors: Option<([u8; 3], [u8; 3])> = match ch {
-        '🟥' => Some(([0xEF, 0x44, 0x44], [0xB9, 0x1C, 0x1C])),
-        '🟧' => Some(([0xF9, 0x73, 0x16], [0xC2, 0x41, 0x0C])),
-        '🟨' => Some(([0xFA, 0xCC, 0x15], [0xCA, 0x8A, 0x04])),
-        '🟩' => Some(([0x22, 0xC5, 0x5E], [0x15, 0x80, 0x3D])),
-        '🟦' => Some(([0x3B, 0x82, 0xF6], [0x1D, 0x4E, 0xD8])),
-        '🟪' => Some(([0xA8, 0x55, 0xF7], [0x7E, 0x22, 0xCE])),
-        '🟫' => Some(([0xA1, 0x62, 0x07], [0x71, 0x3F, 0x12])),
-        '⬛' | '◼' | '▪' => Some(([0x37, 0x41, 0x51], [0x11, 0x18, 0x27])),
-        '⬜' | '◻' | '▫' => Some(([0xF8, 0xFA, 0xFC], [0x94, 0xA3, 0xB8])),
-        '✅' => Some(([0x22, 0xC5, 0x5E], [0x15, 0x80, 0x3D])),
-        '❌' => Some(([0xEF, 0x44, 0x44], [0xB9, 0x1C, 0x1C])),
-        '⚠' | '⭐' | '✨' => Some(([0xFA, 0xCC, 0x15], [0xCA, 0x8A, 0x04])),
-        _ => None,
-    };
-
-    if let Some((fill, border)) = square_colors {
-        let half = 24.0_f32;
-        for y in 0..size {
-            for x in 0..size {
-                let dx = (x as f32 - center).abs();
-                let dy = (y as f32 - center).abs();
-                if dx <= half && dy <= half {
-                    let is_rim = dx >= half - 2.5 || dy >= half - 2.5;
-                    let base = if is_rim { border } else { fill };
-                    pixels[y * size + x] = Color32::from_rgb(base[0], base[1], base[2]);
-                }
-            }
-        }
-        return Some(egui::ColorImage {
-            size: [size, size],
-            pixels,
-        });
-    }
-
-    None
-}
-
-/// Extracts a full-color RGBA emoji image from the system `NotoColorEmoji.ttf` (`CBDT`/`CBLC`
-/// bitmap tables via `ttf-parser`) or falls back to the built-in procedural RGBA renderer.
-pub fn load_color_emoji_image(ch: char) -> Option<egui::ColorImage> {
-    if let Some(face) = system_color_emoji_face() {
-        if let Some(glyph_id) = face.glyph_index(ch) {
-            if let Some(raster) = face.glyph_raster_image(glyph_id, 128) {
-                if let Ok(dyn_img) = image::load_from_memory(raster.data) {
-                    let rgba = dyn_img.to_rgba8();
-                    let w = rgba.width() as usize;
-                    let h = rgba.height() as usize;
-                    if w > 0 && h > 0 {
-                        return Some(egui::ColorImage::from_rgba_unmultiplied(
-                            [w, h],
-                            rgba.as_raw(),
-                        ));
-                    }
-                }
-            }
-        }
-    }
-    synthesize_fallback_emoji_image(ch)
-}
-
-/// Retrieves or uploads a cached `egui::TextureHandle` for a color emoji character `ch`.
-pub fn get_or_load_color_emoji_texture(ctx: &Context, ch: char) -> Option<egui::TextureHandle> {
-    let cache_id = egui::Id::new(("accent_color_emoji_tex_v1", ch as u32));
-    if let Some(cached) = ctx.data_mut(|d| d.get_temp::<Option<egui::TextureHandle>>(cache_id)) {
-        return cached;
-    }
-    let loaded = load_color_emoji_image(ch).map(|color_img| {
-        ctx.load_texture(
-            format!("accent_emoji_{:X}", ch as u32),
-            color_img,
-            egui::TextureOptions::LINEAR,
-        )
-    });
-    ctx.data_mut(|d| d.insert_temp(cache_id, loaded.clone()));
-    loaded
-}
-
-/// Appends `text` to `job`, replacing color emoji codepoints with transparent fixed-advance
-/// slots so `ab_glyph` never paints monochrome `◍` or `.notdef` `□` tofu while preserving
-/// exact 1:1 `CCursor` character indices for `paint_galley_color_emojis`.
-pub fn append_text_with_color_emojis(
-    job: &mut egui::text::LayoutJob,
-    text: &str,
-    mut leading_space: f32,
-    base_format: egui::TextFormat,
-) {
-    // Fast byte scan: all emoji & invisible emoji combiners (>= U+200D) start with UTF-8 lead byte >= 0xE2
-    if !text.as_bytes().iter().any(|&b| b >= 0xE2)
-        || !text
-            .chars()
-            .any(|c| is_color_emoji_char(c) || is_emoji_invisible_combiner(c))
-    {
-        job.append(text, leading_space, base_format);
-        return;
-    }
-
-    let base_size = base_format.font_id.size;
-    let mut normal_start = 0usize;
-    for (byte_idx, ch) in text.char_indices() {
-        let ch_len = ch.len_utf8();
-        if is_color_emoji_char(ch) {
-            if normal_start < byte_idx {
-                job.append(
-                    &text[normal_start..byte_idx],
-                    leading_space,
-                    base_format.clone(),
-                );
-                leading_space = 0.0;
-            }
-            let mut emoji_fmt = base_format.clone();
-            emoji_fmt.color = Color32::TRANSPARENT;
-            emoji_fmt.font_id = FontId::new(base_size, FAM_EMOJI_SLOT.clone());
-            emoji_fmt.extra_letter_spacing = base_size * 0.42;
-            job.append(&text[byte_idx..byte_idx + ch_len], leading_space, emoji_fmt);
-            leading_space = 0.0;
-            normal_start = byte_idx + ch_len;
-        } else if is_emoji_invisible_combiner(ch) {
-            if normal_start < byte_idx {
-                job.append(
-                    &text[normal_start..byte_idx],
-                    leading_space,
-                    base_format.clone(),
-                );
-                leading_space = 0.0;
-            }
-            let mut comb_fmt = base_format.clone();
-            comb_fmt.color = Color32::TRANSPARENT;
-            comb_fmt.font_id = FontId::new(0.01, FAM_EMOJI_SLOT.clone());
-            job.append(&text[byte_idx..byte_idx + ch_len], leading_space, comb_fmt);
-            leading_space = 0.0;
-            normal_start = byte_idx + ch_len;
-        }
-    }
-    if normal_start < text.len() {
-        job.append(&text[normal_start..], leading_space, base_format);
-    }
-}
-
-/// Paints full-color RGBA emoji textures over the transparent emoji character slots in `galley`,
-/// starting at `text_from_start` which corresponds to character offset `start_char_idx`.
-pub fn paint_galley_color_emojis_from(
-    ctx: &Context,
-    painter: &Painter,
-    galley: &egui::Galley,
-    galley_pos: Pos2,
-    text_from_start: &str,
-    start_char_idx: usize,
-    min_char_idx: usize,
-    max_char_idx: usize,
-    default_font_size: f32,
-) {
-    let mut char_idx = start_char_idx;
-    for ch in text_from_start.chars() {
-        if char_idx > max_char_idx {
-            break;
-        }
-        if char_idx >= min_char_idx && is_color_emoji_char(ch) {
-            let r0 = galley.pos_from_ccursor(egui::text::CCursor::new(char_idx));
-            let r1 = galley.pos_from_ccursor(egui::text::CCursor::new(char_idx + 1));
-            let slot_w = (r1.min.x - r0.min.x).abs();
-            // Skip collapsed delimiter slots (where font_size is 0.01pt and slot_w < 2.0px)
-            if slot_w >= 4.0 {
-                if let Some(tex) = get_or_load_color_emoji_texture(ctx, ch) {
-                    let row_h = r0.height().max(default_font_size);
-                    let emoji_h = (slot_w * 0.98)
-                        .clamp(default_font_size * 0.88, (row_h * 0.92).max(default_font_size * 1.05));
-                    let tex_size = tex.size_vec2();
-                    let aspect = if tex_size.y > 0.0 {
-                        (tex_size.x / tex_size.y).clamp(0.85, 1.15)
-                    } else {
-                        1.0
-                    };
-                    let emoji_w = emoji_h * aspect;
-                    let cx = galley_pos.x + r0.min.x + slot_w * 0.5;
-                    let top_y = r0.min.y.min(r0.max.y - emoji_h * 1.10);
-                    let cy = galley_pos.y + (top_y + r0.max.y) * 0.5;
-                    let rect = Rect::from_center_size(Pos2::new(cx, cy), Vec2::new(emoji_w, emoji_h));
-                    painter.image(
-                        tex.id(),
-                        rect,
-                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                        Color32::WHITE,
-                    );
-                }
-            }
-        }
-        char_idx += 1;
-    }
-}
-
-/// Paints full-color RGBA emoji textures over the transparent emoji character slots in `galley`.
-pub fn paint_galley_color_emojis(
-    ctx: &Context,
-    painter: &Painter,
-    galley: &egui::Galley,
-    galley_pos: Pos2,
-    text: &str,
-    min_char_idx: usize,
-    max_char_idx: usize,
-    default_font_size: f32,
-) {
-    paint_galley_color_emojis_from(
-        ctx,
-        painter,
-        galley,
-        galley_pos,
-        text,
-        0,
-        min_char_idx,
-        max_char_idx,
-        default_font_size,
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1818,6 +811,10 @@ mod tests {
         assert_eq!(sepia.fg_primary, Color32::from_rgb(0x4f, 0x39, 0x15));
         assert_eq!(sepia.bg_code_block, Color32::from_rgb(0xdf, 0xd7, 0xc9));
 
+        let semi_dark = AccentPalette::semi_dark();
+        assert_eq!(semi_dark.bg_canvas, Color32::from_rgb(0x2e, 0x31, 0x36));
+        assert_eq!(semi_dark.fg_primary, Color32::from_rgb(0xe6, 0xe8, 0xeb));
+
         let dark = AccentPalette::dark();
         assert_eq!(dark.bg_canvas, Color32::from_rgb(0x2b, 0x2b, 0x2f));
         assert_eq!(dark.bg_headerbar, Color32::from_rgb(0x2e, 0x2e, 0x32));
@@ -1826,38 +823,28 @@ mod tests {
     }
 
     #[test]
-    fn test_color_emoji_detection_and_rasterization() {
-        for ch in ['🔴', '🟠', '🟡', '🟢', '🔵', '🟣', '🟤', '⚫', '⚪', '🦀', '🚀', '✨', '🔥', '💡', '✅', '⚠'] {
-            assert!(is_color_emoji_char(ch), "Expected {ch} to be detected as color emoji");
-            let img = load_color_emoji_image(ch)
-                .unwrap_or_else(|| panic!("Expected non-empty color image for {ch}"));
-            assert!(img.size[0] >= 32 && img.size[1] >= 32);
-            let non_transparent = img.pixels.iter().filter(|p| p.a() > 0).count();
-            assert!(
-                non_transparent > 100,
-                "Expected visible colored pixels for {ch}, got {non_transparent}"
-            );
+    fn test_css_tokens_serialization_for_all_20_preset_mode_pairs() {
+        let presets = [
+            ColorPalettePreset::AmberCoral,
+            ColorPalettePreset::EditorialSlate,
+            ColorPalettePreset::NordicForest,
+            ColorPalettePreset::VelvetDawn,
+            ColorPalettePreset::Classic,
+        ];
+        let modes = [
+            ThemeMode::Light,
+            ThemeMode::Sepia,
+            ThemeMode::SemiDark,
+            ThemeMode::Dark,
+        ];
+        for preset in presets {
+            for mode in modes {
+                let pal = AccentPalette::for_preset(preset, mode);
+                let css = pal.to_css_tokens();
+                assert!(css.bg_canvas.starts_with('#') && css.bg_canvas.len() == 7);
+                assert!(css.fg_primary.starts_with('#') && css.fg_primary.len() == 7);
+                assert!(css.accent_orange.starts_with('#') && css.accent_orange.len() == 7);
+            }
         }
-
-        let sample = "(filtro opzionale per pallino 🔴/🟡/🟢/⚪)";
-        let mut job = egui::text::LayoutJob::default();
-        append_text_with_color_emojis(
-            &mut job,
-            sample,
-            0.0,
-            egui::TextFormat {
-                font_id: FontId::new(17.0, FontFamily::Monospace),
-                color: Color32::WHITE,
-                ..Default::default()
-            },
-        );
-        assert_eq!(job.text, sample);
-        // Verify all 4 emoji circles in the sample are given transparent slots so monochrome/tofu never shows
-        let transparent_sections = job
-            .sections
-            .iter()
-            .filter(|s| s.format.color == Color32::TRANSPARENT)
-            .count();
-        assert_eq!(transparent_sections, 4);
     }
 }

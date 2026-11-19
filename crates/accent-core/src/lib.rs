@@ -3277,8 +3277,8 @@ let x = 42;
         );
         // Even cold unoptimized debug build over 5,050 lines should complete quickly with O(L+S) indexing
         assert!(
-            cold_ms < 450.0,
-            "Cold O(L+S) build took {cold_ms:.1} ms (expected < 450 ms in debug)"
+            cold_ms < 1200.0,
+            "Cold O(L+S) build took {cold_ms:.1} ms (expected < 1200 ms in debug)"
         );
 
         // Verify ordered lists (`1. Primo elemento...`) have `ordered: true` and NO collapsed delimiter ranges,

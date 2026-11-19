@@ -12,6 +12,7 @@ use std::sync::Arc;
 pub enum ThemeMode {
     Light,
     Sepia,
+    SemiDark,
     Dark,
 }
 
@@ -20,6 +21,7 @@ impl ThemeMode {
         match s.trim().to_ascii_lowercase().as_str() {
             "light" => Some(Self::Light),
             "sepia" => Some(Self::Sepia),
+            "semidark" | "semi-dark" | "semi_dark" => Some(Self::SemiDark),
             "dark" => Some(Self::Dark),
             _ => None,
         }
@@ -94,14 +96,6 @@ impl I18n {
             (Locale::Es, "copy_html") => "Copiar HTML",
 
             // Main Menu Popover
-            (Locale::It, "hemingway_mode") => "Modalità Hemingway",
-            (Locale::En, "hemingway_mode") => "Hemingway Mode",
-            (Locale::Es, "hemingway_mode") => "Modo Hemingway",
-
-            (Locale::It, "focus_mode") => "Modalità concentrazione",
-            (Locale::En, "focus_mode") => "Focus Mode",
-            (Locale::Es, "focus_mode") => "Modo concentración",
-
             (Locale::It, "fullscreen_mode") => "Schermo intero",
             (Locale::En, "fullscreen_mode") => "Full Screen",
             (Locale::Es, "fullscreen_mode") => "Pantalla completa",
@@ -790,9 +784,6 @@ pub enum Action {
     ToggleSplitPreview,
     ToggleViewWhileTyping,
     SetViewWhileTyping(bool),
-    ToggleHemingway,
-    NotifyHemingwayBlocked,
-    ToggleFocusMode,
     ToggleFullscreen,
     SetFullscreen(bool),
     ToggleToolbar,
@@ -850,8 +841,6 @@ pub struct PersistedSettings {
     pub preview_active: bool,
     pub preview_layout: PreviewLayout,
     pub view_while_typing: bool,
-    pub hemingway_mode: bool,
-    pub focus_mode: bool,
     pub toolbar_expanded: bool,
     pub stat_metric: StatMetric,
     pub selected_export_format: ExportFormat,
@@ -875,8 +864,6 @@ impl Default for PersistedSettings {
             preview_active: false,
             preview_layout: PreviewLayout::HalfWidth,
             view_while_typing: true,
-            hemingway_mode: false,
-            focus_mode: false,
             toolbar_expanded: true,
             stat_metric: StatMetric::Words,
             selected_export_format: ExportFormat::Pdf,
@@ -984,8 +971,6 @@ pub struct Session {
     pub preview_active: bool,
     pub preview_layout: PreviewLayout,
     pub view_while_typing: bool,
-    pub hemingway_mode: bool,
-    pub focus_mode: bool,
     pub fullscreen: bool,
     pub toolbar_expanded: bool,
     pub search_bar_open: bool,
@@ -1120,8 +1105,6 @@ impl Session {
             preview_active: false,
             preview_layout: PreviewLayout::HalfWidth,
             view_while_typing: true,
-            hemingway_mode: false,
-            focus_mode: false,
             fullscreen: false,
             toolbar_expanded: true,
             search_bar_open: false,
@@ -1449,8 +1432,6 @@ impl Session {
             preview_active: self.preview_active,
             preview_layout: self.preview_layout,
             view_while_typing: self.view_while_typing,
-            hemingway_mode: false,
-            focus_mode: self.focus_mode,
             toolbar_expanded: self.toolbar_expanded,
             stat_metric: self.stat_metric,
             selected_export_format: self.selected_export_format,
@@ -1497,10 +1478,6 @@ impl Session {
         self.preview_active = settings.preview_active;
         self.preview_layout = settings.preview_layout;
         self.view_while_typing = settings.view_while_typing;
-        // Hemingway mode is a per-session writing mode and must never start enabled across restarts
-        // so the user is never unexpectedly locked out of deleting text.
-        self.hemingway_mode = false;
-        self.focus_mode = settings.focus_mode;
         self.toolbar_expanded = settings.toolbar_expanded;
         self.stat_metric = settings.stat_metric;
         self.selected_export_format = settings.selected_export_format;
@@ -1607,6 +1584,7 @@ impl Session {
         let m_theme = match self.theme {
             ThemeMode::Light => MermaidTheme::Light,
             ThemeMode::Sepia => MermaidTheme::Sepia,
+            ThemeMode::SemiDark => MermaidTheme::SemiDark,
             ThemeMode::Dark => MermaidTheme::Dark,
         };
         self.mermaid_cache
@@ -1942,8 +1920,6 @@ impl Session {
                 | Action::ToggleSplitPreview
                 | Action::ToggleViewWhileTyping
                 | Action::SetViewWhileTyping(_)
-                | Action::ToggleHemingway
-                | Action::ToggleFocusMode
                 | Action::ToggleToolbar
                 | Action::NewDocument
                 | Action::NewTab
@@ -2056,22 +2032,6 @@ impl Session {
                     self.preview_active = false;
                 }
             }
-            Action::ToggleHemingway => {
-                self.hemingway_mode = !self.hemingway_mode;
-                self.chrome_autohidden = false;
-                self.status_message = Some(if self.hemingway_mode {
-                    "Modalità Hemingway attiva (cancellazione disabilitata)".to_string()
-                } else {
-                    "Modalità Hemingway disattivata".to_string()
-                });
-            }
-            Action::NotifyHemingwayBlocked => {
-                self.chrome_autohidden = false;
-                self.status_message = Some(
-                    "Modalità Hemingway attiva: cancellazione bloccata".to_string(),
-                );
-            }
-            Action::ToggleFocusMode => self.focus_mode = !self.focus_mode,
             Action::ToggleFullscreen => {
                 self.fullscreen = !self.fullscreen;
                 self.chrome_autohidden = false;
@@ -2995,8 +2955,6 @@ impl Session {
             "preview_active": self.preview_active,
             "preview_layout": self.preview_layout,
             "view_while_typing": self.view_while_typing,
-            "hemingway_mode": self.hemingway_mode,
-            "focus_mode": self.focus_mode,
             "cursor": self.buffer.cursor(),
             "live_span_count": live_spans.len(),
             "stats": stats,
@@ -3203,8 +3161,6 @@ mod tests {
             session.apply(Action::SetCodeFont("JetBrains Mono".to_string()));
             session.apply(Action::SetFontSize(19.5));
             session.apply(Action::SetLineHeight(1.65));
-            session.apply(Action::ToggleHemingway);
-            session.apply(Action::ToggleFocusMode);
             session.apply(Action::SetStatMetric(StatMetric::ReadingTime));
             // Close Preferences dialog -> triggers automatic save_settings()
             session.apply(Action::SetOverlay(ActiveOverlay::None));
@@ -3226,8 +3182,6 @@ mod tests {
         assert_eq!(restored.typography.code_font_family, "JetBrains Mono");
         assert!((restored.typography.font_size - 19.5).abs() < 1e-4);
         assert!((restored.typography.line_height - 1.65).abs() < 1e-4);
-        assert!(!restored.hemingway_mode);
-        assert!(restored.focus_mode);
         assert_eq!(restored.stat_metric, StatMetric::ReadingTime);
         assert_eq!(restored.file_dialog_dir, docs_folder);
         assert_eq!(restored.current_file_path, Some(note_path.clone()));
@@ -3743,9 +3697,9 @@ mod tests {
     }
 
     #[test]
-    fn test_hemingway_mode_never_persists_across_restarts_and_cursor_moves_do_not_trigger_wal_writes() {
+    fn test_legacy_settings_json_backward_compatibility_and_cursor_moves_do_not_trigger_wal_writes() {
         let base_dir = std::env::temp_dir().join(format!(
-            "accent_hemingway_and_wal_test_{}",
+            "accent_legacy_settings_and_wal_test_{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&base_dir);
@@ -3757,11 +3711,11 @@ mod tests {
         let sample = "Paragrafo valido.\n\n____testo vecchio da cancellare_ start___ \n* **`B_Tipo_Notifica__c`** (Constant String)\n#### Stato della notifica (campo `Status__c`)\n____testo vecchio da cancellare_end___\n\n### 3.5 Stato del processo di notifica\n";
         accent_storage::atomic_save(&doc_path, sample).unwrap();
 
-        // Simulate a legacy settings.json with `"hemingway_mode": true`
+        // Simulate a legacy settings.json containing removed fields `"hemingway_mode": true` and `"focus_mode": true`
         std::fs::write(
             &config_path,
             format!(
-                r#"{{"hemingway_mode": true, "open_tab_files": ["{}"], "active_tab_index": 0}}"#,
+                r#"{{"theme": "SemiDark", "hemingway_mode": true, "focus_mode": true, "open_tab_files": ["{}"], "active_tab_index": 0}}"#,
                 doc_path.display()
             ),
         )
@@ -3769,8 +3723,7 @@ mod tests {
 
         let mut session =
             Session::with_config_and_recovery(config_path.clone(), recovery_dir.clone());
-        // Hemingway mode MUST be reset to false on startup so deletions are never blocked across sessions
-        assert!(!session.hemingway_mode);
+        assert_eq!(session.theme, ThemeMode::SemiDark);
         assert!(session
             .buffer
             .text()
@@ -3798,6 +3751,26 @@ mod tests {
         ));
 
         let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn test_theme_mode_semidark_parsing_serialization_and_mermaid_bridge() {
+        assert_eq!(ThemeMode::from_str_name("semidark"), Some(ThemeMode::SemiDark));
+        assert_eq!(ThemeMode::from_str_name("semi-dark"), Some(ThemeMode::SemiDark));
+        assert_eq!(ThemeMode::from_str_name("semi_dark"), Some(ThemeMode::SemiDark));
+        assert_eq!(ThemeMode::from_str_name("Semi-Dark"), Some(ThemeMode::SemiDark));
+        assert_eq!(ThemeMode::from_str_name("SEMI_DARK"), Some(ThemeMode::SemiDark));
+        assert_eq!(ThemeMode::from_str_name("light"), Some(ThemeMode::Light));
+        assert_eq!(ThemeMode::from_str_name("sepia"), Some(ThemeMode::Sepia));
+        assert_eq!(ThemeMode::from_str_name("dark"), Some(ThemeMode::Dark));
+
+        let mut session = Session::default();
+        session.apply(Action::SetTheme(ThemeMode::SemiDark));
+        assert_eq!(session.theme, ThemeMode::SemiDark);
+
+        let diagram = session.render_mermaid("flowchart LR\n  A[Start] --> B[End]");
+        assert_eq!(diagram.theme, MermaidTheme::SemiDark);
+        assert!(diagram.svg.contains("#2B2E33") || diagram.svg.contains("#2E3136"));
     }
 
     #[test]
