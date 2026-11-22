@@ -36,6 +36,7 @@
   import { toml } from '@codemirror/legacy-modes/mode/toml';
   import { styleTags, tags, Tag } from '@lezer/highlight';
   import { getOrFetchMermaidSvg, renderLatexToHtml } from './mathAndMermaid';
+  import { charToUtf16Offset, utf16ToCharOffset } from './textOffsets';
   import type { ThemeMode } from './types';
 
   const shellLanguage = StreamLanguage.define(shell);
@@ -99,6 +100,7 @@
     activeTabId: number;
     bufferText: string;
     bufferRevision: number;
+    externalSyncToken: number;
     cursorChar: number;
     selectionStartChar: number;
     selectionEndChar: number;
@@ -110,6 +112,8 @@
     lineHeight: number;
     columnMaxWidth: string;
     columnPaddingX: string;
+    searchQuery?: string;
+    searchBarOpen?: boolean;
     chromeHidden?: boolean;
     readOnly?: boolean;
     onEdit: (text: string, selPrimary: number, selSecondary: number, isDocChanged: boolean) => void;
@@ -118,7 +122,8 @@
   let {
     activeTabId,
     bufferText,
-    bufferRevision,
+    bufferRevision: _bufferRevision,
+    externalSyncToken,
     cursorChar,
     selectionStartChar,
     selectionEndChar,
@@ -130,6 +135,8 @@
     lineHeight,
     columnMaxWidth,
     columnPaddingX,
+    searchQuery = '',
+    searchBarOpen = false,
     chromeHidden = false,
     readOnly = false,
     onEdit,
@@ -138,14 +145,13 @@
   let hostEl: HTMLDivElement | undefined = $state();
   let view: EditorView | null = null;
   let lastLoadedTabId = -1;
-  let lastKnownText = '';
-  let lastAppliedSelStart = 0;
-  let lastAppliedSelEnd = 0;
+  let lastAppliedSyncToken = -1;
   let suppressOutgoing = false;
 
   const themeCompartment = new Compartment();
   const readOnlyCompartment = new Compartment();
   const livePreviewCompartment = new Compartment();
+  const searchHighlightCompartment = new Compartment();
   const refreshLivePreviewEffect = StateEffect.define<boolean>();
 
   class KatexMathWidget extends WidgetType {
@@ -192,19 +198,22 @@
     code: string;
     theme: ThemeMode;
     targetPos: number;
+    svgHtml: string | null;
 
-    constructor(code: string, theme: ThemeMode, targetPos: number) {
+    constructor(code: string, theme: ThemeMode, targetPos: number, svgHtml: string | null) {
       super();
       this.code = code;
       this.theme = theme;
       this.targetPos = targetPos;
+      this.svgHtml = svgHtml;
     }
 
     eq(other: MermaidSvgWidget): boolean {
       return (
         this.code === other.code &&
         this.theme === other.theme &&
-        this.targetPos === other.targetPos
+        this.targetPos === other.targetPos &&
+        this.svgHtml === other.svgHtml
       );
     }
 
@@ -214,9 +223,13 @@
       wrap.dataset.testid = 'cm-mermaid-widget';
       wrap.title = 'Clicca per modificare il diagramma Mermaid';
 
-      const cachedSvg = getOrFetchMermaidSvg(this.code, this.theme, () => {
-        view.dispatch({ effects: refreshLivePreviewEffect.of(true) });
-      });
+      const cachedSvg =
+        this.svgHtml ??
+        getOrFetchMermaidSvg(this.code, this.theme, () => {
+          queueMicrotask(() => {
+            view.dispatch({ effects: refreshLivePreviewEffect.of(true) });
+          });
+        });
 
       if (cachedSvg) {
         wrap.innerHTML = cachedSvg;
@@ -324,17 +337,43 @@
           if (enabled && fenceLang === 'mermaid' && !caretInsideBlock) {
             const mermaidCode = bodyLines.join('\n');
             const firstLine = doc.line(startLineNum);
-            ranges.push(
-              Decoration.widget({
-                widget: new MermaidSvgWidget(mermaidCode, currentTheme, firstLine.from),
-                side: -1,
-              }).range(firstLine.from)
-            );
-            for (let ln = startLineNum; ln <= endLineNum; ln++) {
+            const cachedSvg = getOrFetchMermaidSvg(mermaidCode, currentTheme, () => {
+              queueMicrotask(() => {
+                view.dispatch({ effects: refreshLivePreviewEffect.of(true) });
+              });
+            });
+            if (firstLine.to > firstLine.from) {
+              ranges.push(
+                Decoration.replace({
+                  widget: new MermaidSvgWidget(
+                    mermaidCode,
+                    currentTheme,
+                    firstLine.from,
+                    cachedSvg
+                  ),
+                }).range(firstLine.from, firstLine.to)
+              );
+            } else {
+              ranges.push(
+                Decoration.widget({
+                  widget: new MermaidSvgWidget(
+                    mermaidCode,
+                    currentTheme,
+                    firstLine.from,
+                    cachedSvg
+                  ),
+                  side: -1,
+                }).range(firstLine.from)
+              );
+            }
+            for (let ln = startLineNum + 1; ln <= endLineNum; ln++) {
               const l = doc.line(ln);
               ranges.push(
                 Decoration.line({ class: 'cm-live-mermaid-hidden-line' }).range(l.from)
               );
+              if (l.to > l.from) {
+                ranges.push(Decoration.replace({}).range(l.from, l.to));
+              }
             }
           } else {
             for (let ln = startLineNum; ln <= endLineNum; ln++) {
@@ -400,17 +439,28 @@
           const caretInsideMath = isCaretOnLines(startLineNum, endLineNum);
           if (!caretInsideMath) {
             const firstLine = doc.line(startLineNum);
-            ranges.push(
-              Decoration.widget({
-                widget: new KatexMathWidget(mathLines.join('\n'), true, firstLine.from),
-                side: -1,
-              }).range(firstLine.from)
-            );
-            for (let ln = startLineNum; ln <= endLineNum; ln++) {
+            if (firstLine.to > firstLine.from) {
+              ranges.push(
+                Decoration.replace({
+                  widget: new KatexMathWidget(mathLines.join('\n'), true, firstLine.from),
+                }).range(firstLine.from, firstLine.to)
+              );
+            } else {
+              ranges.push(
+                Decoration.widget({
+                  widget: new KatexMathWidget(mathLines.join('\n'), true, firstLine.from),
+                  side: -1,
+                }).range(firstLine.from)
+              );
+            }
+            for (let ln = startLineNum + 1; ln <= endLineNum; ln++) {
               const l = doc.line(ln);
               ranges.push(
                 Decoration.line({ class: 'cm-live-mermaid-hidden-line' }).range(l.from)
               );
+              if (l.to > l.from) {
+                ranges.push(Decoration.replace({}).range(l.from, l.to));
+              }
             }
           }
           lineNum = endLineNum + 1;
@@ -768,13 +818,64 @@
     });
   }
 
+  function buildSearchDecorations(view: EditorView, activeQuery: string): DecorationSet {
+    if (!activeQuery) return Decoration.none;
+    const needle = activeQuery.toLowerCase();
+    if (!needle) return Decoration.none;
+    const doc = view.state.doc;
+    const sel = view.state.selection.main;
+    const ranges: Range<Decoration>[] = [];
+    for (let ln = 1; ln <= doc.lines; ln++) {
+      const line = doc.line(ln);
+      const lower = line.text.toLowerCase();
+      let idx = 0;
+      while (idx <= lower.length - needle.length) {
+        const found = lower.indexOf(needle, idx);
+        if (found === -1) break;
+        const from = line.from + found;
+        const to = from + needle.length;
+        if (to <= line.to && to > from) {
+          const isCurrent = sel.from === from && sel.to === to;
+          ranges.push(
+            Decoration.mark({
+              class: isCurrent ? 'cm-search-match cm-search-match-current' : 'cm-search-match',
+            }).range(from, to)
+          );
+        }
+        idx = found + Math.max(1, needle.length);
+      }
+    }
+    return Decoration.set(ranges, true);
+  }
+
+  function createSearchHighlightPlugin(activeQuery: string) {
+    return ViewPlugin.fromClass(
+      class {
+        decorations: DecorationSet;
+        constructor(view: EditorView) {
+          this.decorations = buildSearchDecorations(view, activeQuery);
+        }
+        update(update: ViewUpdate) {
+          if (update.docChanged || update.selectionSet || update.viewportChanged) {
+            this.decorations = buildSearchDecorations(update.view, activeQuery);
+          }
+        }
+      },
+      {
+        decorations: (v) => v.decorations,
+      }
+    );
+  }
+
   export function focusEditor() {
     view?.focus();
   }
 
   export function scrollToCharOffset(charOffset: number) {
     if (!view) return;
-    const clamped = Math.max(0, Math.min(charOffset, view.state.doc.length));
+    const txt = view.state.doc.toString();
+    const u16 = charToUtf16Offset(txt, charOffset);
+    const clamped = Math.max(0, Math.min(u16, view.state.doc.length));
     suppressOutgoing = true;
     view.dispatch({
       selection: { anchor: clamped, head: clamped },
@@ -784,19 +885,38 @@
     view.focus();
   }
 
+  function resolveUtf16Selection(
+    txt: string,
+    selStartChar: number,
+    selEndChar: number,
+    curChar: number
+  ): { anchor: number; head: number } {
+    const startU16 = Math.min(charToUtf16Offset(txt, selStartChar), txt.length);
+    const endU16 = Math.min(charToUtf16Offset(txt, selEndChar), txt.length);
+    const curU16 = Math.min(charToUtf16Offset(txt, curChar), txt.length);
+    if (endU16 > startU16) {
+      if (curChar === selStartChar) {
+        return { anchor: endU16, head: startU16 };
+      }
+      return { anchor: startU16, head: endU16 };
+    }
+    return { anchor: curU16, head: curU16 };
+  }
+
   onMount(() => {
     if (!hostEl) return;
     lastLoadedTabId = activeTabId;
-    lastKnownText = bufferText;
-    lastAppliedSelStart = selectionStartChar;
-    lastAppliedSelEnd = selectionEndChar;
+    lastAppliedSyncToken = externalSyncToken;
+    const initSel = resolveUtf16Selection(
+      bufferText,
+      selectionStartChar,
+      selectionEndChar,
+      cursorChar
+    );
 
     const startState = EditorState.create({
       doc: bufferText,
-      selection: {
-        anchor: Math.min(selectionStartChar, bufferText.length),
-        head: Math.min(cursorChar, bufferText.length),
-      },
+      selection: initSel,
       extensions: [
         highlightSpecialChars(),
         drawSelection(),
@@ -824,15 +944,17 @@
         themeCompartment.of(buildEditorTheme()),
         readOnlyCompartment.of(EditorState.readOnly.of(readOnly)),
         livePreviewCompartment.of(createLivePreviewPlugin(viewWhileTyping, themeMode)),
+        searchHighlightCompartment.of(
+          createSearchHighlightPlugin(searchBarOpen ? searchQuery : '')
+        ),
         EditorView.updateListener.of((update) => {
           if (suppressOutgoing) return;
           if (update.docChanged || update.selectionSet) {
             const txt = update.state.doc.toString();
-            lastKnownText = txt;
             const mainSel = update.state.selection.main;
-            lastAppliedSelStart = Math.min(mainSel.anchor, mainSel.head);
-            lastAppliedSelEnd = Math.max(mainSel.anchor, mainSel.head);
-            onEdit(txt, mainSel.head, mainSel.anchor, update.docChanged);
+            const headChar = utf16ToCharOffset(txt, mainSel.head);
+            const anchorChar = utf16ToCharOffset(txt, mainSel.anchor);
+            onEdit(txt, headChar, anchorChar, update.docChanged);
           }
         }),
       ],
@@ -845,48 +967,39 @@
   });
 
   $effect(() => {
-    // React to tab switches, external buffer changes (formatting, file open, undo/redo), or external selection jumps (FindNext/Outline)
+    // React only to tab switches or explicit backend-originated mutations (externalSyncToken)
     const tabChanged = activeTabId !== lastLoadedTabId;
-    const textChangedExternally = bufferText !== lastKnownText;
-    const selChangedExternally =
-      selectionStartChar !== lastAppliedSelStart || selectionEndChar !== lastAppliedSelEnd;
-    const _rev = bufferRevision;
+    const syncRequested = externalSyncToken !== lastAppliedSyncToken;
 
-    if (view && (tabChanged || textChangedExternally)) {
+    if (view && (tabChanged || syncRequested)) {
       lastLoadedTabId = activeTabId;
-      lastKnownText = bufferText;
-      lastAppliedSelStart = selectionStartChar;
-      lastAppliedSelEnd = selectionEndChar;
+      lastAppliedSyncToken = externalSyncToken;
       suppressOutgoing = true;
-      const anchor = Math.min(selectionStartChar, bufferText.length);
-      const head = Math.min(
-        selectionEndChar > selectionStartChar ? selectionEndChar : cursorChar,
-        bufferText.length
+      const curDoc = view.state.doc.toString();
+      const nextSel = resolveUtf16Selection(
+        bufferText,
+        selectionStartChar,
+        selectionEndChar,
+        cursorChar
       );
-      view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: bufferText },
-        selection: { anchor, head },
-      });
-      suppressOutgoing = false;
-    } else if (view && selChangedExternally) {
-      lastAppliedSelStart = selectionStartChar;
-      lastAppliedSelEnd = selectionEndChar;
-      suppressOutgoing = true;
-      const anchor = Math.min(selectionStartChar, view.state.doc.length);
-      const head = Math.min(
-        selectionEndChar > selectionStartChar ? selectionEndChar : cursorChar,
-        view.state.doc.length
-      );
-      view.dispatch({
-        selection: { anchor, head },
-        effects: EditorView.scrollIntoView(head, { y: 'center' }),
-      });
+      if (tabChanged || curDoc !== bufferText) {
+        view.dispatch({
+          changes: { from: 0, to: view.state.doc.length, insert: bufferText },
+          selection: nextSel,
+          ...(tabChanged ? {} : { effects: EditorView.scrollIntoView(nextSel.head, { y: 'nearest' }) }),
+        });
+      } else {
+        view.dispatch({
+          selection: nextSel,
+          effects: EditorView.scrollIntoView(nextSel.head, { y: 'center' }),
+        });
+      }
       suppressOutgoing = false;
     }
   });
 
   $effect(() => {
-    // Reconfigure typography, column geometry, view-while-typing, and theme dynamically
+    // Reconfigure typography, column geometry, view-while-typing, search highlights, and theme dynamically
     const _pf = proseFont;
     const _cf = codeFont;
     const _fs = fontSize;
@@ -896,6 +1009,7 @@
     const _ro = readOnly;
     const _vwt = viewWhileTyping;
     const _tm = themeMode;
+    const activeSearch = searchBarOpen ? searchQuery : '';
     if (view) {
       view.dispatch({
         effects: [
@@ -904,6 +1018,7 @@
           livePreviewCompartment.reconfigure(
             createLivePreviewPlugin(viewWhileTyping, themeMode)
           ),
+          searchHighlightCompartment.reconfigure(createSearchHighlightPlugin(activeSearch)),
         ],
       });
     }
@@ -1121,5 +1236,16 @@
     display: block;
     max-width: 100%;
     height: auto;
+  }
+
+  :global(.cm-search-match) {
+    background-color: color-mix(in srgb, var(--accent-orange) 22%, transparent);
+    border-radius: 3px;
+  }
+
+  :global(.cm-search-match-current) {
+    background-color: color-mix(in srgb, var(--accent-orange) 48%, transparent);
+    outline: 1.5px solid var(--accent-orange);
+    border-radius: 3px;
   }
 </style>

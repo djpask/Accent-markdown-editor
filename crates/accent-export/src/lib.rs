@@ -63,6 +63,7 @@ pub fn render_markdown_to_html(markdown: &str) -> String {
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
+    opts.insert(Options::ENABLE_MATH);
     let parser = Parser::new_ext(markdown, opts);
     let mut html_out = String::new();
     html::push_html(&mut html_out, parser);

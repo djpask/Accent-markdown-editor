@@ -110,24 +110,298 @@ fn update_editor_buffer(
     Ok(build_session_snapshot(&session))
 }
 
+#[cfg(target_os = "linux")]
+async fn pick_open_file_native(
+    app: &AppHandle,
+    dir: PathBuf,
+    title: String,
+    accept_label: String,
+    cancel_label: String,
+    md_filter_label: String,
+    all_filter_label: String,
+) -> Option<PathBuf> {
+    use gtk::prelude::{FileChooserExt, NativeDialogExt};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Option<PathBuf>>(1);
+    let app_for_ui = app.clone();
+    if app
+        .run_on_main_thread(move || {
+            let gtk_win = app_for_ui
+                .get_webview_window("main")
+                .and_then(|w| w.gtk_window().ok());
+            let dialog = gtk::FileChooserNative::new(
+                Some(&title),
+                gtk_win.as_ref(),
+                gtk::FileChooserAction::Open,
+                Some(&accept_label),
+                Some(&cancel_label),
+            );
+            dialog.set_modal(true);
+            dialog.set_local_only(true);
+            if dir.is_dir() {
+                let _ = dialog.set_current_folder(&dir);
+            }
+
+            let md_filter = gtk::FileFilter::new();
+            md_filter.set_name(Some(&md_filter_label));
+            for pat in ["*.md", "*.markdown", "*.mdown", "*.mkd", "*.txt"] {
+                md_filter.add_pattern(pat);
+            }
+            dialog.add_filter(md_filter);
+
+            let all_filter = gtk::FileFilter::new();
+            all_filter.set_name(Some(&all_filter_label));
+            all_filter.add_pattern("*");
+            dialog.add_filter(all_filter);
+
+            let holder: Rc<RefCell<Option<gtk::FileChooserNative>>> =
+                Rc::new(RefCell::new(Some(dialog.clone())));
+            let holder_cb = Rc::clone(&holder);
+            let tx_cell = RefCell::new(Some(tx));
+
+            dialog.connect_response(move |dlg, resp| {
+                let picked = if resp == gtk::ResponseType::Accept {
+                    dlg.filename()
+                } else {
+                    None
+                };
+                dlg.destroy();
+                if let Some(sender) = tx_cell.borrow_mut().take() {
+                    let _ = sender.send(picked);
+                }
+                let _ = holder_cb.borrow_mut().take();
+            });
+
+            dialog.show();
+        })
+        .is_err()
+    {
+        return None;
+    }
+
+    tauri::async_runtime::spawn_blocking(move || rx.recv().ok().flatten())
+        .await
+        .ok()
+        .flatten()
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn pick_open_file_native(
+    app: &AppHandle,
+    dir: PathBuf,
+    title: String,
+    _accept_label: String,
+    _cancel_label: String,
+    md_filter_label: String,
+    all_filter_label: String,
+) -> Option<PathBuf> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Option<PathBuf>>(1);
+    let mut builder = app
+        .dialog()
+        .file()
+        .set_title(&title)
+        .add_filter(&md_filter_label, &["md", "markdown", "mdown", "mkd", "txt"])
+        .add_filter(&all_filter_label, &["*"]);
+    if dir.is_dir() {
+        builder = builder.set_directory(&dir);
+    }
+    if let Some(win) = app.get_webview_window("main") {
+        builder = builder.set_parent(&win);
+    }
+    builder.pick_file(move |fp| {
+        let _ = tx.send(fp.and_then(|p| p.into_path().ok()));
+    });
+    tauri::async_runtime::spawn_blocking(move || rx.recv().ok().flatten())
+        .await
+        .ok()
+        .flatten()
+}
+
+#[cfg(target_os = "linux")]
+async fn pick_save_file_native(
+    app: &AppHandle,
+    dir: PathBuf,
+    default_file_name: String,
+    title: String,
+    accept_label: String,
+    cancel_label: String,
+    filter_label: String,
+    extensions: Vec<String>,
+    all_filter_label: String,
+) -> Option<PathBuf> {
+    use gtk::prelude::{FileChooserExt, NativeDialogExt};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let primary_ext = extensions.first().cloned();
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Option<PathBuf>>(1);
+    let app_for_ui = app.clone();
+    if app
+        .run_on_main_thread(move || {
+            let gtk_win = app_for_ui
+                .get_webview_window("main")
+                .and_then(|w| w.gtk_window().ok());
+            let dialog = gtk::FileChooserNative::new(
+                Some(&title),
+                gtk_win.as_ref(),
+                gtk::FileChooserAction::Save,
+                Some(&accept_label),
+                Some(&cancel_label),
+            );
+            dialog.set_modal(true);
+            dialog.set_local_only(true);
+            dialog.set_create_folders(true);
+            dialog.set_do_overwrite_confirmation(true);
+            if dir.is_dir() {
+                let _ = dialog.set_current_folder(&dir);
+            }
+            if !default_file_name.is_empty() {
+                dialog.set_current_name(&default_file_name);
+            }
+
+            if !extensions.is_empty() {
+                let fmt_filter = gtk::FileFilter::new();
+                fmt_filter.set_name(Some(&filter_label));
+                for ext in &extensions {
+                    fmt_filter.add_pattern(&format!("*.{ext}"));
+                }
+                dialog.add_filter(fmt_filter);
+            }
+
+            let all_filter = gtk::FileFilter::new();
+            all_filter.set_name(Some(&all_filter_label));
+            all_filter.add_pattern("*");
+            dialog.add_filter(all_filter);
+
+            let holder: Rc<RefCell<Option<gtk::FileChooserNative>>> =
+                Rc::new(RefCell::new(Some(dialog.clone())));
+            let holder_cb = Rc::clone(&holder);
+            let tx_cell = RefCell::new(Some(tx));
+
+            dialog.connect_response(move |dlg, resp| {
+                let picked = if resp == gtk::ResponseType::Accept {
+                    dlg.filename()
+                } else {
+                    None
+                };
+                dlg.destroy();
+                if let Some(sender) = tx_cell.borrow_mut().take() {
+                    let _ = sender.send(picked);
+                }
+                let _ = holder_cb.borrow_mut().take();
+            });
+
+            dialog.show();
+        })
+        .is_err()
+    {
+        return None;
+    }
+
+    let picked = tauri::async_runtime::spawn_blocking(move || rx.recv().ok().flatten())
+        .await
+        .ok()
+        .flatten()?;
+    if picked.extension().is_none() {
+        if let Some(ext) = primary_ext {
+            return Some(picked.with_extension(ext));
+        }
+    }
+    Some(picked)
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn pick_save_file_native(
+    app: &AppHandle,
+    dir: PathBuf,
+    default_file_name: String,
+    title: String,
+    _accept_label: String,
+    _cancel_label: String,
+    filter_label: String,
+    extensions: Vec<String>,
+    all_filter_label: String,
+) -> Option<PathBuf> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let primary_ext = extensions.first().cloned();
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Option<PathBuf>>(1);
+    let ext_refs: Vec<&str> = extensions.iter().map(String::as_str).collect();
+    let mut builder = app.dialog().file().set_title(&title);
+    if !ext_refs.is_empty() {
+        builder = builder.add_filter(&filter_label, &ext_refs);
+    }
+    builder = builder.add_filter(&all_filter_label, &["*"]);
+    if dir.is_dir() {
+        builder = builder.set_directory(&dir);
+    }
+    if !default_file_name.is_empty() {
+        builder = builder.set_file_name(&default_file_name);
+    }
+    if let Some(win) = app.get_webview_window("main") {
+        builder = builder.set_parent(&win);
+    }
+    builder.save_file(move |fp| {
+        let _ = tx.send(fp.and_then(|p| p.into_path().ok()));
+    });
+    let picked = tauri::async_runtime::spawn_blocking(move || rx.recv().ok().flatten())
+        .await
+        .ok()
+        .flatten()?;
+    if picked.extension().is_none() {
+        if let Some(ext) = primary_ext {
+            return Some(picked.with_extension(ext));
+        }
+    }
+    Some(picked)
+}
+
 #[tauri::command]
-fn open_native_file_dialog(
+async fn open_native_file_dialog(
+    app: AppHandle,
     state: State<'_, Arc<TauriAppState>>,
 ) -> Result<UiSessionSnapshot, String> {
-    let dir = {
-        let session = state.session.lock().map_err(|e| e.to_string())?;
-        session.file_dialog_dir.clone()
-    };
-    let is_headless_xvfb = std::env::var("DISPLAY").as_deref() == Ok(":99");
-    if is_headless_xvfb {
+    let (dir, title, accept_lbl, cancel_lbl, md_lbl, all_lbl) = {
         let mut session = state.session.lock().map_err(|e| e.to_string())?;
-        session.apply(Action::SetOverlay(accent_session::ActiveOverlay::OpenFileDialog));
-        return Ok(build_session_snapshot(&session));
-    }
-    let picked = rfd::FileDialog::new()
-        .add_filter("Markdown", &["md", "markdown", "txt"])
-        .set_directory(&dir)
-        .pick_file();
+        if session.overlay != accent_session::ActiveOverlay::None {
+            session.apply(Action::SetOverlay(accent_session::ActiveOverlay::None));
+        }
+        let i18n = ui::build_i18n_map(session.locale);
+        (
+            session.file_dialog_dir.clone(),
+            i18n.get("open_file")
+                .cloned()
+                .unwrap_or_else(|| "Open".to_string()),
+            i18n.get("dialog_accept_open")
+                .cloned()
+                .unwrap_or_else(|| "Open".to_string()),
+            i18n.get("cancel")
+                .cloned()
+                .unwrap_or_else(|| "Cancel".to_string()),
+            i18n.get("dialog_md_files")
+                .cloned()
+                .unwrap_or_else(|| "Markdown".to_string()),
+            i18n.get("dialog_all_files")
+                .cloned()
+                .unwrap_or_else(|| "All Files".to_string()),
+        )
+    };
+
+    let picked = pick_open_file_native(
+        &app,
+        dir,
+        title,
+        accept_lbl,
+        cancel_lbl,
+        md_lbl,
+        all_lbl,
+    )
+    .await;
+
     let mut session = state.session.lock().map_err(|e| e.to_string())?;
     if let Some(path) = picked {
         session.apply(Action::OpenFile(path));
@@ -140,29 +414,57 @@ fn open_native_file_dialog(
 }
 
 #[tauri::command]
-fn save_as_native_file_dialog(
+async fn save_as_native_file_dialog(
+    app: AppHandle,
     state: State<'_, Arc<TauriAppState>>,
 ) -> Result<UiSessionSnapshot, String> {
-    let (dir, file_name) = {
-        let session = state.session.lock().map_err(|e| e.to_string())?;
-        (session.file_dialog_dir.clone(), session.document_title.clone())
-    };
-    let is_headless_xvfb = std::env::var("DISPLAY").as_deref() == Ok(":99");
-    if is_headless_xvfb {
+    let (dir, file_name, title, accept_lbl, cancel_lbl, md_lbl, all_lbl) = {
         let mut session = state.session.lock().map_err(|e| e.to_string())?;
-        let target = dir.join(&file_name);
-        state.sync_file_watcher(Some(target.clone()), Some(180));
-        session.apply(Action::SaveAsFile(target.clone()));
-        let snap = build_session_snapshot(&session);
-        drop(session);
-        state.sync_file_watcher(Some(target), None);
-        return Ok(snap);
-    }
-    let saved = rfd::FileDialog::new()
-        .add_filter("Markdown", &["md", "markdown"])
-        .set_directory(&dir)
-        .set_file_name(&file_name)
-        .save_file();
+        if session.overlay != accent_session::ActiveOverlay::None {
+            session.apply(Action::SetOverlay(accent_session::ActiveOverlay::None));
+        }
+        let initial_dir = session
+            .current_file_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .filter(|p| p.is_dir() && *p != std::env::temp_dir().as_path())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| session.file_dialog_dir.clone());
+        let i18n = ui::build_i18n_map(session.locale);
+        (
+            initial_dir,
+            session.document_title.clone(),
+            i18n.get("save_as")
+                .cloned()
+                .unwrap_or_else(|| "Save As".to_string()),
+            i18n.get("dialog_accept_save")
+                .cloned()
+                .unwrap_or_else(|| "Save".to_string()),
+            i18n.get("cancel")
+                .cloned()
+                .unwrap_or_else(|| "Cancel".to_string()),
+            i18n.get("dialog_md_files")
+                .cloned()
+                .unwrap_or_else(|| "Markdown".to_string()),
+            i18n.get("dialog_all_files")
+                .cloned()
+                .unwrap_or_else(|| "All Files".to_string()),
+        )
+    };
+
+    let saved = pick_save_file_native(
+        &app,
+        dir,
+        file_name,
+        title,
+        accept_lbl,
+        cancel_lbl,
+        md_lbl,
+        vec!["md".to_string(), "markdown".to_string()],
+        all_lbl,
+    )
+    .await;
+
     let mut session = state.session.lock().map_err(|e| e.to_string())?;
     if let Some(path) = saved {
         state.sync_file_watcher(Some(path.clone()), Some(180));
@@ -173,6 +475,144 @@ fn save_as_native_file_dialog(
     drop(session);
     state.sync_file_watcher(cur_path, None);
     Ok(snap)
+}
+
+#[tauri::command]
+async fn export_with_native_dialog(
+    app: AppHandle,
+    state: State<'_, Arc<TauriAppState>>,
+    format: Option<accent_session::ExportFormat>,
+    execute_immediately: bool,
+) -> Result<UiSessionSnapshot, String> {
+    let (dir, file_name, title, accept_lbl, cancel_lbl, filter_lbl, ext_str, all_lbl) = {
+        let mut session = state.session.lock().map_err(|e| e.to_string())?;
+        if let Some(fmt) = format {
+            session.apply(Action::SelectExportFormat(fmt));
+        }
+        if execute_immediately && session.overlay != accent_session::ActiveOverlay::None {
+            session.apply(Action::SetOverlay(accent_session::ActiveOverlay::None));
+        }
+        let fmt = session.selected_export_format;
+        let ext = fmt.extension().to_string();
+        let stem = session
+            .document_title
+            .trim_end_matches(".md")
+            .trim_end_matches(".markdown");
+        let existing_out = PathBuf::from(session.export_output_path.trim());
+        let initial_dir = session
+            .current_file_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .filter(|p| p.is_dir() && *p != std::env::temp_dir().as_path())
+            .map(PathBuf::from)
+            .or_else(|| {
+                existing_out
+                    .parent()
+                    .filter(|p| p.is_dir() && *p != std::env::temp_dir().as_path())
+                    .map(PathBuf::from)
+            })
+            .unwrap_or_else(|| session.file_dialog_dir.clone());
+        let default_name = format!("{stem}.{ext}");
+        let i18n = ui::build_i18n_map(session.locale);
+        (
+            initial_dir,
+            default_name,
+            format!(
+                "{} ({})",
+                i18n.get("export_btn")
+                    .cloned()
+                    .unwrap_or_else(|| "Export".to_string()),
+                fmt.sidebar_label()
+            ),
+            i18n.get("export_btn")
+                .cloned()
+                .unwrap_or_else(|| "Export".to_string()),
+            i18n.get("cancel")
+                .cloned()
+                .unwrap_or_else(|| "Cancel".to_string()),
+            fmt.sidebar_label().to_string(),
+            ext,
+            i18n.get("dialog_all_files")
+                .cloned()
+                .unwrap_or_else(|| "All Files".to_string()),
+        )
+    };
+
+    let chosen = pick_save_file_native(
+        &app,
+        dir,
+        file_name,
+        title,
+        accept_lbl,
+        cancel_lbl,
+        filter_lbl,
+        vec![ext_str],
+        all_lbl,
+    )
+    .await;
+
+    let mut session = state.session.lock().map_err(|e| e.to_string())?;
+    if let Some(path) = chosen {
+        if let Some(parent) = path.parent() {
+            if parent.is_dir() {
+                session.apply(Action::SetFileDialogDir(parent.to_path_buf()));
+            }
+        }
+        session.apply(Action::SetExportOutputPath(
+            path.to_string_lossy().to_string(),
+        ));
+        if execute_immediately {
+            session.apply(Action::ExecuteExport);
+        }
+    }
+    Ok(build_session_snapshot(&session))
+}
+
+pub fn validate_external_http_url(url: &str) -> Result<&str, String> {
+    let trimmed = url.trim();
+    if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
+        return Err("Unsupported URL scheme".to_string());
+    }
+    if trimmed.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("Invalid characters in URL".to_string());
+    }
+    Ok(trimmed)
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let safe_url = validate_external_http_url(&url)?;
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(safe_url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", safe_url])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(safe_url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -384,6 +824,8 @@ pub fn run_app(opts: LaunchOptions) -> Result<(), String> {
             update_editor_buffer,
             open_native_file_dialog,
             save_as_native_file_dialog,
+            export_with_native_dialog,
+            open_external_url,
             preview_palette_tokens,
             render_mermaid_diagram,
             render_preview_html,
@@ -436,7 +878,7 @@ pub fn run_app(opts: LaunchOptions) -> Result<(), String> {
                                 }
                                 updated_watched_path = Some(session.current_file_path.clone());
                                 emit_snapshot = Some(build_session_snapshot(&session));
-                            } else if file_changed {
+                            } else if file_changed && session.disk_watcher_enabled {
                                 let prev_banner = session.disk_modified_banner_active;
                                 session.apply(Action::CheckExternalFileModification);
                                 if session.disk_modified_banner_active != prev_banner
@@ -677,11 +1119,59 @@ mod tests {
 
     #[test]
     fn test_version_system_consistency() {
-        assert_eq!(VERSION, "0.8.22");
+        assert_eq!(VERSION, "0.8.23");
         assert_eq!(accent_core::VERSION, VERSION);
         let version_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../VERSION");
         let file_ver = std::fs::read_to_string(version_file)
             .expect("Failed to read root VERSION file");
         assert_eq!(file_ver.trim(), VERSION);
+    }
+
+    #[test]
+    fn test_external_url_validation_and_i18n_completeness() {
+        assert_eq!(
+            validate_external_http_url("https://doc.rust-lang.org"),
+            Ok("https://doc.rust-lang.org")
+        );
+        assert_eq!(
+            validate_external_http_url("http://example.com/path?a=1&b=2"),
+            Ok("http://example.com/path?a=1&b=2")
+        );
+        assert!(validate_external_http_url("javascript:alert(1)").is_err());
+        assert!(validate_external_http_url("file:///etc/passwd").is_err());
+        assert!(validate_external_http_url("https://bad url/space").is_err());
+
+        for loc in [
+            accent_session::Locale::It,
+            accent_session::Locale::En,
+            accent_session::Locale::Es,
+        ] {
+            let map = ui::build_i18n_map(loc);
+            for required_key in [
+                "brightness_mode",
+                "brightness_sub",
+                "export_fmt_prefix",
+                "browse",
+                "wal_title",
+                "watcher_title",
+                "enabled",
+                "disabled",
+                "unsaved_tab_title",
+                "unsaved_tab_msg",
+                "discard_changes",
+                "html_copied",
+                "sc_new_tab",
+                "sc_live_preview",
+                "sc_split_preview",
+                "dialog_accept_open",
+                "dialog_accept_save",
+            ] {
+                let v = map.get(required_key).map(String::as_str).unwrap_or("");
+                assert!(
+                    !v.is_empty(),
+                    "Missing or empty i18n key {required_key} for locale {loc:?}"
+                );
+            }
+        }
     }
 }

@@ -101,6 +101,8 @@ pub struct UiSessionSnapshot {
     pub selected_export_format: ExportFormat,
     pub export_output_path: String,
     pub export_syntax_highlight: bool,
+    pub wal_autosave_enabled: bool,
+    pub disk_watcher_enabled: bool,
     pub font_families: Vec<String>,
     pub prose_font_presets: Vec<String>,
     pub code_font_presets: Vec<String>,
@@ -304,6 +306,118 @@ pub fn build_i18n_map(locale: Locale) -> BTreeMap<String, String> {
             "No headings (#)",
             "Sin encabezados (#)",
         ),
+        (
+            "brightness_mode",
+            "Modalità luminosità",
+            "Brightness Mode",
+            "Modo de brillo",
+        ),
+        (
+            "brightness_sub",
+            "Chiaro · Sepia · Semi-Dark · Scuro",
+            "Light · Sepia · Semi-Dark · Dark",
+            "Claro · Sepia · Semi-Oscuro · Oscuro",
+        ),
+        (
+            "export_fmt_prefix",
+            "Esporta",
+            "Export",
+            "Exportar",
+        ),
+        ("browse", "Sfoglia...", "Browse...", "Examinar..."),
+        (
+            "wal_title",
+            "Journal di ripristino WAL (< 300ms)",
+            "WAL Crash Recovery Journal (< 300ms)",
+            "Diario de recuperación WAL (< 300ms)",
+        ),
+        (
+            "wal_sub",
+            "Salvataggio continuo su journal locale e ripristino automatico all'avvio",
+            "Continuous local journal backup and automatic startup recovery",
+            "Guardado continuo en diario local y recuperación automática al iniciar",
+        ),
+        (
+            "watcher_title",
+            "Monitoraggio modifiche esterne sul disco",
+            "External Disk Change Watcher",
+            "Monitor de cambios externos en disco",
+        ),
+        (
+            "watcher_sub",
+            "Notifica immediata quando il file attivo viene modificato da un altro programma",
+            "Immediate notice when the active file is modified by another program",
+            "Aviso inmediato cuando otro programa modifica el archivo activo",
+        ),
+        ("enabled", "Attivo", "Enabled", "Activo"),
+        ("disabled", "Disattivato", "Disabled", "Desactivado"),
+        (
+            "unsaved_tab_title",
+            "Modifiche non salvate",
+            "Unsaved Changes",
+            "Cambios sin guardar",
+        ),
+        (
+            "unsaved_tab_msg",
+            "La scheda contiene modifiche non salvate. Vuoi salvarle prima di chiuderla?",
+            "This tab has unsaved changes. Would you like to save them before closing?",
+            "Esta pestaña tiene cambios sin guardar. ¿Quieres guardarlos antes de cerrarla?",
+        ),
+        (
+            "discard_changes",
+            "Scarta modifiche",
+            "Discard Changes",
+            "Descartar cambios",
+        ),
+        (
+            "html_copied",
+            "HTML copiato negli appunti",
+            "HTML copied to clipboard",
+            "HTML copiado al portapapeles",
+        ),
+        ("sc_new_tab", "Nuova scheda", "New Tab", "Nueva pestaña"),
+        ("sc_close_tab", "Chiudi scheda", "Close Tab", "Cerrar pestaña"),
+        (
+            "sc_cycle_tabs",
+            "Scheda successiva / prec.",
+            "Next / Previous Tab",
+            "Pestaña siguiente / ant.",
+        ),
+        ("sc_undo_redo", "Annulla / Ripeti", "Undo / Redo", "Deshacer / Rehacer"),
+        (
+            "sc_inline_fmt",
+            "Grassetto / Corsivo / Barrato",
+            "Bold / Italic / Strikethrough",
+            "Negrita / Cursiva / Tachado",
+        ),
+        (
+            "sc_insert_link",
+            "Inserisci collegamento",
+            "Insert Link",
+            "Insertar enlace",
+        ),
+        (
+            "sc_live_preview",
+            "Anteprima durante la digitazione",
+            "In-line Live Preview",
+            "Vista previa en línea",
+        ),
+        (
+            "sc_split_preview",
+            "Pannello di anteprima",
+            "Split Preview Panel",
+            "Panel de vista previa",
+        ),
+        ("sc_zoom", "Zoom testo", "Text Zoom", "Zoom de texto"),
+        ("dialog_accept_open", "Apri", "Open", "Abrir"),
+        ("dialog_accept_save", "Salva", "Save", "Guardar"),
+        ("dialog_all_files", "Tutti i file", "All Files", "Todos los archivos"),
+        (
+            "dialog_md_files",
+            "Documenti Markdown",
+            "Markdown Documents",
+            "Documentos Markdown",
+        ),
     ];
     for &(k, it, en, es) in extras {
         let val = match locale {
@@ -506,7 +620,20 @@ pub fn build_session_snapshot(session: &Session) -> UiSessionSnapshot {
         selected_export_format: session.selected_export_format,
         export_output_path: session.export_output_path.clone(),
         export_syntax_highlight: session.export_syntax_highlight,
-        font_families: session.font_catalog.families.clone(),
+        wal_autosave_enabled: session.wal_autosave_enabled,
+        disk_watcher_enabled: session.disk_watcher_enabled,
+        font_families: {
+            let mut fams = session.font_catalog.families.clone();
+            for active_fam in [
+                &session.typography.prose_font_family,
+                &session.typography.code_font_family,
+            ] {
+                if !active_fam.is_empty() && !fams.iter().any(|f| f == active_fam) {
+                    fams.insert(0, active_fam.clone());
+                }
+            }
+            fams
+        },
         prose_font_presets: session.font_catalog.prose_presets.clone(),
         code_font_presets: session.font_catalog.code_presets.clone(),
         outline_headings: extract_outline_headings(session),

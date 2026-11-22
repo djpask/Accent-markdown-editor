@@ -180,6 +180,8 @@ export interface UiSessionSnapshot {
   selected_export_format: ExportFormat;
   export_output_path: string;
   export_syntax_highlight: boolean;
+  wal_autosave_enabled: boolean;
+  disk_watcher_enabled: boolean;
   font_families: string[];
   prose_font_presets: string[];
   code_font_presets: string[];
@@ -245,5 +247,8 @@ export type SessionAction =
   | 'ToggleExportSyntaxHighlight'
   | 'ExecuteExport'
   | { ExportDocument: string }
+  | { SetWalAutosave: boolean }
+  | { SetDiskWatcher: boolean }
+  | { SetStatusMessage: string }
   | { InsertText: string }
   | { MoveCursor: number };

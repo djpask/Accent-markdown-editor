@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import type {
   ColorPalettePreset,
+  ExportFormat,
   MermaidSvgPayload,
   PaletteCssTokens,
   SessionAction,
@@ -38,6 +39,20 @@ export async function openNativeFileDialog(): Promise<UiSessionSnapshot> {
 
 export async function saveAsNativeFileDialog(): Promise<UiSessionSnapshot> {
   return invoke<UiSessionSnapshot>('save_as_native_file_dialog');
+}
+
+export async function exportWithNativeDialog(
+  format: ExportFormat | null,
+  executeImmediately: boolean
+): Promise<UiSessionSnapshot> {
+  return invoke<UiSessionSnapshot>('export_with_native_dialog', {
+    format,
+    executeImmediately,
+  });
+}
+
+export async function openExternalUrl(url: string): Promise<void> {
+  return invoke<void>('open_external_url', { url });
 }
 
 export async function previewPaletteTokens(

@@ -59,26 +59,39 @@ export function renderMathInPreviewHtml(html: string): string {
       if (idx % 2 === 1) {
         return part;
       }
-      // 1. Replace display math $$...$$
-      let processed = part.replace(/\$\$([\s\S]+?)\$\$/g, (_match, expr: string) => {
-        const clean = expr
-          .replace(/<\/?p>/gi, '\n')
-          .replace(/<br\s*\/?>/gi, '\n')
+      const decodeEntities = (raw: string) =>
+        raw
           .replace(/&lt;/g, '<')
           .replace(/&gt;/g, '>')
+          .replace(/&quot;/g, '"')
+          .replace(/&#39;/g, "'")
           .replace(/&amp;/g, '&');
+
+      // 0. Replace pulldown-cmark native math spans (<span class="math math-display/inline">)
+      let processed = part.replace(
+        /<span class="math math-display">([\s\S]*?)<\/span>/gi,
+        (_match, expr: string) =>
+          `<div class="katex-display-block" data-testid="katex-display">${renderLatexToHtml(decodeEntities(expr), true)}</div>`
+      );
+      processed = processed.replace(
+        /<span class="math math-inline">([\s\S]*?)<\/span>/gi,
+        (_match, expr: string) =>
+          `<span class="katex-inline-span" data-testid="katex-inline">${renderLatexToHtml(decodeEntities(expr), false)}</span>`
+      );
+
+      // 1. Fallback: replace raw display math $$...$$
+      processed = processed.replace(/\$\$([\s\S]+?)\$\$/g, (_match, expr: string) => {
+        const clean = decodeEntities(
+          expr.replace(/<\/?p>/gi, '\n').replace(/<br\s*\/?>/gi, '\n')
+        );
         return `<div class="katex-display-block" data-testid="katex-display">${renderLatexToHtml(clean, true)}</div>`;
       });
 
-      // 2. Replace inline math $...$ (non-empty, not starting/ending with space, single line)
+      // 2. Fallback: replace raw inline math $...$ (non-empty, not starting/ending with space, single line)
       processed = processed.replace(
         /(^|[^\\$])\$([^\s$][^$\n]*?[^\s$]|[^\s$])\$/g,
         (_match, prefix: string, expr: string) => {
-          const clean = expr
-            .replace(/&lt;/g, '<')
-            .replace(/&gt;/g, '>')
-            .replace(/&amp;/g, '&');
-          return `${prefix}<span class="katex-inline-span" data-testid="katex-inline">${renderLatexToHtml(clean, false)}</span>`;
+          return `${prefix}<span class="katex-inline-span" data-testid="katex-inline">${renderLatexToHtml(decodeEntities(expr), false)}</span>`;
         }
       );
 

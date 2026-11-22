@@ -1263,10 +1263,10 @@ mod tests {
             }
         };
 
-        let woke_up = Arc::new(AtomicBool::new(false));
-        let woke_clone = Arc::clone(&woke_up);
+        let woke_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let woke_clone = Arc::clone(&woke_count);
         primary.set_waker(move || {
-            woke_clone.store(true, Ordering::SeqCst);
+            woke_clone.fetch_add(1, Ordering::SeqCst);
         });
 
         // 3. Second instance launched with `doc_a` must forward to primary and return `ForwardedToExisting`
@@ -1280,13 +1280,13 @@ mod tests {
         assert!(matches!(third, SingleInstanceOutcome::ForwardedToExisting));
 
         // Wait briefly for the background IPC thread to process both messages
-        for _ in 0..20 {
-            if woke_up.load(Ordering::SeqCst) {
+        for _ in 0..40 {
+            if woke_count.load(Ordering::SeqCst) >= 2 {
                 break;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(woke_up.load(Ordering::SeqCst));
+        assert_eq!(woke_count.load(Ordering::SeqCst), 2);
 
         let requests = primary.drain_requests();
         assert_eq!(

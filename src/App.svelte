@@ -1,12 +1,16 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
   import CodeMirrorEditor from './lib/CodeMirrorEditor.svelte';
   import { renderMathInPreviewHtml } from './lib/mathAndMermaid';
+  import { charToUtf16Offset } from './lib/textOffsets';
   import {
     applyPaletteToRoot,
     dispatchAction,
+    exportWithNativeDialog,
     getSessionSnapshot,
     onSessionUpdated,
+    openExternalUrl,
     openNativeFileDialog,
     previewPaletteTokens,
     renderPreviewHtml,
@@ -38,6 +42,8 @@
     line_width: LineWidthMode;
     dialect: MarkdownDialect;
     locale: Locale;
+    wal_autosave_enabled: boolean;
+    disk_watcher_enabled: boolean;
   }
 
   const PALETTE_SWATCHES: Record<ColorPalettePreset, [string, string, string]> = {
@@ -49,30 +55,66 @@
   };
 
   let snapshot: UiSessionSnapshot | null = $state(null);
+  let externalSyncToken = $state(0);
+  let latestEditSeq = 0;
   let isMaximized = $state(false);
   let outlineOpen = $state(false);
   let themesModalOpen = $state(false);
+  let pendingCloseTabIndex: number | null = $state(null);
   let draftTheme: ThemeMode = $state('Sepia');
   let draftPreset: ColorPalettePreset = $state('AmberCoral');
   let draftPreviewTokens: PaletteCssTokens | null = $state(null);
   let prefsTab: 'typography' | 'editor' = $state('typography');
   let prefsRollback: PreferencesRollbackState | null = $state(null);
-  let walAutosaveEnabled = $state(true);
-  let diskWatcherEnabled = $state(true);
   let previewHtml = $state('');
   let tabStripEl: HTMLDivElement | undefined = $state();
+  let searchInputEl: HTMLInputElement | undefined = $state();
+  let previewPaneEl: HTMLElement | undefined = $state();
   let tabStripCanScrollLeft = $state(false);
   let tabStripCanScrollRight = $state(false);
   let cmRef: CodeMirrorEditor | undefined = $state();
   let lastMousePos = { x: -1, y: -1 };
+  let wasSearchBarOpen = false;
+  let lastActiveTabIdForScroll = -1;
   let unlistenSession: (() => void) | null = null;
+  let unlistenResize: (() => void) | null = null;
 
   function tr(key: string, fallback = ''): string {
     return snapshot?.i18n?.[key] ?? (fallback || key);
   }
 
-  function syncSnapshot(next: UiSessionSnapshot) {
+  function actionMutatesEditorOrSelection(action: SessionAction): boolean {
+    if (typeof action === 'string') {
+      return (
+        action === 'Undo' ||
+        action === 'Redo' ||
+        action === 'NewDocument' ||
+        action === 'NewTab' ||
+        action === 'NextTab' ||
+        action === 'PrevTab' ||
+        action === 'OpenTutorial' ||
+        action === 'FindNext' ||
+        action === 'FindPrev' ||
+        action === 'ReplaceNext' ||
+        action === 'DiscardRecovery' ||
+        action === 'ReloadFromDisk'
+      );
+    }
+    return (
+      'SwitchTab' in action ||
+      'CloseTab' in action ||
+      'OpenFile' in action ||
+      'ApplyFormat' in action ||
+      'InsertText' in action
+    );
+  }
+
+  function syncSnapshot(next: UiSessionSnapshot, syncEditor = false) {
+    const tabChanged = snapshot?.active_tab_id !== next.active_tab_id;
     snapshot = next;
+    if (syncEditor || tabChanged) {
+      externalSyncToken += 1;
+    }
     applyPaletteToRoot(next.palette_css, next.theme);
     const root = document.documentElement;
     root.style.setProperty(
@@ -86,8 +128,32 @@
     if (next.preview_active) {
       void refreshPreviewHtml();
     }
-    queueMicrotask(updateTabOverflowState);
+    queueMicrotask(() => {
+      updateTabOverflowState();
+      if (next.active_tab_id !== lastActiveTabIdForScroll) {
+        lastActiveTabIdForScroll = next.active_tab_id;
+        const activeCard = tabStripEl?.querySelector('.tab-card.is-active');
+        activeCard?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        updateTabOverflowState();
+      }
+    });
   }
+
+  $effect(() => {
+    const openNow = Boolean(snapshot?.search_bar_open);
+    if (openNow && !wasSearchBarOpen) {
+      wasSearchBarOpen = true;
+      queueMicrotask(() => {
+        searchInputEl?.focus();
+        searchInputEl?.select();
+      });
+    } else if (!openNow && wasSearchBarOpen) {
+      wasSearchBarOpen = false;
+      queueMicrotask(() => {
+        cmRef?.focusEditor();
+      });
+    }
+  });
 
   async function refreshPreviewHtml() {
     try {
@@ -99,9 +165,13 @@
   }
 
   async function send(action: SessionAction) {
+    const shouldSyncEditor = actionMutatesEditorOrSelection(action);
+    if (shouldSyncEditor) {
+      latestEditSeq += 1;
+    }
     try {
       const next = await dispatchAction(action);
-      syncSnapshot(next);
+      syncSnapshot(next, shouldSyncEditor);
     } catch (err) {
       console.error('dispatchAction failed:', err);
     }
@@ -114,6 +184,7 @@
     isDocChanged: boolean
   ) {
     if (!snapshot) return;
+    const mySeq = ++latestEditSeq;
     try {
       if (isDocChanged) {
         const next = await updateEditorBuffer(
@@ -122,14 +193,18 @@
           selPrimary,
           selSecondary
         );
-        syncSnapshot(next);
+        if (mySeq === latestEditSeq) {
+          syncSnapshot(next, false);
+        }
       } else if (
         selPrimary !== snapshot.cursor_char ||
         Math.min(selPrimary, selSecondary) !== snapshot.selection_start_char ||
         Math.max(selPrimary, selSecondary) !== snapshot.selection_end_char
       ) {
         const next = await dispatchAction({ SetSelection: [selPrimary, selSecondary] });
-        syncSnapshot(next);
+        if (mySeq === latestEditSeq) {
+          syncSnapshot(next, false);
+        }
       }
     } catch (err) {
       console.error('updateEditorBuffer failed:', err);
@@ -170,11 +245,68 @@
     }
   }
 
+  function isModalOverlayActive(): boolean {
+    if (!snapshot) return false;
+    return (
+      themesModalOpen ||
+      pendingCloseTabIndex !== null ||
+      snapshot.overlay === 'PreferencesDialog' ||
+      snapshot.overlay === 'ExportDialog' ||
+      snapshot.overlay === 'ShortcutsDialog' ||
+      snapshot.overlay === 'AboutDialog'
+    );
+  }
+
+  async function requestCloseTab(idx: number) {
+    if (!snapshot) return;
+    const targetTab = snapshot.tabs[idx];
+    if (!targetTab) return;
+    if (!targetTab.is_dirty) {
+      await send({ CloseTab: idx });
+      return;
+    }
+    if (snapshot.overlay !== 'None') {
+      await send({ SetOverlay: 'None' });
+    }
+    pendingCloseTabIndex = idx;
+  }
+
+  async function confirmDiscardAndCloseTab() {
+    if (pendingCloseTabIndex === null) return;
+    const idx = pendingCloseTabIndex;
+    pendingCloseTabIndex = null;
+    await send({ CloseTab: idx });
+  }
+
+  async function confirmSaveAndCloseTab() {
+    if (!snapshot || pendingCloseTabIndex === null) return;
+    const idx = pendingCloseTabIndex;
+    pendingCloseTabIndex = null;
+    if (idx !== snapshot.active_tab_index) {
+      await send({ SwitchTab: idx });
+    }
+    if (snapshot?.current_file_path) {
+      await send('SaveDocument');
+      if (!snapshot?.is_dirty) {
+        await send({ CloseTab: snapshot!.active_tab_index });
+      }
+    } else {
+      latestEditSeq += 1;
+      const next = await saveAsNativeFileDialog();
+      syncSnapshot(next, true);
+      if (!next.is_dirty && next.current_file_path) {
+        await send({ CloseTab: next.active_tab_index });
+      }
+    }
+  }
+
   function handleGlobalKeyDown(e: KeyboardEvent) {
     if (!snapshot) return;
     const ctrl = e.ctrlKey || e.metaKey;
     const shift = e.shiftKey;
     const alt = e.altKey;
+    const target = e.target as HTMLElement | null;
+    const isFormField = Boolean(target && target.closest('input, textarea, select'));
 
     if (
       snapshot.chrome_autohidden &&
@@ -191,6 +323,11 @@
     }
 
     if (e.key === 'Escape') {
+      if (pendingCloseTabIndex !== null) {
+        pendingCloseTabIndex = null;
+        e.preventDefault();
+        return;
+      }
       if (themesModalOpen) {
         themesModalOpen = false;
         e.preventDefault();
@@ -220,39 +357,19 @@
     }
 
     if (ctrl && !alt) {
+      if (isModalOverlayActive()) {
+        return;
+      }
       const k = e.key.toLowerCase();
-      if (k === 'z' && !shift) {
+      if ((k === 'f' || k === 'h') && !shift) {
         e.preventDefault();
         e.stopPropagation();
-        void send('Undo');
-      } else if ((k === 'z' && shift) || (k === 'y' && !shift)) {
-        e.preventDefault();
-        e.stopPropagation();
-        void send('Redo');
-      } else if (k === 't' && !shift) {
-        e.preventDefault();
-        e.stopPropagation();
-        void send('NewTab');
-      } else if (k === 'w' && !shift) {
-        e.preventDefault();
-        e.stopPropagation();
-        void send({ CloseTab: snapshot.active_tab_index });
-      } else if (e.key === 'Tab' && !shift) {
-        e.preventDefault();
-        e.stopPropagation();
-        void send('NextTab');
-      } else if (e.key === 'Tab' && shift) {
-        e.preventDefault();
-        e.stopPropagation();
-        void send('PrevTab');
-      } else if (k === 'n' && !shift) {
-        e.preventDefault();
-        e.stopPropagation();
-        void send('NewDocument');
-      } else if (k === 'o' && !shift) {
-        e.preventDefault();
-        e.stopPropagation();
-        void handleOpenNativeDialog();
+        if (k === 'h' && snapshot.search_bar_open) {
+          searchInputEl?.focus();
+          searchInputEl?.select();
+        } else {
+          void send('ToggleSearchBar');
+        }
       } else if (k === 's' && !shift) {
         e.preventDefault();
         e.stopPropagation();
@@ -265,22 +382,38 @@
         e.preventDefault();
         e.stopPropagation();
         void handleSaveAsNativeDialog();
-      } else if (k === 'f' && !shift) {
+      } else if (k === 'o' && !shift) {
         e.preventDefault();
         e.stopPropagation();
-        void send('ToggleSearchBar');
-      } else if (k === 'b' && !shift) {
+        void handleOpenNativeDialog();
+      } else if (k === 't' && !shift) {
         e.preventDefault();
         e.stopPropagation();
-        void send({ ApplyFormat: 'Bold' });
-      } else if (k === 'i' && !shift) {
+        void send('NewTab');
+      } else if (k === 'w' && !shift) {
         e.preventDefault();
         e.stopPropagation();
-        void send({ ApplyFormat: 'Italic' });
-      } else if (k === 'x' && shift) {
+        void requestCloseTab(snapshot.active_tab_index);
+      } else if (e.key === 'Tab' && !shift) {
         e.preventDefault();
         e.stopPropagation();
-        void send({ ApplyFormat: 'Strikethrough' });
+        void send('NextTab');
+      } else if (e.key === 'Tab' && shift) {
+        e.preventDefault();
+        e.stopPropagation();
+        void send('PrevTab');
+      } else if (k === 'n' && !shift) {
+        e.preventDefault();
+        e.stopPropagation();
+        void send('NewDocument');
+      } else if (k === 'l' && !shift) {
+        e.preventDefault();
+        e.stopPropagation();
+        void send('ToggleViewWhileTyping');
+      } else if (k === 'p' && shift) {
+        e.preventDefault();
+        e.stopPropagation();
+        void send('ToggleSplitPreview');
       } else if (e.key === '+' || e.key === '=') {
         e.preventDefault();
         e.stopPropagation();
@@ -293,6 +426,32 @@
         e.preventDefault();
         e.stopPropagation();
         void send('ZoomReset');
+      } else if (!isFormField) {
+        if (k === 'z' && !shift) {
+          e.preventDefault();
+          e.stopPropagation();
+          void send('Undo');
+        } else if ((k === 'z' && shift) || (k === 'y' && !shift)) {
+          e.preventDefault();
+          e.stopPropagation();
+          void send('Redo');
+        } else if (k === 'b' && !shift) {
+          e.preventDefault();
+          e.stopPropagation();
+          void send({ ApplyFormat: 'Bold' });
+        } else if (k === 'i' && !shift) {
+          e.preventDefault();
+          e.stopPropagation();
+          void send({ ApplyFormat: 'Italic' });
+        } else if (k === 'x' && shift) {
+          e.preventDefault();
+          e.stopPropagation();
+          void send({ ApplyFormat: 'Strikethrough' });
+        } else if (k === 'k' && !shift) {
+          e.preventDefault();
+          e.stopPropagation();
+          void send({ ApplyFormat: 'Link' });
+        }
       }
     }
   }
@@ -307,8 +466,9 @@
 
   async function handleOpenNativeDialog() {
     try {
+      latestEditSeq += 1;
       const next = await openNativeFileDialog();
-      syncSnapshot(next);
+      syncSnapshot(next, true);
     } catch (err) {
       console.error('openNativeFileDialog failed:', err);
     }
@@ -317,9 +477,21 @@
   async function handleSaveAsNativeDialog() {
     try {
       const next = await saveAsNativeFileDialog();
-      syncSnapshot(next);
+      syncSnapshot(next, false);
     } catch (err) {
       console.error('saveAsNativeFileDialog failed:', err);
+    }
+  }
+
+  async function handleExportWithDialog(
+    format: ExportFormat | null,
+    executeImmediately: boolean
+  ) {
+    try {
+      const next = await exportWithNativeDialog(format, executeImmediately);
+      syncSnapshot(next, false);
+    } catch (err) {
+      console.error('exportWithNativeDialog failed:', err);
     }
   }
 
@@ -351,6 +523,8 @@
       line_width: snapshot.line_width,
       dialect: snapshot.dialect,
       locale: snapshot.locale,
+      wal_autosave_enabled: snapshot.wal_autosave_enabled,
+      disk_watcher_enabled: snapshot.disk_watcher_enabled,
     };
     await send({ SetOverlay: 'PreferencesDialog' });
   }
@@ -364,6 +538,8 @@
       await send({ SetLineWidth: prefsRollback.line_width });
       await send({ SetDialect: prefsRollback.dialect });
       await send({ SetLocale: prefsRollback.locale });
+      await send({ SetWalAutosave: prefsRollback.wal_autosave_enabled });
+      await send({ SetDiskWatcher: prefsRollback.disk_watcher_enabled });
       prefsRollback = null;
     }
     await send({ SetOverlay: 'None' });
@@ -383,19 +559,116 @@
   }
 
   async function restoreEditorLangDefaults() {
-    walAutosaveEnabled = true;
-    diskWatcherEnabled = true;
+    await send({ SetWalAutosave: true });
+    await send({ SetDiskWatcher: true });
     await send({ SetDialect: 'Gfm' });
     await send({ SetLocale: 'It' });
+  }
+
+  function fallbackCopyText(text: string): boolean {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '-9999px';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch {
+      return false;
+    }
   }
 
   async function handleCopyHtml() {
     try {
       const html = await renderPreviewHtml();
-      await navigator.clipboard.writeText(html);
+      let copied = false;
+      try {
+        await navigator.clipboard.writeText(html);
+        copied = true;
+      } catch {
+        copied = fallbackCopyText(html);
+      }
       await send({ SetOverlay: 'None' });
+      if (copied) {
+        await send({ SetStatusMessage: tr('html_copied', 'HTML copied') });
+      }
     } catch {
       await send({ SetOverlay: 'None' });
+    }
+  }
+
+  function scrollPreviewToHeadingIndex(idx: number) {
+    if (!previewPaneEl) return;
+    const headings = previewPaneEl.querySelectorAll(
+      '.preview-prose h1, .preview-prose h2, .preview-prose h3, .preview-prose h4, .preview-prose h5, .preview-prose h6'
+    );
+    const target = headings[idx] as HTMLElement | undefined;
+    target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function slugifyHeadingText(raw: string): string {
+    return raw
+      .trim()
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s-]/gu, '')
+      .replace(/\s+/g, '-');
+  }
+
+  function handlePreviewClick(e: MouseEvent) {
+    const anchor = (e.target as HTMLElement | null)?.closest('a');
+    if (!anchor) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const href = anchor.getAttribute('href')?.trim() ?? '';
+    if (!href) return;
+
+    if (href.startsWith('#')) {
+      const targetSlug = decodeURIComponent(href.slice(1)).trim().toLowerCase();
+      if (!targetSlug || !previewPaneEl) return;
+      const byId = previewPaneEl.querySelector(`[id="${CSS.escape(targetSlug)}"]`);
+      if (byId) {
+        byId.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return;
+      }
+      const headings = previewPaneEl.querySelectorAll(
+        '.preview-prose h1, .preview-prose h2, .preview-prose h3, .preview-prose h4, .preview-prose h5, .preview-prose h6'
+      );
+      for (const h of headings) {
+        if (slugifyHeadingText(h.textContent ?? '') === targetSlug) {
+          h.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          break;
+        }
+      }
+      return;
+    }
+
+    if (href.startsWith('https://') || href.startsWith('http://')) {
+      void openExternalUrl(href).catch((err) => {
+        console.error('openExternalUrl failed:', err);
+      });
+      return;
+    }
+
+    if (
+      !href.includes('://') &&
+      !href.startsWith('javascript:') &&
+      !href.startsWith('data:') &&
+      /\.(md|markdown|txt)$/i.test(href)
+    ) {
+      const basePath = snapshot?.current_file_path;
+      if (basePath) {
+        const sep = basePath.includes('\\') ? '\\' : '/';
+        const lastSep = Math.max(basePath.lastIndexOf('/'), basePath.lastIndexOf('\\'));
+        const dir = lastSep >= 0 ? basePath.slice(0, lastSep) : '.';
+        void send({ OpenFile: `${dir}${sep}${href}` });
+      } else {
+        void send({ OpenFile: href });
+      }
     }
   }
 
@@ -413,15 +686,65 @@
     return '48px';
   }
 
-  function handleHeaderDragMouseDown(e: MouseEvent) {
-    if (e.button !== 0) return;
-    const target = e.target as HTMLElement;
-    if (target.closest('button, input, select, .no-drag')) return;
-    if (e.detail === 2) {
-      void windowToggleMaximize().then((m) => (isMaximized = m));
-    } else {
-      void windowStartDrag();
+  let lastHeaderClickAt = 0;
+  let lastHeaderClickX = 0;
+  let lastHeaderClickY = 0;
+
+  function handleHeaderMouseDown(e: MouseEvent) {
+    if (e.button !== 0 || snapshot?.fullscreen) return;
+    const target = e.target as HTMLElement | null;
+    if (
+      target?.closest(
+        'button, a, input, select, textarea, [role="button"], [role="menuitem"]'
+      )
+    ) {
+      return;
     }
+
+    // Stop bubbling to Tauri's global drag.js listener so stationary clicks don't trigger
+    // an immediate X11 pointer grab (which breaks double-click on Linux) or double-toggle on Windows.
+    e.preventDefault();
+    e.stopPropagation();
+
+    const now = performance.now();
+    const isDoubleClick =
+      now - lastHeaderClickAt <= 340 &&
+      Math.hypot(e.screenX - lastHeaderClickX, e.screenY - lastHeaderClickY) <= 8;
+
+    if (isDoubleClick) {
+      lastHeaderClickAt = 0;
+      void windowToggleMaximize().then((m) => {
+        isMaximized = m;
+      });
+      return;
+    }
+
+    lastHeaderClickAt = now;
+    lastHeaderClickX = e.screenX;
+    lastHeaderClickY = e.screenY;
+
+    const startX = e.screenX;
+    const startY = e.screenY;
+    const cleanup = () => {
+      window.removeEventListener('mousemove', onMove, true);
+      window.removeEventListener('mouseup', onUp, true);
+    };
+    const onMove = (ev: MouseEvent) => {
+      if ((ev.buttons & 1) === 0) {
+        cleanup();
+        return;
+      }
+      if (Math.hypot(ev.screenX - startX, ev.screenY - startY) >= 4) {
+        cleanup();
+        lastHeaderClickAt = 0;
+        void windowStartDrag();
+      }
+    };
+    const onUp = () => {
+      cleanup();
+    };
+    window.addEventListener('mousemove', onMove, true);
+    window.addEventListener('mouseup', onUp, true);
   }
 
   function handleEdgeResize(dir: ResizeDirection, e: MouseEvent) {
@@ -433,14 +756,33 @@
 
   onMount(async () => {
     window.addEventListener('keydown', handleGlobalKeyDown, { capture: true });
+    const win = getCurrentWindow();
+    try {
+      isMaximized = await win.isMaximized();
+    } catch {
+      // Ignore outside Tauri runtime
+    }
+    try {
+      unlistenResize = await win.onResized(async () => {
+        try {
+          isMaximized = await win.isMaximized();
+        } catch {
+          // Ignore transient resize query errors
+        }
+        updateTabOverflowState();
+      });
+    } catch {
+      // Ignore outside Tauri runtime
+    }
     try {
       const initSnap = await getSessionSnapshot();
-      syncSnapshot(initSnap);
+      syncSnapshot(initSnap, true);
     } catch (err) {
       console.error('Initial getSessionSnapshot failed:', err);
     }
     unlistenSession = await onSessionUpdated((updated) => {
-      syncSnapshot(updated);
+      latestEditSeq += 1;
+      syncSnapshot(updated, true);
     });
     window.addEventListener('resize', updateTabOverflowState);
   });
@@ -448,6 +790,7 @@
   onDestroy(() => {
     window.removeEventListener('keydown', handleGlobalKeyDown, { capture: true });
     unlistenSession?.();
+    unlistenResize?.();
     window.removeEventListener('resize', updateTabOverflowState);
   });
 
@@ -478,9 +821,10 @@
       idx = found + Math.max(1, needle.length);
     }
     if (positions.length === 0) return '0 / 0';
+    const cursorU16 = charToUtf16Offset(snapshot.buffer_text, snapshot.cursor_char);
     let cur = 1;
     for (let i = 0; i < positions.length; i++) {
-      if (positions[i] <= snapshot.cursor_char) cur = i + 1;
+      if (positions[i] < cursorU16) cur = i + 1;
     }
     return `${cur} / ${positions.length}`;
   });
@@ -491,6 +835,7 @@
         snapshot.chrome_autohidden &&
         snapshot.overlay === 'None' &&
         !themesModalOpen &&
+        pendingCloseTabIndex === null &&
         !snapshot.search_bar_open &&
         !snapshot.recovery_banner_active &&
         !snapshot.disk_modified_banner_active
@@ -523,13 +868,15 @@
     <!-- ====================================================================
          1. INTEGRATED CSD TOP BAR (38px)
          ==================================================================== -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
     <header
       class="csd-topbar chrome-autohide"
       class:is-hidden={chromeHidden}
-      data-tauri-drag-region
+      data-tauri-drag-region="deep"
       data-testid="csd-topbar"
+      onmousedown={handleHeaderMouseDown}
     >
-      <div class="csd-left no-drag" role="toolbar" aria-label="Document actions">
+      <div class="csd-left" role="toolbar" aria-label="Document actions">
         <button
           id="btn-toggle-outline"
           type="button"
@@ -537,8 +884,11 @@
           class:is-active={outlineOpen}
           aria-pressed={outlineOpen}
           aria-label={tr('tooltip_outline', 'Indice')}
-          title={tr('tooltip_outline', 'Indice')}
-          onclick={() => (outlineOpen = !outlineOpen)}
+          title={snapshot.overlay !== 'None' ? undefined : tr('tooltip_outline', 'Indice')}
+          onclick={() => {
+            if (snapshot?.overlay !== 'None') void send({ SetOverlay: 'None' });
+            outlineOpen = !outlineOpen;
+          }}
         >
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
             <rect x="2" y="2.5" width="12" height="11" rx="2" stroke="currentColor" stroke-width="1.4" />
@@ -551,7 +901,7 @@
           type="button"
           class="csd-icon-btn"
           aria-label={tr('tooltip_new_doc')}
-          title={tr('tooltip_new_doc')}
+          title={snapshot.overlay !== 'None' ? undefined : tr('tooltip_new_doc')}
           onclick={() => send('NewDocument')}
         >
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -568,11 +918,11 @@
           class:is-active={snapshot.overlay === 'OpenMenu'}
           aria-haspopup="menu"
           aria-expanded={snapshot.overlay === 'OpenMenu'}
-          title={tr('tooltip_open')}
+          title={snapshot.overlay === 'OpenMenu' ? undefined : tr('tooltip_open')}
           onclick={() => send({ SetOverlay: 'OpenMenu' })}
         >
           <span>{tr('open')}</span>
-          <span class="chevron">▾</span>
+          <span class="chevron" aria-hidden="true">▾</span>
         </button>
 
         <div class="csd-split-btn" role="group" aria-label={tr('save')}>
@@ -580,11 +930,15 @@
             id="btn-save-doc"
             type="button"
             class="csd-split-main"
-            title={tr('tooltip_save')}
-            onclick={() =>
-              snapshot?.current_file_path
-                ? send('SaveDocument')
-                : handleSaveAsNativeDialog()}
+            title={snapshot.overlay !== 'None' ? undefined : tr('tooltip_save')}
+            onclick={() => {
+              if (snapshot?.overlay !== 'None') void send({ SetOverlay: 'None' });
+              if (snapshot?.current_file_path) {
+                void send('SaveDocument');
+              } else {
+                void handleSaveAsNativeDialog();
+              }
+            }}
           >
             {tr('save')}
           </button>
@@ -596,7 +950,7 @@
             aria-label={tr('tooltip_save_menu')}
             aria-haspopup="menu"
             aria-expanded={snapshot.overlay === 'SaveMenu'}
-            title={tr('tooltip_save_menu')}
+            title={snapshot.overlay === 'SaveMenu' ? undefined : tr('tooltip_save_menu')}
             onclick={() => send({ SetOverlay: 'SaveMenu' })}
           >
             ▾
@@ -605,26 +959,21 @@
       </div>
 
       <!-- Center: Active Document Title (with dirty dot) -->
-      <div
-        class="csd-center"
-        role="presentation"
-        data-tauri-drag-region
-        onmousedown={handleHeaderDragMouseDown}
-      >
+      <div class="csd-center" role="presentation">
         {#if snapshot.is_dirty}
           <span class="dirty-dot" title={tr('status_unsaved')}></span>
         {/if}
-        <span class="csd-title" data-tauri-drag-region>{snapshot.document_title}</span>
+        <span class="csd-title">{snapshot.document_title}</span>
       </div>
 
       <!-- Right Controls: LineWidth, Search, View Mode, Main Menu ☰, Minimize ─, Maximize □, Close × -->
-      <div class="csd-right no-drag" role="toolbar" aria-label="View and window controls">
+      <div class="csd-right" role="toolbar" aria-label="View and window controls">
         <button
           id="btn-linewidth-menu"
           type="button"
           class="csd-badge-btn"
           class:is-active={snapshot.overlay === 'LineWidthMenu'}
-          title={tr('tooltip_line_width')}
+          title={snapshot.overlay === 'LineWidthMenu' ? undefined : tr('tooltip_line_width')}
           onclick={() => send({ SetOverlay: 'LineWidthMenu' })}
         >
           {snapshot.line_width_badge}
@@ -637,7 +986,7 @@
           class:is-active={snapshot.search_bar_open}
           aria-pressed={snapshot.search_bar_open}
           aria-label={tr('tooltip_search')}
-          title={tr('tooltip_search')}
+          title={snapshot.overlay !== 'None' ? undefined : tr('tooltip_search')}
           onclick={() => send('ToggleSearchBar')}
         >
           <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -652,7 +1001,9 @@
           class="csd-pill-btn viewmode-pill"
           class:is-active={snapshot.overlay === 'PreviewMenu' || snapshot.preview_active}
           aria-label={tr('tooltip_preview')}
-          title={tr('tooltip_preview')}
+          aria-haspopup="menu"
+          aria-expanded={snapshot.overlay === 'PreviewMenu'}
+          title={snapshot.overlay === 'PreviewMenu' ? undefined : tr('tooltip_preview')}
           onclick={() => send({ SetOverlay: 'PreviewMenu' })}
         >
           <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -663,7 +1014,7 @@
               <circle cx="8" cy="8" r="2.2" fill="currentColor" />
             {/if}
           </svg>
-          <span class="chevron">▾</span>
+          <span class="chevron" aria-hidden="true">▾</span>
         </button>
 
         <button
@@ -674,7 +1025,7 @@
           aria-label={tr('tooltip_main_menu')}
           aria-haspopup="menu"
           aria-expanded={snapshot.overlay === 'MainMenu'}
-          title={tr('tooltip_main_menu')}
+          title={snapshot.overlay === 'MainMenu' ? undefined : tr('tooltip_main_menu')}
           onclick={() => send({ SetOverlay: 'MainMenu' })}
         >
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -734,6 +1085,7 @@
     >
       <div
         class="tab-strip scroller"
+        data-tauri-drag-region
         bind:this={tabStripEl}
         onscroll={updateTabOverflowState}
         onwheel={handleTabStripWheel}
@@ -750,12 +1102,12 @@
             title={tab.current_file_path ?? tab.document_title}
             onclick={() => send({ SwitchTab: tab.index })}
             onauxclick={(e) => {
-              if (e.button === 1) send({ CloseTab: tab.index });
+              if (e.button === 1) void requestCloseTab(tab.index);
             }}
             onkeydown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
-                send({ SwitchTab: tab.index });
+                void send({ SwitchTab: tab.index });
               }
             }}
           >
@@ -773,7 +1125,7 @@
               title={tr('tooltip_close_tab')}
               onclick={(e) => {
                 e.stopPropagation();
-                send({ CloseTab: tab.index });
+                void requestCloseTab(tab.index);
               }}
             >
               ×
@@ -829,7 +1181,10 @@
           <button
             type="button"
             class="banner-btn banner-btn-confirm"
-            onclick={() => send('ConfirmRecoverySave')}
+            onclick={() =>
+              snapshot?.current_file_path
+                ? send('ConfirmRecoverySave')
+                : handleSaveAsNativeDialog()}
           >
             {tr('recovery_confirm_save')}
           </button>
@@ -903,7 +1258,8 @@
                     style={`padding-left: ${10 + (h.level - 1) * 12}px`}
                     onclick={() => {
                       cmRef?.scrollToCharOffset(h.char_offset);
-                      send({ MoveCursor: h.char_offset });
+                      scrollPreviewToHeadingIndex(idx);
+                      void send({ MoveCursor: h.char_offset });
                     }}
                   >
                     <span class="outline-lvl">H{h.level}</span>
@@ -929,6 +1285,7 @@
               activeTabId={snapshot.active_tab_id}
               bufferText={snapshot.buffer_text}
               bufferRevision={snapshot.buffer_revision}
+              externalSyncToken={externalSyncToken}
               cursorChar={snapshot.cursor_char}
               selectionStartChar={snapshot.selection_start_char}
               selectionEndChar={snapshot.selection_end_char}
@@ -943,6 +1300,8 @@
                 snapshot.line_width,
                 snapshot.fluid_margin_pct
               )}
+              searchQuery={snapshot.search_query}
+              searchBarOpen={snapshot.search_bar_open}
               chromeHidden={chromeHidden}
               onEdit={handleEditorEdit}
             />
@@ -950,7 +1309,11 @@
         {/if}
 
         {#if snapshot.preview_active}
-          <section class="preview-pane scroller" data-testid="preview-pane">
+          <section
+            class="preview-pane scroller"
+            bind:this={previewPaneEl}
+            data-testid="preview-pane"
+          >
             {#if snapshot.preview_layout === 'FullWidth'}
               <div class="preview-reader-bar chrome-autohide" class:is-hidden={chromeHidden}>
                 <button
@@ -962,8 +1325,11 @@
                 </button>
               </div>
             {/if}
+            <!-- svelte-ignore a11y_click_events_have_key_events -->
+            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
             <article
               class="preview-prose"
+              onclick={handlePreviewClick}
               style={`max-width: ${computeColumnMaxWidth(snapshot.line_width)}; font-size: ${snapshot.typography.font_size}px; line-height: ${snapshot.typography.line_height};`}
             >
               {@html previewHtml}
@@ -981,28 +1347,40 @@
         <div class="search-row">
           <div class="search-input-wrap">
             <input
+              bind:this={searchInputEl}
               type="text"
-              class="search-input"
+              class="search-input search-query-input"
               placeholder={tr('find_placeholder')}
+              aria-label={tr('find_placeholder')}
               value={snapshot.search_query}
               oninput={(e) => send({ SetSearchQuery: (e.currentTarget as HTMLInputElement).value })}
               onkeydown={(e) => {
-                if (e.key === 'Enter') send(e.shiftKey ? 'FindPrev' : 'FindNext');
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  void send(e.shiftKey ? 'FindPrev' : 'FindNext');
+                }
               }}
             />
             <span class="search-counter">{searchMatchSummary}</span>
           </div>
-          <button type="button" class="search-mini-btn" onclick={() => send('FindPrev')} title="Previous">↑</button>
-          <button type="button" class="search-mini-btn" onclick={() => send('FindNext')} title="Next">↓</button>
-          <button type="button" class="search-mini-btn" onclick={() => send('ToggleSearchBar')} title="Close">×</button>
+          <button type="button" class="search-mini-btn" onclick={() => send('FindPrev')} aria-label="Previous match" title="Previous (Shift+Enter)">↑</button>
+          <button type="button" class="search-mini-btn" onclick={() => send('FindNext')} aria-label="Next match" title="Next (Enter)">↓</button>
+          <button type="button" class="search-mini-btn" onclick={() => send('ToggleSearchBar')} aria-label="Close search" title="Close (Esc)">×</button>
         </div>
         <div class="search-row">
           <input
             type="text"
             class="search-input"
             placeholder={tr('replace_placeholder')}
+            aria-label={tr('replace_placeholder')}
             value={snapshot.replace_text}
             oninput={(e) => send({ SetReplaceText: (e.currentTarget as HTMLInputElement).value })}
+            onkeydown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                void send('ReplaceNext');
+              }
+            }}
           />
           <button type="button" class="search-action-btn" onclick={() => send('ReplaceNext')}>
             {tr('replace_btn')}
@@ -1020,120 +1398,122 @@
       data-testid="bottom-islands"
     >
       <!-- Left Floating Island: 12 Vector Markdown Formatting Controls + Collapse ‹ / Micro-Circle › -->
-      <div
-        class="floating-island island-left"
-        class:is-collapsed={!snapshot.toolbar_expanded}
-        role="toolbar"
-        aria-label="Markdown formatting"
-        data-testid="island-formatting"
-      >
-        {#if snapshot.toolbar_expanded}
-          <div class="fmt-group" role="group" aria-label="Inline typography">
-            <button id="fmt-bold" type="button" class="fmt-btn" title={tr('tooltip_bold')} aria-label={tr('tooltip_bold')} onclick={() => send({ ApplyFormat: 'Bold' })}>
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path d="M4.5 3H8.8C10.3 3 11.4 3.9 11.4 5.3C11.4 6.3 10.7 7.1 9.8 7.4C11 7.7 11.9 8.6 11.9 9.9C11.9 11.5 10.6 12.5 8.9 12.5H4.5V3Z" stroke="currentColor" stroke-width="1.65" stroke-linejoin="round" />
-                <line x1="4.5" y1="7.5" x2="9.2" y2="7.5" stroke="currentColor" stroke-width="1.5" />
-              </svg>
-            </button>
-            <button id="fmt-italic" type="button" class="fmt-btn" title={tr('tooltip_italic')} aria-label={tr('tooltip_italic')} onclick={() => send({ ApplyFormat: 'Italic' })}>
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <line x1="6.5" y1="3" x2="11.5" y2="3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
-                <line x1="4.5" y1="12.5" x2="9.5" y2="12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
-                <line x1="9.2" y1="3" x2="6.8" y2="12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
-              </svg>
-            </button>
-            <button id="fmt-strike" type="button" class="fmt-btn" title={tr('tooltip_strikethrough')} aria-label={tr('tooltip_strikethrough')} onclick={() => send({ ApplyFormat: 'Strikethrough' })}>
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path d="M10.8 4.8C10.3 3.8 9.2 3.2 7.8 3.2C6 3.2 4.8 4.1 4.8 5.4C4.8 8.2 11.2 7.4 11.2 10.4C11.2 11.8 9.8 12.8 7.9 12.8C6.2 12.8 5 12 4.4 10.8" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" />
-                <line x1="2.5" y1="8" x2="13.5" y2="8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
-              </svg>
-            </button>
-            <button id="fmt-heading" type="button" class="fmt-btn" title={tr('tooltip_heading')} aria-label={tr('tooltip_heading')} onclick={() => send({ ApplyFormat: 'Heading' })}>
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <line x1="4.2" y1="3" x2="4.2" y2="12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-                <line x1="11.8" y1="3" x2="11.8" y2="12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-                <line x1="4.2" y1="7.8" x2="11.8" y2="7.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-              </svg>
-            </button>
-          </div>
-
-          <span class="fmt-sep" role="separator" aria-orientation="vertical"></span>
-
-          <div class="fmt-group" role="group" aria-label="Lists and quotes">
-            <button id="fmt-bullet" type="button" class="fmt-btn" title={tr('tooltip_bullet_list')} aria-label={tr('tooltip_bullet_list')} onclick={() => send({ ApplyFormat: 'BulletList' })}>
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <circle cx="3.5" cy="4.5" r="1.2" fill="currentColor" />
-                <circle cx="3.5" cy="8" r="1.2" fill="currentColor" />
-                <circle cx="3.5" cy="11.5" r="1.2" fill="currentColor" />
-                <line x1="6.5" y1="4.5" x2="13" y2="4.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-                <line x1="6.5" y1="8" x2="13" y2="8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-                <line x1="6.5" y1="11.5" x2="13" y2="11.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-              </svg>
-            </button>
-            <button id="fmt-ordered" type="button" class="fmt-btn" title={tr('tooltip_ordered_list')} aria-label={tr('tooltip_ordered_list')} onclick={() => send({ ApplyFormat: 'OrderedList' })}>
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <text x="2" y="6.2" font-size="5.5" font-weight="700" fill="currentColor">1.</text>
-                <text x="2" y="12.2" font-size="5.5" font-weight="700" fill="currentColor">2.</text>
-                <line x1="7" y1="4.5" x2="13" y2="4.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-                <line x1="7" y1="10.5" x2="13" y2="10.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-              </svg>
-            </button>
-            <button id="fmt-task" type="button" class="fmt-btn" title={tr('tooltip_task_list')} aria-label={tr('tooltip_task_list')} onclick={() => send({ ApplyFormat: 'TaskList' })}>
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <rect x="2.5" y="3" width="11" height="10" rx="2" stroke="currentColor" stroke-width="1.4" />
-                <path d="M5.2 8.2L7.1 10.1L10.8 5.9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
-              </svg>
-            </button>
-            <button id="fmt-quote" type="button" class="fmt-btn" title={tr('tooltip_blockquote')} aria-label={tr('tooltip_blockquote')} onclick={() => send({ ApplyFormat: 'BlockQuote' })}>
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path d="M6.5 4.5H3.8V8.2H6.2L5 11.5M12.2 4.5H9.5V8.2H11.9L10.7 11.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
-              </svg>
-            </button>
-          </div>
-
-          <span class="fmt-sep" role="separator" aria-orientation="vertical"></span>
-
-          <div class="fmt-group" role="group" aria-label="Code, links, media, and tables">
-            <button id="fmt-code" type="button" class="fmt-btn" title={tr('tooltip_code')} aria-label={tr('tooltip_code')} onclick={() => send({ ApplyFormat: 'Code' })}>
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path d="M5.8 4.5L2.5 8L5.8 11.5M10.2 4.5L13.5 8L10.2 11.5" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" />
-              </svg>
-            </button>
-            <button id="fmt-link" type="button" class="fmt-btn" title={tr('tooltip_link')} aria-label={tr('tooltip_link')} onclick={() => send({ ApplyFormat: 'Link' })}>
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path d="M6.8 9.2L9.2 6.8M5.5 11.2L4.2 12.5C3.1 13.6 1.8 12.3 2.9 11.2L4.5 9.6M10.5 4.8L11.8 3.5C12.9 2.4 14.2 3.7 13.1 4.8L11.5 6.4" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" />
-              </svg>
-            </button>
-            <button id="fmt-image" type="button" class="fmt-btn" title={tr('tooltip_image')} aria-label={tr('tooltip_image')} onclick={() => send({ ApplyFormat: 'Image' })}>
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <rect x="2.2" y="3" width="11.6" height="10" rx="1.8" stroke="currentColor" stroke-width="1.4" />
-                <circle cx="5.5" cy="6" r="1.1" fill="currentColor" />
-                <path d="M3 11.8L6.8 8.4L9.5 10.6L11.2 9.2L13 11.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
-              </svg>
-            </button>
-            <button id="fmt-table" type="button" class="fmt-btn" title={tr('tooltip_table')} aria-label={tr('tooltip_table')} onclick={() => send({ ApplyFormat: 'Table' })}>
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <rect x="2.2" y="3" width="11.6" height="10" rx="1.8" stroke="currentColor" stroke-width="1.4" />
-                <line x1="2.2" y1="6.8" x2="13.8" y2="6.8" stroke="currentColor" stroke-width="1.3" />
-                <line x1="8" y1="3" x2="8" y2="13" stroke="currentColor" stroke-width="1.3" />
-              </svg>
-            </button>
-          </div>
-
-          <span class="fmt-sep" role="separator" aria-orientation="vertical"></span>
-        {/if}
-
-        <button
-          id="btn-toggle-toolbar"
-          type="button"
-          class="fmt-btn fmt-collapse-btn"
-          aria-label={tr('tooltip_toggle_toolbar')}
-          title={tr('tooltip_toggle_toolbar')}
-          onclick={() => send('ToggleToolbar')}
+      {#if !(snapshot.preview_active && snapshot.preview_layout === 'FullWidth')}
+        <div
+          class="floating-island island-left"
+          class:is-collapsed={!snapshot.toolbar_expanded}
+          role="toolbar"
+          aria-label="Markdown formatting"
+          data-testid="island-formatting"
         >
-          {snapshot.toolbar_expanded ? '‹' : '›'}
-        </button>
-      </div>
+          {#if snapshot.toolbar_expanded}
+            <div class="fmt-group" role="group" aria-label="Inline typography">
+              <button id="fmt-bold" type="button" class="fmt-btn" title={tr('tooltip_bold')} aria-label={tr('tooltip_bold')} onclick={() => send({ ApplyFormat: 'Bold' })}>
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path d="M4.5 3H8.8C10.3 3 11.4 3.9 11.4 5.3C11.4 6.3 10.7 7.1 9.8 7.4C11 7.7 11.9 8.6 11.9 9.9C11.9 11.5 10.6 12.5 8.9 12.5H4.5V3Z" stroke="currentColor" stroke-width="1.65" stroke-linejoin="round" />
+                  <line x1="4.5" y1="7.5" x2="9.2" y2="7.5" stroke="currentColor" stroke-width="1.5" />
+                </svg>
+              </button>
+              <button id="fmt-italic" type="button" class="fmt-btn" title={tr('tooltip_italic')} aria-label={tr('tooltip_italic')} onclick={() => send({ ApplyFormat: 'Italic' })}>
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <line x1="6.5" y1="3" x2="11.5" y2="3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+                  <line x1="4.5" y1="12.5" x2="9.5" y2="12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+                  <line x1="9.2" y1="3" x2="6.8" y2="12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+                </svg>
+              </button>
+              <button id="fmt-strike" type="button" class="fmt-btn" title={tr('tooltip_strikethrough')} aria-label={tr('tooltip_strikethrough')} onclick={() => send({ ApplyFormat: 'Strikethrough' })}>
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path d="M10.8 4.8C10.3 3.8 9.2 3.2 7.8 3.2C6 3.2 4.8 4.1 4.8 5.4C4.8 8.2 11.2 7.4 11.2 10.4C11.2 11.8 9.8 12.8 7.9 12.8C6.2 12.8 5 12 4.4 10.8" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" />
+                  <line x1="2.5" y1="8" x2="13.5" y2="8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+                </svg>
+              </button>
+              <button id="fmt-heading" type="button" class="fmt-btn" title={tr('tooltip_heading')} aria-label={tr('tooltip_heading')} onclick={() => send({ ApplyFormat: 'Heading' })}>
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <line x1="4.2" y1="3" x2="4.2" y2="12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+                  <line x1="11.8" y1="3" x2="11.8" y2="12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+                  <line x1="4.2" y1="7.8" x2="11.8" y2="7.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+                </svg>
+              </button>
+            </div>
+
+            <span class="fmt-sep" role="separator" aria-orientation="vertical"></span>
+
+            <div class="fmt-group" role="group" aria-label="Lists and quotes">
+              <button id="fmt-bullet" type="button" class="fmt-btn" title={tr('tooltip_bullet_list')} aria-label={tr('tooltip_bullet_list')} onclick={() => send({ ApplyFormat: 'BulletList' })}>
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <circle cx="3.5" cy="4.5" r="1.2" fill="currentColor" />
+                  <circle cx="3.5" cy="8" r="1.2" fill="currentColor" />
+                  <circle cx="3.5" cy="11.5" r="1.2" fill="currentColor" />
+                  <line x1="6.5" y1="4.5" x2="13" y2="4.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                  <line x1="6.5" y1="8" x2="13" y2="8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                  <line x1="6.5" y1="11.5" x2="13" y2="11.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                </svg>
+              </button>
+              <button id="fmt-ordered" type="button" class="fmt-btn" title={tr('tooltip_ordered_list')} aria-label={tr('tooltip_ordered_list')} onclick={() => send({ ApplyFormat: 'OrderedList' })}>
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <text x="2" y="6.2" font-size="5.5" font-weight="700" fill="currentColor">1.</text>
+                  <text x="2" y="12.2" font-size="5.5" font-weight="700" fill="currentColor">2.</text>
+                  <line x1="7" y1="4.5" x2="13" y2="4.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                  <line x1="7" y1="10.5" x2="13" y2="10.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                </svg>
+              </button>
+              <button id="fmt-task" type="button" class="fmt-btn" title={tr('tooltip_task_list')} aria-label={tr('tooltip_task_list')} onclick={() => send({ ApplyFormat: 'TaskList' })}>
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <rect x="2.5" y="3" width="11" height="10" rx="2" stroke="currentColor" stroke-width="1.4" />
+                  <path d="M5.2 8.2L7.1 10.1L10.8 5.9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+              </button>
+              <button id="fmt-quote" type="button" class="fmt-btn" title={tr('tooltip_blockquote')} aria-label={tr('tooltip_blockquote')} onclick={() => send({ ApplyFormat: 'BlockQuote' })}>
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path d="M6.5 4.5H3.8V8.2H6.2L5 11.5M12.2 4.5H9.5V8.2H11.9L10.7 11.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+              </button>
+            </div>
+
+            <span class="fmt-sep" role="separator" aria-orientation="vertical"></span>
+
+            <div class="fmt-group" role="group" aria-label="Code, links, media, and tables">
+              <button id="fmt-code" type="button" class="fmt-btn" title={tr('tooltip_code')} aria-label={tr('tooltip_code')} onclick={() => send({ ApplyFormat: 'Code' })}>
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path d="M5.8 4.5L2.5 8L5.8 11.5M10.2 4.5L13.5 8L10.2 11.5" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+              </button>
+              <button id="fmt-link" type="button" class="fmt-btn" title={tr('tooltip_link')} aria-label={tr('tooltip_link')} onclick={() => send({ ApplyFormat: 'Link' })}>
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path d="M6.8 9.2L9.2 6.8M5.5 11.2L4.2 12.5C3.1 13.6 1.8 12.3 2.9 11.2L4.5 9.6M10.5 4.8L11.8 3.5C12.9 2.4 14.2 3.7 13.1 4.8L11.5 6.4" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" />
+                </svg>
+              </button>
+              <button id="fmt-image" type="button" class="fmt-btn" title={tr('tooltip_image')} aria-label={tr('tooltip_image')} onclick={() => send({ ApplyFormat: 'Image' })}>
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <rect x="2.2" y="3" width="11.6" height="10" rx="1.8" stroke="currentColor" stroke-width="1.4" />
+                  <circle cx="5.5" cy="6" r="1.1" fill="currentColor" />
+                  <path d="M3 11.8L6.8 8.4L9.5 10.6L11.2 9.2L13 11.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+              </button>
+              <button id="fmt-table" type="button" class="fmt-btn" title={tr('tooltip_table')} aria-label={tr('tooltip_table')} onclick={() => send({ ApplyFormat: 'Table' })}>
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <rect x="2.2" y="3" width="11.6" height="10" rx="1.8" stroke="currentColor" stroke-width="1.4" />
+                  <line x1="2.2" y1="6.8" x2="13.8" y2="6.8" stroke="currentColor" stroke-width="1.3" />
+                  <line x1="8" y1="3" x2="8" y2="13" stroke="currentColor" stroke-width="1.3" />
+                </svg>
+              </button>
+            </div>
+
+            <span class="fmt-sep" role="separator" aria-orientation="vertical"></span>
+          {/if}
+
+          <button
+            id="btn-toggle-toolbar"
+            type="button"
+            class="fmt-btn fmt-collapse-btn"
+            aria-label={tr('tooltip_toggle_toolbar')}
+            title={tr('tooltip_toggle_toolbar')}
+            onclick={() => send('ToggleToolbar')}
+          >
+            {snapshot.toolbar_expanded ? '‹' : '›'}
+          </button>
+        </div>
+      {/if}
 
       <!-- Right Floating Island: Status & Document Statistics Pill -->
       <div
@@ -1157,11 +1537,11 @@
           class:is-active={snapshot.overlay === 'StatsMenu'}
           aria-haspopup="menu"
           aria-expanded={snapshot.overlay === 'StatsMenu'}
-          title={tr('tooltip_stats')}
+          title={snapshot.overlay === 'StatsMenu' ? undefined : tr('tooltip_stats')}
           onclick={() => send({ SetOverlay: 'StatsMenu' })}
         >
           <span>{snapshot.active_stat_label}</span>
-          <span class="chevron">▴</span>
+          <span class="chevron" aria-hidden="true">▴</span>
         </button>
       </div>
     </footer>
@@ -1202,6 +1582,7 @@
         {/each}
         <div class="popover-divider"></div>
         <button
+          id="menu-item-open-native"
           type="button"
           class="popover-item popover-item-accent"
           role="menuitem"
@@ -1212,9 +1593,9 @@
       </div>
     {:else if snapshot.overlay === 'SaveMenu'}
       <div class="popover save-popover" role="menu" data-testid="popover-save">
-        <button type="button" class="popover-item" role="menuitem" onclick={handleSaveAsNativeDialog}>
+        <button id="menu-item-save-as" type="button" class="popover-item" role="menuitem" onclick={handleSaveAsNativeDialog}>
           <span>{tr('save_as')}</span>
-          <span class="shortcut-hint">Ctrl+Shift+S</span>
+          <span class="shortcut-hint" aria-hidden="true">Ctrl+Shift+S</span>
         </button>
         <button
           type="button"
@@ -1233,9 +1614,9 @@
             type="button"
             class="popover-item"
             role="menuitem"
-            onclick={() => send({ ExportDocument: fmt })}
+            onclick={() => handleExportWithDialog(fmt as ExportFormat, true)}
           >
-            <span>Esporta {fmt.toUpperCase()}</span>
+            <span>{tr('export_fmt_prefix', 'Esporta')} {fmt.toUpperCase()}</span>
           </button>
         {/each}
       </div>
@@ -1540,8 +1921,8 @@
         <div class="modal-body scroller">
           <div class="form-row">
             <div>
-              <div class="form-label">Modalità luminosità</div>
-              <div class="form-sub">Chiaro · Sepia · Semi-Dark · Scuro</div>
+              <div class="form-label">{tr('brightness_mode', 'Modalità luminosità')}</div>
+              <div class="form-sub">{tr('brightness_sub', 'Chiaro · Sepia · Semi-Dark · Scuro')}</div>
             </div>
             <div class="pill-group">
               {#each [
@@ -1892,37 +2273,39 @@
 
             <div class="form-row">
               <div>
-                <div class="form-label">Journal di ripristino WAL (&lt; 300ms)</div>
+                <div class="form-label">{tr('wal_title', 'Journal di ripristino WAL (< 300ms)')}</div>
                 <div class="form-sub">
-                  Salvataggio continuo su journal locale e ripristino automatico all'avvio
+                  {tr('wal_sub')}
                 </div>
               </div>
               <button
+                id="btn-toggle-wal-autosave"
                 type="button"
                 class="choice-pill"
-                class:is-active={walAutosaveEnabled}
-                aria-pressed={walAutosaveEnabled}
-                onclick={() => (walAutosaveEnabled = !walAutosaveEnabled)}
+                class:is-active={snapshot.wal_autosave_enabled}
+                aria-pressed={snapshot.wal_autosave_enabled}
+                onclick={() => send({ SetWalAutosave: !snapshot!.wal_autosave_enabled })}
               >
-                {walAutosaveEnabled ? 'Attivo' : 'Disattivato'}
+                {snapshot.wal_autosave_enabled ? tr('enabled', 'Attivo') : tr('disabled', 'Disattivato')}
               </button>
             </div>
 
             <div class="form-row">
               <div>
-                <div class="form-label">Monitoraggio modifiche esterne sul disco</div>
+                <div class="form-label">{tr('watcher_title', 'Monitoraggio modifiche esterne sul disco')}</div>
                 <div class="form-sub">
-                  Notifica immediata quando il file attivo viene modificato da un altro programma
+                  {tr('watcher_sub')}
                 </div>
               </div>
               <button
+                id="btn-toggle-disk-watcher"
                 type="button"
                 class="choice-pill"
-                class:is-active={diskWatcherEnabled}
-                aria-pressed={diskWatcherEnabled}
-                onclick={() => (diskWatcherEnabled = !diskWatcherEnabled)}
+                class:is-active={snapshot.disk_watcher_enabled}
+                aria-pressed={snapshot.disk_watcher_enabled}
+                onclick={() => send({ SetDiskWatcher: !snapshot!.disk_watcher_enabled })}
               >
-                {diskWatcherEnabled ? 'Attivo' : 'Disattivato'}
+                {snapshot.disk_watcher_enabled ? tr('enabled', 'Attivo') : tr('disabled', 'Disattivato')}
               </button>
             </div>
 
@@ -2023,14 +2406,24 @@
           <div class="export-options-pane">
             <div class="form-col">
               <label class="form-label" for="export-dest-input">{tr('export_dest_path')}</label>
-              <input
-                id="export-dest-input"
-                type="text"
-                class="search-input"
-                value={snapshot.export_output_path}
-                oninput={(e) =>
-                  send({ SetExportOutputPath: (e.currentTarget as HTMLInputElement).value })}
-              />
+              <div class="export-dest-row">
+                <input
+                  id="export-dest-input"
+                  type="text"
+                  class="search-input"
+                  value={snapshot.export_output_path}
+                  oninput={(e) =>
+                    send({ SetExportOutputPath: (e.currentTarget as HTMLInputElement).value })}
+                />
+                <button
+                  id="btn-export-browse"
+                  type="button"
+                  class="choice-pill"
+                  onclick={() => handleExportWithDialog(null, false)}
+                >
+                  {tr('browse', 'Sfoglia...')}
+                </button>
+              </div>
             </div>
 
             <div class="form-row">
@@ -2091,24 +2484,93 @@
         <div class="modal-body">
           {#if snapshot.overlay === 'ShortcutsDialog'}
             <div class="shortcuts-grid">
-              <div><span>Nuova scheda</span><b>Ctrl+T</b></div>
-              <div><span>Chiudi scheda</span><b>Ctrl+W</b></div>
-              <div><span>Scheda successiva / prec.</span><b>Ctrl+Tab / Ctrl+Shift+Tab</b></div>
+              <div><span>{tr('sc_new_tab')}</span><b>Ctrl+T</b></div>
+              <div><span>{tr('sc_close_tab')}</span><b>Ctrl+W</b></div>
+              <div><span>{tr('sc_cycle_tabs')}</span><b>Ctrl+Tab / Ctrl+Shift+Tab</b></div>
               <div><span>{tr('new_doc')}</span><b>Ctrl+N</b></div>
               <div><span>{tr('open_file')}</span><b>Ctrl+O</b></div>
               <div><span>{tr('save')} / {tr('save_as')}</span><b>Ctrl+S / Ctrl+Shift+S</b></div>
-              <div><span>Annulla / Ripeti</span><b>Ctrl+Z / Ctrl+Shift+Z</b></div>
-              <div><span>Grassetto / Corsivo / Barrato</span><b>Ctrl+B / Ctrl+I / Ctrl+Shift+X</b></div>
-              <div><span>Zoom testo</span><b>Ctrl++ / Ctrl+- / Ctrl+0 / Ctrl+Rotella</b></div>
-              <div><span>{tr('find_replace')}</span><b>Ctrl+F</b></div>
+              <div><span>{tr('sc_undo_redo')}</span><b>Ctrl+Z / Ctrl+Shift+Z</b></div>
+              <div><span>{tr('sc_inline_fmt')}</span><b>Ctrl+B / Ctrl+I / Ctrl+Shift+X</b></div>
+              <div><span>{tr('sc_insert_link')}</span><b>Ctrl+K</b></div>
+              <div><span>{tr('sc_live_preview')}</span><b>Ctrl+L</b></div>
+              <div><span>{tr('sc_split_preview')}</span><b>Ctrl+Shift+P</b></div>
+              <div><span>{tr('sc_zoom')}</span><b>Ctrl++ / Ctrl+- / Ctrl+0</b></div>
+              <div><span>{tr('find_replace')}</span><b>Ctrl+F / Ctrl+H</b></div>
               <div><span>{tr('fullscreen_mode')}</span><b>F11</b></div>
             </div>
           {:else}
-            <p style="margin: 0 0 8px 0; font-weight: 700;">Accent Markdown Editor v0.8.22</p>
+            <p style="margin: 0 0 8px 0; font-weight: 700;">Accent Markdown Editor v0.8.23</p>
             <p style="margin: 0; color: var(--fg-muted);">
               Rust Backend (L1–L4) • Tauri v2 • Svelte 5 • CodeMirror 6 • Offline KaTeX &amp; Mermaid
             </p>
           {/if}
+        </div>
+      </div>
+    {/if}
+
+    <!-- ====================================================================
+         10. UNSAVED TAB CLOSE CONFIRMATION MODAL
+         ==================================================================== -->
+    {#if pendingCloseTabIndex !== null}
+      {@const closingTab = snapshot.tabs[pendingCloseTabIndex]}
+      <div
+        class="overlay-backdrop is-modal"
+        role="presentation"
+        onclick={() => (pendingCloseTabIndex = null)}
+      ></div>
+      <div
+        class="modal-card info-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="unsaved-tab-modal-title"
+        data-testid="modal-unsaved-tab"
+      >
+        <div class="modal-header">
+          <h2 id="unsaved-tab-modal-title">
+            {tr('unsaved_tab_title')} — {closingTab?.document_title ?? ''}
+          </h2>
+          <button
+            type="button"
+            class="modal-close-btn"
+            aria-label={tr('cancel')}
+            onclick={() => (pendingCloseTabIndex = null)}
+          >
+            ×
+          </button>
+        </div>
+        <div class="modal-body">
+          <p style="margin: 0; line-height: 1.5;">
+            {tr('unsaved_tab_msg')}
+          </p>
+        </div>
+        <div class="modal-footer">
+          <!-- svelte-ignore a11y_autofocus -->
+          <button
+            id="unsaved-tab-cancel"
+            type="button"
+            class="footer-btn"
+            autofocus
+            onclick={() => (pendingCloseTabIndex = null)}
+          >
+            {tr('cancel')}
+          </button>
+          <button
+            id="unsaved-tab-discard"
+            type="button"
+            class="footer-btn footer-btn-danger"
+            onclick={confirmDiscardAndCloseTab}
+          >
+            {tr('discard_changes')}
+          </button>
+          <button
+            id="unsaved-tab-save"
+            type="button"
+            class="footer-btn footer-btn-primary"
+            onclick={confirmSaveAndCloseTab}
+          >
+            {tr('save')}
+          </button>
         </div>
       </div>
     {/if}
@@ -2124,13 +2586,10 @@
     flex-direction: column;
     background-color: var(--bg-canvas);
     color: var(--fg-primary);
-    border-radius: 12px;
-    border: 1px solid color-mix(in srgb, var(--border-headerbar) 75%, transparent);
     overflow: clip;
   }
 
   .window-shell.is-maximized {
-    border-radius: 0;
     border: none;
   }
 
@@ -2782,12 +3241,27 @@
   .search-input {
     width: 100%;
     height: 30px;
-    padding: 0 58px 0 10px;
+    padding: 0 10px;
     border-radius: 6px;
     border: 1px solid var(--border-headerbar);
     background-color: var(--bg-canvas);
     color: var(--fg-primary);
     font-size: 13px;
+  }
+
+  .search-query-input {
+    padding-right: 58px;
+  }
+
+  .export-dest-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .export-dest-row .search-input {
+    flex: 1;
+    min-width: 0;
   }
 
   .search-counter {
@@ -2911,14 +3385,21 @@
     gap: 5px;
   }
 
+  .island-right {
+    margin-inline-start: auto;
+  }
+
   /* 7. Popovers & Modals */
   .overlay-backdrop {
     position: absolute;
     inset: 0;
-    z-index: 40;
+    z-index: 25;
   }
 
   .overlay-backdrop.is-modal {
+    z-index: 55;
+    overflow: hidden;
+    overscroll-behavior: contain;
     background-color: rgba(0, 0, 0, 0.36);
   }
 
@@ -3394,6 +3875,11 @@
 
   .footer-btn-primary {
     background-color: var(--accent-orange);
+    color: #ffffff;
+  }
+
+  .footer-btn-danger {
+    background-color: #c53030;
     color: #ffffff;
   }
 

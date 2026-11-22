@@ -836,8 +836,63 @@ pub enum Action {
     ToggleExportSyntaxHighlight,
     ExecuteExport,
     ExportDocument(String),
+    SetWalAutosave(bool),
+    SetDiskWatcher(bool),
+    SetStatusMessage(String),
     InsertText(String),
     MoveCursor(usize),
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Case-insensitive Unicode-aware substring search returning valid UTF-8 byte ranges in `haystack`.
+fn find_case_insensitive_byte_ranges(haystack: &str, needle: &str) -> Vec<std::ops::Range<usize>> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let needle_lower: Vec<char> = needle.chars().flat_map(|c| c.to_lowercase()).collect();
+    if needle_lower.is_empty() {
+        return Vec::new();
+    }
+    let hay_chars: Vec<(usize, usize, char)> = haystack
+        .char_indices()
+        .map(|(b, ch)| (b, b + ch.len_utf8(), ch))
+        .collect();
+    let mut matches = Vec::new();
+    let mut i = 0usize;
+    while i < hay_chars.len() {
+        let mut n_idx = 0usize;
+        let mut j = i;
+        let mut ok = true;
+        while n_idx < needle_lower.len() {
+            if j >= hay_chars.len() {
+                ok = false;
+                break;
+            }
+            for lc in hay_chars[j].2.to_lowercase() {
+                if n_idx >= needle_lower.len() || lc != needle_lower[n_idx] {
+                    ok = false;
+                    break;
+                }
+                n_idx += 1;
+            }
+            if !ok {
+                break;
+            }
+            j += 1;
+        }
+        if ok && n_idx == needle_lower.len() && j > i {
+            let start_b = hay_chars[i].0;
+            let end_b = hay_chars[j - 1].1;
+            matches.push(start_b..end_b);
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    matches
 }
 
 /// User preferences and session state persisted atomically across restarts in `settings.json`.
@@ -857,6 +912,10 @@ pub struct PersistedSettings {
     pub stat_metric: StatMetric,
     pub selected_export_format: ExportFormat,
     pub export_syntax_highlight: bool,
+    #[serde(default = "default_true")]
+    pub wal_autosave_enabled: bool,
+    #[serde(default = "default_true")]
+    pub disk_watcher_enabled: bool,
     pub last_opened_dir: Option<PathBuf>,
     pub last_opened_file: Option<PathBuf>,
     pub recent_files: Vec<PathBuf>,
@@ -880,6 +939,8 @@ impl Default for PersistedSettings {
             stat_metric: StatMetric::Words,
             selected_export_format: ExportFormat::Pdf,
             export_syntax_highlight: true,
+            wal_autosave_enabled: true,
+            disk_watcher_enabled: true,
             last_opened_dir: None,
             last_opened_file: None,
             recent_files: Vec::new(),
@@ -969,6 +1030,8 @@ pub struct Session {
     pub selected_export_format: ExportFormat,
     pub export_output_path: String,
     pub export_syntax_highlight: bool,
+    pub wal_autosave_enabled: bool,
+    pub disk_watcher_enabled: bool,
     pub mermaid_cache: RefCell<MermaidCache>,
     pub status_message: Option<String>,
     pub buffer: DocumentBuffer,
@@ -1103,6 +1166,8 @@ impl Session {
             selected_export_format: ExportFormat::Pdf,
             export_output_path: default_export_path,
             export_syntax_highlight: true,
+            wal_autosave_enabled: true,
+            disk_watcher_enabled: true,
             mermaid_cache: RefCell::new(MermaidCache::new()),
             status_message: None,
             buffer: default_buf,
@@ -1231,6 +1296,10 @@ impl Session {
     /// Checks whether the file on disk for the currently active tab has been modified externally
     /// compared to `self.original_file_hash` (and `self.dismissed_disk_hash`).
     pub fn check_active_tab_disk_modification(&mut self) -> bool {
+        if !self.disk_watcher_enabled {
+            self.disk_modified_banner_active = false;
+            return false;
+        }
         let Some(ref path) = self.current_file_path else {
             self.disk_modified_banner_active = false;
             return false;
@@ -1448,6 +1517,8 @@ impl Session {
             stat_metric: self.stat_metric,
             selected_export_format: self.selected_export_format,
             export_syntax_highlight: self.export_syntax_highlight,
+            wal_autosave_enabled: self.wal_autosave_enabled,
+            disk_watcher_enabled: self.disk_watcher_enabled,
             last_opened_dir: Some(self.file_dialog_dir.clone()),
             last_opened_file: self.current_file_path.clone(),
             recent_files: self.recent_files.clone(),
@@ -1494,6 +1565,8 @@ impl Session {
         self.stat_metric = settings.stat_metric;
         self.selected_export_format = settings.selected_export_format;
         self.export_syntax_highlight = settings.export_syntax_highlight;
+        self.wal_autosave_enabled = settings.wal_autosave_enabled;
+        self.disk_watcher_enabled = settings.disk_watcher_enabled;
 
         if let Some(dir) = settings.last_opened_dir {
             if dir.is_dir() {
@@ -1650,6 +1723,9 @@ impl Session {
 
     /// Checks whether the `< 300ms` debounce window has elapsed and flushes the journal for any dirty tab.
     pub fn poll_journal_flush(&mut self, now: std::time::Instant) -> bool {
+        if !self.wal_autosave_enabled {
+            return false;
+        }
         let has_pending = (self.is_dirty && self.journal_pending_flush)
             || self
                 .tabs
@@ -1698,7 +1774,7 @@ impl Session {
         &self,
         now: std::time::Instant,
     ) -> Option<std::time::Duration> {
-        if !self.is_dirty || !self.journal_pending_flush {
+        if !self.wal_autosave_enabled || !self.is_dirty || !self.journal_pending_flush {
             return None;
         }
         let debounce = std::time::Duration::from_millis(JOURNAL_DEBOUNCE_MS);
@@ -1863,6 +1939,10 @@ impl Session {
         self.sync_active_tab_to_slot();
         let _ = self.save_settings();
         self.settings_pending_flush = false;
+        if !self.wal_autosave_enabled {
+            let _ = accent_storage::clear_all_journals(&self.recovery_dir);
+            return;
+        }
         for tab in &mut self.tabs {
             let current_hash = accent_storage::compute_content_hash(tab.buffer.as_str());
             if !tab.recovered_from_crash
@@ -1937,9 +2017,12 @@ impl Session {
                 | Action::NewTab
                 | Action::CloseTab(_)
                 | Action::OpenFile(_)
+                | Action::OpenTutorial
                 | Action::ConfirmRecoverySave
                 | Action::SaveAsFile(_)
                 | Action::ExecuteExport
+                | Action::SetWalAutosave(_)
+                | Action::SetDiskWatcher(_)
         ) || (matches!(action, Action::SaveDocument) && !had_file_path_before);
         let debounced_persist = matches!(
             action,
@@ -2068,57 +2151,88 @@ impl Session {
             Action::SetReplaceText(r) => self.replace_text = r,
             Action::FindNext => {
                 if !self.search_query.is_empty() {
-                    let match_byte = {
+                    let match_range = {
                         let current = self.buffer.as_str();
-                        let cur_char = self.buffer.cursor();
-                        let cur_byte = self.buffer.char_to_byte(cur_char).min(current.len());
-                        current[cur_byte..]
-                            .find(&self.search_query)
-                            .map(|off| cur_byte + off)
-                            .or_else(|| current.find(&self.search_query))
+                        let ranges = find_case_insensitive_byte_ranges(current, &self.search_query);
+                        let sel_end_byte = self.buffer.selection_byte_range().end.min(current.len());
+                        ranges
+                            .iter()
+                            .find(|r| r.start >= sel_end_byte)
+                            .or_else(|| ranges.first())
+                            .cloned()
                     };
-                    if let Some(byte_start) = match_byte {
-                        let byte_end = byte_start + self.search_query.len();
-                        let char_start = self.buffer.byte_to_char(byte_start);
-                        let char_end = self.buffer.byte_to_char(byte_end);
+                    if let Some(r) = match_range {
+                        let char_start = self.buffer.byte_to_char(r.start);
+                        let char_end = self.buffer.byte_to_char(r.end);
                         self.buffer.set_selection(char_end, char_start);
                     }
                 }
             }
             Action::FindPrev => {
                 if !self.search_query.is_empty() {
-                    let match_byte = {
+                    let match_range = {
                         let current = self.buffer.as_str();
-                        let sel_min = self.buffer.selection_char_range().start;
-                        let cur_byte = self.buffer.char_to_byte(sel_min).min(current.len());
-                        current[..cur_byte]
-                            .rfind(&self.search_query)
-                            .or_else(|| current.rfind(&self.search_query))
+                        let ranges = find_case_insensitive_byte_ranges(current, &self.search_query);
+                        let sel_start_byte =
+                            self.buffer.selection_byte_range().start.min(current.len());
+                        ranges
+                            .iter()
+                            .rev()
+                            .find(|r| r.end <= sel_start_byte)
+                            .or_else(|| ranges.last())
+                            .cloned()
                     };
-                    if let Some(byte_start) = match_byte {
-                        let byte_end = byte_start + self.search_query.len();
-                        let char_start = self.buffer.byte_to_char(byte_start);
-                        let char_end = self.buffer.byte_to_char(byte_end);
+                    if let Some(r) = match_range {
+                        let char_start = self.buffer.byte_to_char(r.start);
+                        let char_end = self.buffer.byte_to_char(r.end);
                         self.buffer.set_selection(char_end, char_start);
                     }
                 }
             }
             Action::ReplaceNext => {
                 if !self.search_query.is_empty() {
-                    let updated_opt = {
+                    let replacement_plan = {
                         let current = self.buffer.as_str();
-                        current.find(&self.search_query).map(|pos| {
-                            let mut updated = String::with_capacity(current.len());
-                            updated.push_str(&current[..pos]);
+                        let ranges = find_case_insensitive_byte_ranges(current, &self.search_query);
+                        let sel_bytes = self.buffer.selection_byte_range();
+                        let target = ranges
+                            .iter()
+                            .find(|r| **r == sel_bytes)
+                            .or_else(|| ranges.iter().find(|r| r.start >= sel_bytes.start))
+                            .or_else(|| ranges.first())
+                            .cloned();
+                        target.map(|r| {
+                            let mut updated =
+                                String::with_capacity(current.len() + self.replace_text.len());
+                            updated.push_str(&current[..r.start]);
                             updated.push_str(&self.replace_text);
-                            updated.push_str(&current[pos + self.search_query.len()..]);
-                            updated
+                            updated.push_str(&current[r.end..]);
+                            let after_byte = r.start + self.replace_text.len();
+                            (updated, after_byte)
                         })
                     };
-                    if let Some(updated) = updated_opt {
+                    if let Some((updated, after_byte)) = replacement_plan {
                         self.detach_active_slot_history();
                         self.mark_dirty_edit();
                         self.buffer.set_text_owned(updated);
+                        let next_match = {
+                            let current = self.buffer.as_str();
+                            let ranges =
+                                find_case_insensitive_byte_ranges(current, &self.search_query);
+                            ranges
+                                .iter()
+                                .find(|r| r.start >= after_byte)
+                                .or_else(|| ranges.first())
+                                .cloned()
+                        };
+                        if let Some(nr) = next_match {
+                            let cs = self.buffer.byte_to_char(nr.start);
+                            let ce = self.buffer.byte_to_char(nr.end);
+                            self.buffer.set_selection(ce, cs);
+                        } else {
+                            let c = self.buffer.byte_to_char(after_byte);
+                            self.buffer.set_cursor(c);
+                        }
                     }
                 }
             }
@@ -2460,7 +2574,11 @@ impl Session {
                         self.recent_files.truncate(8);
                     }
                     if !self.recovery_banner_active {
-                        self.status_message = Some(format!("Aperto: {}", self.document_title));
+                        self.status_message = Some(match self.locale {
+                            Locale::It => format!("Aperto: {}", self.document_title),
+                            Locale::En => format!("Opened: {}", self.document_title),
+                            Locale::Es => format!("Abierto: {}", self.document_title),
+                        });
                     }
                     self.check_active_tab_disk_modification();
                     self.overlay = ActiveOverlay::None;
@@ -2595,37 +2713,83 @@ impl Session {
                         if self.recent_files.len() > 8 {
                             self.recent_files.truncate(8);
                         }
-                        self.status_message = Some(format!("Aperto: {}", self.document_title));
+                        self.status_message = Some(match self.locale {
+                            Locale::It => format!("Aperto: {}", self.document_title),
+                            Locale::En => format!("Opened: {}", self.document_title),
+                            Locale::Es => format!("Abierto: {}", self.document_title),
+                        });
                         self.overlay = ActiveOverlay::None;
                     }
                 }
             }
             Action::OpenTutorial => {
+                self.sync_active_tab_to_slot();
                 let tutorial_path = std::env::temp_dir().join("accent_tutorial.md");
                 let _ = std::fs::write(&tutorial_path, TUTORIAL_MARKDOWN);
                 let _ = accent_storage::remove_journal_for_target(
                     &self.recovery_dir,
                     Some(&tutorial_path),
                 );
-                let tut_meta = accent_storage::probe_file_meta(&tutorial_path);
-                self.document_title = "tutorial_accent.md".to_string();
-                self.current_file_path = Some(tutorial_path);
-                self.original_file_hash =
-                    Some(accent_storage::compute_content_hash(TUTORIAL_MARKDOWN));
-                self.original_file_len = Some(TUTORIAL_MARKDOWN.len());
-                self.last_checked_disk_meta = Some(tut_meta);
-                self.is_dirty = false;
-                self.journal_pending_flush = false;
-                self.recovered_from_crash = false;
-                self.recovery_banner_active = false;
-                self.disk_modified_banner_active = false;
-                self.dismissed_disk_hash = None;
+                if let Some(existing_idx) = self.tabs.iter().position(|t| {
+                    t.current_file_path
+                        .as_deref()
+                        .is_some_and(|p| Self::paths_match(p, &tutorial_path))
+                }) {
+                    self.active_tab_index = existing_idx;
+                    self.ensure_active_tab_visible();
+                    self.load_active_tab_from_slot();
+                } else {
+                    let is_untouched_placeholder = self.is_single_untouched_placeholder()
+                        || (!self.is_dirty && self.current_file_path.is_none());
+                    let tut_meta = accent_storage::probe_file_meta(&tutorial_path);
+                    let tut_hash = Some(accent_storage::compute_content_hash(TUTORIAL_MARKDOWN));
+                    let mut tut_buf = DocumentBuffer::from_str_content(TUTORIAL_MARKDOWN);
+                    tut_buf.set_cursor(0);
+                    if !is_untouched_placeholder {
+                        let id = self.next_tab_id;
+                        self.next_tab_id += 1;
+                        self.tabs.push(DocumentTab {
+                            tab_id: id,
+                            document_title: "tutorial_accent.md".to_string(),
+                            current_file_path: Some(tutorial_path.clone()),
+                            is_dirty: false,
+                            original_file_hash: tut_hash.clone(),
+                            original_file_len: Some(TUTORIAL_MARKDOWN.len()),
+                            last_checked_disk_meta: Some(tut_meta),
+                            last_edit_instant: None,
+                            last_edit_utc_ms: 0,
+                            journal_pending_flush: false,
+                            recovered_from_crash: false,
+                            recovery_banner_active: false,
+                            disk_modified_banner_active: false,
+                            dismissed_disk_hash: None,
+                            buffer: tut_buf.clone(),
+                        });
+                        self.active_tab_index = self.tabs.len() - 1;
+                    }
+                    self.ensure_active_tab_visible();
+                    self.document_title = "tutorial_accent.md".to_string();
+                    self.file_dialog_input = "tutorial_accent.md".to_string();
+                    self.current_file_path = Some(tutorial_path);
+                    self.update_default_export_path();
+                    self.original_file_hash = tut_hash;
+                    self.original_file_len = Some(TUTORIAL_MARKDOWN.len());
+                    self.last_checked_disk_meta = Some(tut_meta);
+                    self.is_dirty = false;
+                    self.journal_pending_flush = false;
+                    self.recovered_from_crash = false;
+                    self.recovery_banner_active = false;
+                    self.disk_modified_banner_active = false;
+                    self.dismissed_disk_hash = None;
+                    self.display_word_count_override = None;
+                    self.buffer = tut_buf;
+                }
                 self.chrome_autohidden = false;
-                self.display_word_count_override = None;
-                let mut tut_buf = DocumentBuffer::from_str_content(TUTORIAL_MARKDOWN);
-                tut_buf.set_cursor(0);
-                self.buffer = tut_buf;
-                self.status_message = Some("Tutorial caricato".to_string());
+                self.status_message = Some(match self.locale {
+                    Locale::It => "Tutorial caricato".to_string(),
+                    Locale::En => "Tutorial loaded".to_string(),
+                    Locale::Es => "Tutorial cargado".to_string(),
+                });
                 self.overlay = ActiveOverlay::None;
             }
             Action::SaveDocument | Action::ConfirmRecoverySave => {
@@ -2657,7 +2821,11 @@ impl Session {
                         Some(accent_storage::compute_content_hash(self.buffer.as_str()));
                     self.last_checked_disk_meta = Some(accent_storage::probe_file_meta(&target));
                     self.current_file_path = Some(target.clone());
-                    self.status_message = Some(format!("Salvato in {}", target.display()));
+                    self.status_message = Some(match self.locale {
+                        Locale::It => format!("Salvato in {}", target.display()),
+                        Locale::En => format!("Saved to {}", target.display()),
+                        Locale::Es => format!("Guardado en {}", target.display()),
+                    });
                 }
             }
             Action::DiscardRecovery => {
@@ -2703,7 +2871,11 @@ impl Session {
                     clean_buf.set_cursor(0);
                     self.buffer = clean_buf;
                 }
-                self.status_message = Some("Ripristino scartato".to_string());
+                self.status_message = Some(match self.locale {
+                    Locale::It => "Ripristino scartato".to_string(),
+                    Locale::En => "Recovery discarded".to_string(),
+                    Locale::Es => "Recuperación descartada".to_string(),
+                });
             }
             Action::SaveAsFile(path) => {
                 if accent_storage::atomic_save(&path, self.buffer.as_str()).is_ok() {
@@ -2743,7 +2915,11 @@ impl Session {
                     if self.recent_files.len() > 8 {
                         self.recent_files.truncate(8);
                     }
-                    self.status_message = Some(format!("Salvato come {}", path.display()));
+                    self.status_message = Some(match self.locale {
+                        Locale::It => format!("Salvato come {}", path.display()),
+                        Locale::En => format!("Saved as {}", path.display()),
+                        Locale::Es => format!("Guardado como {}", path.display()),
+                    });
                     self.overlay = ActiveOverlay::None;
                 }
             }
@@ -2773,8 +2949,11 @@ impl Session {
                         self.dismissed_disk_hash = None;
                         self.chrome_autohidden = false;
                         self.display_word_count_override = None;
-                        self.status_message =
-                            Some(format!("Ricaricato da disco: {}", self.document_title));
+                        self.status_message = Some(match self.locale {
+                            Locale::It => format!("Ricaricato da disco: {}", self.document_title),
+                            Locale::En => format!("Reloaded from disk: {}", self.document_title),
+                            Locale::Es => format!("Recargado del disco: {}", self.document_title),
+                        });
                     }
                 }
             }
@@ -2833,18 +3012,28 @@ impl Session {
                 ) {
                     Ok(bytes) => {
                         if accent_storage::atomic_save_bytes(&out_path, &bytes).is_ok() {
-                            self.status_message =
-                                Some(format!("Esportato in {}", out_path.display()));
+                            self.status_message = Some(match self.locale {
+                                Locale::It => format!("Esportato in {}", out_path.display()),
+                                Locale::En => format!("Exported to {}", out_path.display()),
+                                Locale::Es => format!("Exportado en {}", out_path.display()),
+                            });
                             self.overlay = ActiveOverlay::None;
                         } else {
-                            self.status_message = Some(format!(
-                                "Errore scrittura in {}",
-                                out_path.display()
-                            ));
+                            self.status_message = Some(match self.locale {
+                                Locale::It => format!("Errore scrittura in {}", out_path.display()),
+                                Locale::En => format!("Write error at {}", out_path.display()),
+                                Locale::Es => {
+                                    format!("Error de escritura en {}", out_path.display())
+                                }
+                            });
                         }
                     }
                     Err(err) => {
-                        self.status_message = Some(format!("Errore esportazione: {err}"));
+                        self.status_message = Some(match self.locale {
+                            Locale::It => format!("Errore esportazione: {err}"),
+                            Locale::En => format!("Export error: {err}"),
+                            Locale::Es => format!("Error de exportación: {err}"),
+                        });
                     }
                 }
             }
@@ -2860,9 +3049,35 @@ impl Session {
                     fmt,
                 ) {
                     let _ = accent_storage::atomic_save_bytes(&out_path, &bytes);
-                    self.status_message = Some(format!("Esportato in {}", out_path.display()));
+                    self.status_message = Some(match self.locale {
+                        Locale::It => format!("Esportato in {}", out_path.display()),
+                        Locale::En => format!("Exported to {}", out_path.display()),
+                        Locale::Es => format!("Exportado en {}", out_path.display()),
+                    });
                 }
                 self.overlay = ActiveOverlay::None;
+            }
+            Action::SetWalAutosave(enabled) => {
+                self.wal_autosave_enabled = enabled;
+                if !enabled {
+                    self.journal_pending_flush = false;
+                    for tab in &mut self.tabs {
+                        tab.journal_pending_flush = false;
+                    }
+                    let _ = accent_storage::clear_all_journals(&self.recovery_dir);
+                }
+            }
+            Action::SetDiskWatcher(enabled) => {
+                self.disk_watcher_enabled = enabled;
+                if !enabled {
+                    self.disk_modified_banner_active = false;
+                    for tab in &mut self.tabs {
+                        tab.disk_modified_banner_active = false;
+                    }
+                }
+            }
+            Action::SetStatusMessage(msg) => {
+                self.status_message = Some(msg);
             }
             Action::InsertText(text) => {
                 self.detach_active_slot_history();
@@ -3973,5 +4188,98 @@ mod tests {
         assert_eq!(session.format_active_stat(), "16 parole");
         session.apply(Action::SetStatMetric(StatMetric::Paragraphs));
         assert_eq!(session.format_active_stat(), "3 paragrafi");
+    }
+
+    #[test]
+    fn test_open_tutorial_preserves_dirty_active_tab_and_deduplicates() {
+        let mut session = Session::default();
+        session.apply(Action::UpdateBufferText(
+            "# Appunti Importanti\n\nNon perdere questo testo!".to_string(),
+        ));
+        assert!(session.is_dirty);
+        assert_eq!(session.tabs.len(), 1);
+
+        // Opening tutorial when active tab has unsaved edits must open a NEW tab
+        session.apply(Action::OpenTutorial);
+        assert_eq!(session.tabs.len(), 2);
+        assert_eq!(session.active_tab_index, 1);
+        assert_eq!(session.document_title, "tutorial_accent.md");
+        assert!(!session.is_dirty);
+
+        // Calling OpenTutorial again deduplicates to the existing tutorial tab
+        session.apply(Action::SwitchTab(0));
+        assert!(session.is_dirty);
+        assert!(session.buffer.text().contains("Non perdere questo testo!"));
+        session.apply(Action::OpenTutorial);
+        assert_eq!(session.tabs.len(), 2);
+        assert_eq!(session.active_tab_index, 1);
+    }
+
+    #[test]
+    fn test_case_insensitive_find_prev_next_and_cursor_aware_replace() {
+        let mut session = Session::default();
+        session.apply(Action::UpdateBufferText(
+            "🚀 Guida uno, GUIDA due e guida tre.".to_string(),
+        ));
+        session.apply(Action::MoveCursor(0));
+        session.apply(Action::SetSearchQuery("guida".to_string()));
+        session.apply(Action::SetReplaceText("Manuale".to_string()));
+
+        // 1st FindNext -> "Guida" (char 2..7 after "🚀 ")
+        session.apply(Action::FindNext);
+        assert_eq!(session.buffer.selection_char_range(), 2..7);
+
+        // 2nd FindNext -> "GUIDA"
+        session.apply(Action::FindNext);
+        let sel2 = session.buffer.selection_char_range();
+        let bytes2 = session.buffer.selection_byte_range();
+        assert_eq!(&session.buffer.as_str()[bytes2], "GUIDA");
+
+        // ReplaceNext while 2nd match ("GUIDA") is selected -> replaces ONLY the 2nd match, NOT the 1st!
+        session.apply(Action::ReplaceNext);
+        assert_eq!(
+            session.buffer.as_str(),
+            "🚀 Guida uno, Manuale due e guida tre."
+        );
+        // And automatically selects the 3rd match ("guida")
+        let bytes3 = session.buffer.selection_byte_range();
+        assert_eq!(&session.buffer.as_str()[bytes3], "guida");
+
+        // FindPrev jumps back to the 1st match ("Guida")
+        session.apply(Action::FindPrev);
+        assert_eq!(session.buffer.selection_char_range(), 2..7);
+        assert_ne!(sel2, 2..7);
+    }
+
+    #[test]
+    fn test_wal_autosave_and_disk_watcher_toggles_and_persistence() {
+        let base_dir = std::env::temp_dir().join(format!(
+            "accent_wal_watcher_toggle_test_{}_{}",
+            std::process::id(),
+            accent_storage::current_utc_ms()
+        ));
+        let recovery_dir = base_dir.join("recovery");
+        let config_path = base_dir.join("settings.json");
+
+        {
+            let mut session =
+                Session::with_config_and_recovery(config_path.clone(), recovery_dir.clone());
+            assert!(session.wal_autosave_enabled);
+            assert!(session.disk_watcher_enabled);
+
+            session.apply(Action::SetWalAutosave(false));
+            session.apply(Action::SetDiskWatcher(false));
+            session.apply(Action::UpdateBufferText("Modifica senza WAL".to_string()));
+
+            let future = std::time::Instant::now()
+                + std::time::Duration::from_millis(JOURNAL_DEBOUNCE_MS + 50);
+            assert!(!session.poll_journal_flush(future));
+            assert!(accent_storage::scan_recovery_journals(&recovery_dir).is_empty());
+        }
+
+        let restored = Session::with_config_and_recovery(config_path, recovery_dir);
+        assert!(!restored.wal_autosave_enabled);
+        assert!(!restored.disk_watcher_enabled);
+        let _ = std::fs::remove_dir_all(&base_dir);
     }
 }
