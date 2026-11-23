@@ -28,7 +28,9 @@
     ExportFormat,
     LineWidthMode,
     Locale,
-    MarkdownDialect,
+    MarkdownBase,
+    MarkdownConfig,
+    MarkdownExtensions,
     PaletteCssTokens,
     SessionAction,
     StatMetric,
@@ -40,11 +42,22 @@
   interface PreferencesRollbackState {
     typography: TypographyConfig;
     line_width: LineWidthMode;
-    dialect: MarkdownDialect;
+    markdown_config: MarkdownConfig;
     locale: Locale;
     wal_autosave_enabled: boolean;
     disk_watcher_enabled: boolean;
   }
+
+  const DEFAULT_MARKDOWN_CONFIG: MarkdownConfig = {
+    base: 'Gfm',
+    extensions: {
+      math: true,
+      mermaid: true,
+      alerts: true,
+      footnotes: false,
+      frontmatter: false,
+    },
+  };
 
   const PALETTE_SWATCHES: Record<ColorPalettePreset, [string, string, string]> = {
     AmberCoral: ['#181a1d', '#eab700', '#ff6b8b'],
@@ -155,10 +168,18 @@
     }
   });
 
+  function isMathEnabledInConfig(snap: UiSessionSnapshot | null): boolean {
+    return Boolean(
+      snap &&
+        snap.markdown_config.base === 'Gfm' &&
+        snap.markdown_config.extensions.math
+    );
+  }
+
   async function refreshPreviewHtml() {
     try {
       const rawHtml = await renderPreviewHtml();
-      previewHtml = renderMathInPreviewHtml(rawHtml);
+      previewHtml = renderMathInPreviewHtml(rawHtml, isMathEnabledInConfig(snapshot));
     } catch {
       // Ignore transient preview errors
     }
@@ -521,7 +542,10 @@
     prefsRollback = {
       typography: { ...snapshot.typography },
       line_width: snapshot.line_width,
-      dialect: snapshot.dialect,
+      markdown_config: {
+        base: snapshot.markdown_config.base,
+        extensions: { ...snapshot.markdown_config.extensions },
+      },
       locale: snapshot.locale,
       wal_autosave_enabled: snapshot.wal_autosave_enabled,
       disk_watcher_enabled: snapshot.disk_watcher_enabled,
@@ -536,7 +560,7 @@
       await send({ SetFontSize: prefsRollback.typography.font_size });
       await send({ SetLineHeight: prefsRollback.typography.line_height });
       await send({ SetLineWidth: prefsRollback.line_width });
-      await send({ SetDialect: prefsRollback.dialect });
+      await send({ SetMarkdownConfig: prefsRollback.markdown_config });
       await send({ SetLocale: prefsRollback.locale });
       await send({ SetWalAutosave: prefsRollback.wal_autosave_enabled });
       await send({ SetDiskWatcher: prefsRollback.disk_watcher_enabled });
@@ -561,8 +585,36 @@
   async function restoreEditorLangDefaults() {
     await send({ SetWalAutosave: true });
     await send({ SetDiskWatcher: true });
-    await send({ SetDialect: 'Gfm' });
+    await send({
+      SetMarkdownConfig: {
+        base: DEFAULT_MARKDOWN_CONFIG.base,
+        extensions: { ...DEFAULT_MARKDOWN_CONFIG.extensions },
+      },
+    });
     await send({ SetLocale: 'It' });
+  }
+
+  function setMarkdownBase(base: MarkdownBase) {
+    if (!snapshot) return;
+    void send({
+      SetMarkdownConfig: {
+        base,
+        extensions: { ...snapshot.markdown_config.extensions },
+      },
+    });
+  }
+
+  function toggleMarkdownExtension(key: keyof MarkdownExtensions) {
+    if (!snapshot || snapshot.markdown_config.base === 'CommonMark') return;
+    void send({
+      SetMarkdownConfig: {
+        base: snapshot.markdown_config.base,
+        extensions: {
+          ...snapshot.markdown_config.extensions,
+          [key]: !snapshot.markdown_config.extensions[key],
+        },
+      },
+    });
   }
 
   function fallbackCopyText(text: string): boolean {
@@ -585,7 +637,8 @@
 
   async function handleCopyHtml() {
     try {
-      const html = await renderPreviewHtml();
+      const rawHtml = await renderPreviewHtml();
+      const html = renderMathInPreviewHtml(rawHtml, isMathEnabledInConfig(snapshot));
       let copied = false;
       try {
         await navigator.clipboard.writeText(html);
@@ -1290,6 +1343,7 @@
               selectionStartChar={snapshot.selection_start_char}
               selectionEndChar={snapshot.selection_end_char}
               viewWhileTyping={snapshot.view_while_typing}
+              markdownConfig={snapshot.markdown_config}
               themeMode={snapshot.theme}
               proseFont={snapshot.typography.prose_font_family}
               codeFont={snapshot.typography.code_font_family}
@@ -2252,23 +2306,106 @@
               </button>
             </div>
           {:else}
+            {@const isCommonMark = snapshot.markdown_config.base === 'CommonMark'}
             <div class="form-row">
               <div>
                 <div class="form-label">{tr('input_format')}</div>
                 <div class="form-sub">{tr('input_format_sub')}</div>
               </div>
-              <div class="pill-group">
-                {#each ['CommonMark', 'Gfm', 'Glfm'] as d (d)}
-                  <button
-                    type="button"
-                    class="choice-pill"
-                    class:is-active={snapshot.dialect === d}
-                    onclick={() => send({ SetDialect: d as MarkdownDialect })}
-                  >
-                    {d === 'Gfm' ? 'GFM' : d === 'Glfm' ? 'GLFM' : d}
-                  </button>
-                {/each}
+              <div class="pill-group" role="group" aria-label={tr('input_format')}>
+                <button
+                  id="btn-base-gfm"
+                  type="button"
+                  class="choice-pill"
+                  class:is-active={snapshot.markdown_config.base === 'Gfm'}
+                  aria-pressed={snapshot.markdown_config.base === 'Gfm'}
+                  data-testid="btn-base-gfm"
+                  onclick={() => setMarkdownBase('Gfm')}
+                >
+                  {tr('base_gfm', 'GFM Standard')}
+                </button>
+                <button
+                  id="btn-base-commonmark"
+                  type="button"
+                  class="choice-pill"
+                  class:is-active={isCommonMark}
+                  aria-pressed={isCommonMark}
+                  data-testid="btn-base-commonmark"
+                  onclick={() => setMarkdownBase('CommonMark')}
+                >
+                  {tr('base_commonmark', 'CommonMark')}
+                </button>
               </div>
+            </div>
+
+            <div
+              class="extensions-card"
+              class:is-disabled={isCommonMark}
+              data-testid="extensions-card"
+            >
+              <div class="extensions-card-hdr">
+                <div class="form-label">{tr('extensions_title', 'Estensioni modulari')}</div>
+                <div class="form-sub">
+                  {isCommonMark
+                    ? tr('extensions_disabled_cm', 'Disattivate in modalità CommonMark rigorosa')
+                    : tr('extensions_sub', 'Attivabili singolarmente su GFM Standard')}
+                </div>
+              </div>
+
+              {#each [
+                {
+                  key: 'math' as keyof MarkdownExtensions,
+                  id: 'btn-toggle-ext-math',
+                  label: tr('ext_math', 'Matematica KaTeX'),
+                  sub: tr('ext_math_sub', 'Formule inline ($...$) e blocchi matematici ($$...$$)'),
+                },
+                {
+                  key: 'mermaid' as keyof MarkdownExtensions,
+                  id: 'btn-toggle-ext-mermaid',
+                  label: tr('ext_mermaid', 'Diagrammi Mermaid'),
+                  sub: tr('ext_mermaid_sub', 'Rendering SVG nativo dei blocchi di codice mermaid'),
+                },
+                {
+                  key: 'alerts' as keyof MarkdownExtensions,
+                  id: 'btn-toggle-ext-alerts',
+                  label: tr('ext_alerts', 'Avvisi / Callout'),
+                  sub: tr('ext_alerts_sub', 'Blocchi evidenziati [!NOTE], [!TIP], [!IMPORTANT], [!WARNING], [!CAUTION]'),
+                },
+                {
+                  key: 'footnotes' as keyof MarkdownExtensions,
+                  id: 'btn-toggle-ext-footnotes',
+                  label: tr('ext_footnotes', 'Note a piè di pagina'),
+                  sub: tr('ext_footnotes_sub', 'Riferimenti nel testo [^1] e definizioni [^1]: ...'),
+                },
+                {
+                  key: 'frontmatter' as keyof MarkdownExtensions,
+                  id: 'btn-toggle-ext-frontmatter',
+                  label: tr('ext_frontmatter', 'Frontmatter YAML'),
+                  sub: tr('ext_frontmatter_sub', 'Intestazione metadati iniziale delimitata da ---'),
+                },
+              ] as ext (ext.key)}
+                {@const isExtActive = !isCommonMark && snapshot.markdown_config.extensions[ext.key]}
+                <div class="ext-toggle-row">
+                  <div class="ext-toggle-meta">
+                    <div class="ext-toggle-label">{ext.label}</div>
+                    <div class="form-sub">{ext.sub}</div>
+                  </div>
+                  <button
+                    id={ext.id}
+                    type="button"
+                    role="switch"
+                    aria-checked={isExtActive}
+                    aria-label={ext.label}
+                    disabled={isCommonMark}
+                    class="choice-pill ext-toggle-pill"
+                    class:is-active={isExtActive}
+                    data-testid={ext.id}
+                    onclick={() => toggleMarkdownExtension(ext.key)}
+                  >
+                    {isExtActive ? tr('enabled', 'Attivo') : tr('disabled', 'Disattivato')}
+                  </button>
+                </div>
+              {/each}
             </div>
 
             <div class="form-row">
@@ -2500,7 +2637,7 @@
               <div><span>{tr('fullscreen_mode')}</span><b>F11</b></div>
             </div>
           {:else}
-            <p style="margin: 0 0 8px 0; font-weight: 700;">Accent Markdown Editor v0.8.23</p>
+            <p style="margin: 0 0 8px 0; font-weight: 700;">Accent Markdown Editor v0.8.24</p>
             <p style="margin: 0; color: var(--fg-muted);">
               Rust Backend (L1–L4) • Tauri v2 • Svelte 5 • CodeMirror 6 • Offline KaTeX &amp; Mermaid
             </p>
@@ -3078,6 +3215,10 @@
   }
 
   .preview-prose {
+    position: relative;
+    isolation: isolate;
+    contain: layout style paint;
+    overflow-wrap: break-word;
     margin: 0 auto;
     font-family: var(--prose-font-stack);
   }
@@ -3176,12 +3317,106 @@
   :global(.preview-prose td) {
     border: 1px solid var(--border-headerbar);
     padding: 8px 12px;
+  }
+
+  :global(.preview-prose :where(th, td):not([align])) {
     text-align: left;
+  }
+
+  :global(.preview-prose [align='center']) {
+    text-align: center;
+  }
+
+  :global(.preview-prose [align='right']) {
+    text-align: right;
   }
 
   :global(.preview-prose th) {
     background-color: var(--bg-table-header);
     font-weight: 700;
+  }
+
+  :global(.preview-prose hr) {
+    border: 0;
+    border-top: 1px solid var(--border-headerbar);
+    margin: 18px 0;
+  }
+
+  :global(.preview-prose kbd) {
+    font-family: var(--code-font-stack);
+    font-size: 0.86em;
+    padding: 1px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border-headerbar);
+    background-color: var(--bg-code-inline);
+    color: var(--fg-primary);
+  }
+
+  :global(.preview-prose details) {
+    margin: 12px 0;
+    padding: 8px 12px;
+    border-radius: 7px;
+    border: 1px solid var(--border-headerbar);
+    background-color: color-mix(in srgb, var(--bg-code-block) 35%, transparent);
+  }
+
+  :global(.preview-prose summary) {
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  :global(.preview-prose .markdown-alert) {
+    margin: 14px 0;
+    padding: 10px 14px;
+    border-left: 4px solid var(--accent-link);
+    border-radius: 7px;
+    background-color: color-mix(in srgb, var(--bg-code-block) 45%, transparent);
+  }
+
+  :global(.preview-prose .markdown-alert-title) {
+    margin: 0 0 6px 0;
+    font-weight: 700;
+    color: var(--accent-link);
+  }
+
+  :global(.preview-prose .markdown-alert > :last-child) {
+    margin-bottom: 0;
+  }
+
+  :global(.preview-prose .markdown-alert-tip) {
+    border-left-color: var(--markup-task-done);
+  }
+  :global(.preview-prose .markdown-alert-tip .markdown-alert-title) {
+    color: var(--markup-task-done);
+  }
+
+  :global(.preview-prose .markdown-alert-important) {
+    border-left-color: var(--syntax-keyword);
+  }
+  :global(.preview-prose .markdown-alert-important .markdown-alert-title) {
+    color: var(--syntax-keyword);
+  }
+
+  :global(.preview-prose .markdown-alert-warning) {
+    border-left-color: var(--accent-orange);
+  }
+  :global(.preview-prose .markdown-alert-warning .markdown-alert-title) {
+    color: var(--accent-orange);
+  }
+
+  :global(.preview-prose .markdown-alert-caution) {
+    border-left-color: var(--spellcheck-red);
+  }
+  :global(.preview-prose .markdown-alert-caution .markdown-alert-title) {
+    color: var(--spellcheck-red);
+  }
+
+  :global(.preview-prose section.footnotes) {
+    margin-top: 24px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-headerbar);
+    font-size: 0.9em;
+    color: var(--fg-muted);
   }
 
   :global(.accent-mermaid-block) {
@@ -3672,6 +3907,59 @@
     background-color: var(--bg-pill-button);
     font-size: 12.5px;
     font-weight: 600;
+  }
+
+  @media (hover: hover) {
+    .choice-pill:hover:not(:disabled):not(.is-active) {
+      background-color: color-mix(in srgb, var(--accent-orange) 14%, var(--bg-pill-button));
+    }
+  }
+
+  .choice-pill:disabled {
+    cursor: not-allowed;
+    opacity: 0.65;
+  }
+
+  .extensions-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 1px solid var(--border-headerbar);
+    background-color: color-mix(in srgb, var(--bg-canvas) 62%, var(--bg-popover));
+    transition: opacity 0.15s ease;
+  }
+
+  .extensions-card.is-disabled {
+    opacity: 0.48;
+  }
+
+  .extensions-card-hdr {
+    padding-bottom: 4px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border-headerbar) 70%, transparent);
+  }
+
+  .ext-toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+  }
+
+  .ext-toggle-meta {
+    min-width: 0;
+  }
+
+  .ext-toggle-label {
+    font-size: 13.2px;
+    font-weight: 600;
+  }
+
+  .ext-toggle-pill {
+    min-inline-size: 92px;
+    text-align: center;
+    flex-shrink: 0;
   }
 
   .pill-with-swatch {

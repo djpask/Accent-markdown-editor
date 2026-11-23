@@ -1,4 +1,4 @@
-pub use accent_core::MarkdownDialect;
+pub use accent_core::{MarkdownBase, MarkdownConfig, MarkdownExtensions};
 use accent_core::{DocumentBuffer, DocumentStats, DEFAULT_SAMPLE_MARKDOWN, TUTORIAL_MARKDOWN};
 pub use accent_export::ExportFormat;
 pub use accent_mermaid::{MermaidCache, MermaidTheme, RenderedMermaidDiagram};
@@ -189,13 +189,13 @@ impl I18n {
             (Locale::En, "size_lh_sub") => "Granular TextFormat size (pt) and line-height multiplier",
             (Locale::Es, "size_lh_sub") => "Control granular de tamaño (pt) e interlineado",
 
-            (Locale::It, "input_format") => "Formato di input",
-            (Locale::En, "input_format") => "Input Format",
-            (Locale::Es, "input_format") => "Formato de entrada",
+            (Locale::It, "input_format") => "Grammatica base",
+            (Locale::En, "input_format") => "Base Grammar",
+            (Locale::Es, "input_format") => "Gramática base",
 
-            (Locale::It, "input_format_sub") => "Dialetto Markdown analizzato dall'AST nativo",
-            (Locale::En, "input_format_sub") => "Markdown dialect parsed by the native AST",
-            (Locale::Es, "input_format_sub") => "Dialecto Markdown analizado por el AST nativo",
+            (Locale::It, "input_format_sub") => "Standard GFM (0.29-gfm) oppure CommonMark puro (0.29)",
+            (Locale::En, "input_format_sub") => "GFM Standard (0.29-gfm) or strict CommonMark (0.29)",
+            (Locale::Es, "input_format_sub") => "GFM Standard (0.29-gfm) o CommonMark estricto (0.29)",
 
             (Locale::It, "color_palette") => "Palette cromatica",
             (Locale::En, "color_palette") => "Color Palette",
@@ -778,7 +778,7 @@ pub enum Action {
     SetTheme(ThemeMode),
     SetPalettePreset(ColorPalettePreset),
     SetLocale(Locale),
-    SetDialect(MarkdownDialect),
+    SetMarkdownConfig(MarkdownConfig),
     SetLineWidth(LineWidthMode),
     SetProseFont(String),
     SetCodeFont(String),
@@ -896,13 +896,12 @@ fn find_case_insensitive_byte_ranges(haystack: &str, needle: &str) -> Vec<std::o
 }
 
 /// User preferences and session state persisted atomically across restarts in `settings.json`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PersistedSettings {
     pub theme: ThemeMode,
     pub palette_preset: ColorPalettePreset,
     pub locale: Locale,
-    pub dialect: MarkdownDialect,
+    pub markdown_config: MarkdownConfig,
     pub line_width: LineWidthMode,
     pub typography: TypographyConfig,
     pub preview_active: bool,
@@ -912,9 +911,7 @@ pub struct PersistedSettings {
     pub stat_metric: StatMetric,
     pub selected_export_format: ExportFormat,
     pub export_syntax_highlight: bool,
-    #[serde(default = "default_true")]
     pub wal_autosave_enabled: bool,
-    #[serde(default = "default_true")]
     pub disk_watcher_enabled: bool,
     pub last_opened_dir: Option<PathBuf>,
     pub last_opened_file: Option<PathBuf>,
@@ -929,7 +926,7 @@ impl Default for PersistedSettings {
             theme: ThemeMode::Sepia,
             palette_preset: ColorPalettePreset::AmberCoral,
             locale: Locale::It,
-            dialect: MarkdownDialect::Gfm,
+            markdown_config: MarkdownConfig::default(),
             line_width: LineWidthMode::Compact,
             typography: TypographyConfig::default(),
             preview_active: false,
@@ -947,6 +944,102 @@ impl Default for PersistedSettings {
             open_tab_files: Vec::new(),
             active_tab_index: 0,
         }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(default)]
+struct PersistedSettingsWire {
+    theme: ThemeMode,
+    palette_preset: ColorPalettePreset,
+    locale: Locale,
+    markdown_config: Option<MarkdownConfig>,
+    dialect: Option<String>,
+    line_width: LineWidthMode,
+    typography: TypographyConfig,
+    preview_active: bool,
+    preview_layout: PreviewLayout,
+    view_while_typing: bool,
+    toolbar_expanded: bool,
+    stat_metric: StatMetric,
+    selected_export_format: ExportFormat,
+    export_syntax_highlight: bool,
+    #[serde(default = "default_true")]
+    wal_autosave_enabled: bool,
+    #[serde(default = "default_true")]
+    disk_watcher_enabled: bool,
+    last_opened_dir: Option<PathBuf>,
+    last_opened_file: Option<PathBuf>,
+    recent_files: Vec<PathBuf>,
+    open_tab_files: Vec<PathBuf>,
+    active_tab_index: usize,
+}
+
+impl Default for PersistedSettingsWire {
+    fn default() -> Self {
+        let d = PersistedSettings::default();
+        Self {
+            theme: d.theme,
+            palette_preset: d.palette_preset,
+            locale: d.locale,
+            markdown_config: None,
+            dialect: None,
+            line_width: d.line_width,
+            typography: d.typography,
+            preview_active: d.preview_active,
+            preview_layout: d.preview_layout,
+            view_while_typing: d.view_while_typing,
+            toolbar_expanded: d.toolbar_expanded,
+            stat_metric: d.stat_metric,
+            selected_export_format: d.selected_export_format,
+            export_syntax_highlight: d.export_syntax_highlight,
+            wal_autosave_enabled: d.wal_autosave_enabled,
+            disk_watcher_enabled: d.disk_watcher_enabled,
+            last_opened_dir: d.last_opened_dir,
+            last_opened_file: d.last_opened_file,
+            recent_files: d.recent_files,
+            open_tab_files: d.open_tab_files,
+            active_tab_index: d.active_tab_index,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PersistedSettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = PersistedSettingsWire::deserialize(deserializer)?;
+        let markdown_config = match wire.markdown_config {
+            Some(cfg) => cfg,
+            None => wire
+                .dialect
+                .as_deref()
+                .and_then(MarkdownConfig::from_legacy_dialect_str)
+                .unwrap_or_default(),
+        };
+        Ok(Self {
+            theme: wire.theme,
+            palette_preset: wire.palette_preset,
+            locale: wire.locale,
+            markdown_config,
+            line_width: wire.line_width,
+            typography: wire.typography,
+            preview_active: wire.preview_active,
+            preview_layout: wire.preview_layout,
+            view_while_typing: wire.view_while_typing,
+            toolbar_expanded: wire.toolbar_expanded,
+            stat_metric: wire.stat_metric,
+            selected_export_format: wire.selected_export_format,
+            export_syntax_highlight: wire.export_syntax_highlight,
+            wal_autosave_enabled: wire.wal_autosave_enabled,
+            disk_watcher_enabled: wire.disk_watcher_enabled,
+            last_opened_dir: wire.last_opened_dir,
+            last_opened_file: wire.last_opened_file,
+            recent_files: wire.recent_files,
+            open_tab_files: wire.open_tab_files,
+            active_tab_index: wire.active_tab_index,
+        })
     }
 }
 
@@ -1038,7 +1131,7 @@ pub struct Session {
     pub theme: ThemeMode,
     pub palette_preset: ColorPalettePreset,
     pub locale: Locale,
-    pub dialect: MarkdownDialect,
+    pub markdown_config: MarkdownConfig,
     pub line_width: LineWidthMode,
     pub typography: TypographyConfig,
     pub font_catalog: SystemFontCatalog,
@@ -1174,7 +1267,7 @@ impl Session {
             theme: ThemeMode::Sepia,
             palette_preset: ColorPalettePreset::AmberCoral,
             locale: Locale::It,
-            dialect: MarkdownDialect::Gfm,
+            markdown_config: MarkdownConfig::default(),
             line_width: LineWidthMode::Compact,
             typography: TypographyConfig::default(),
             font_catalog: SystemFontCatalog::default_curated(),
@@ -1507,7 +1600,7 @@ impl Session {
             theme: self.theme,
             palette_preset: self.palette_preset,
             locale: self.locale,
-            dialect: self.dialect,
+            markdown_config: self.markdown_config,
             line_width: self.line_width,
             typography: self.typography.clone(),
             preview_active: self.preview_active,
@@ -1547,7 +1640,7 @@ impl Session {
         self.theme = settings.theme;
         self.palette_preset = settings.palette_preset;
         self.locale = settings.locale;
-        self.dialect = settings.dialect;
+        self.markdown_config = settings.markdown_config;
         self.line_width = settings.line_width;
         self.typography = settings.typography;
         if !self.typography.font_size.is_finite() {
@@ -2004,7 +2097,7 @@ impl Session {
             Action::SetTheme(_)
                 | Action::SetPalettePreset(_)
                 | Action::SetLocale(_)
-                | Action::SetDialect(_)
+                | Action::SetMarkdownConfig(_)
                 | Action::SetPreviewLayout(_)
                 | Action::SetPreviewMode { .. }
                 | Action::SetEditorOnlyRaw
@@ -2047,7 +2140,7 @@ impl Session {
             Action::SetTheme(theme) => self.theme = theme,
             Action::SetPalettePreset(preset) => self.palette_preset = preset,
             Action::SetLocale(locale) => self.locale = locale,
-            Action::SetDialect(dialect) => self.dialect = dialect,
+            Action::SetMarkdownConfig(cfg) => self.markdown_config = cfg,
             Action::SetLineWidth(lw) => self.line_width = lw,
             Action::SetProseFont(family) => self.typography.prose_font_family = family,
             Action::SetCodeFont(family) => self.typography.code_font_family = family,
@@ -3006,7 +3099,7 @@ impl Session {
                 let out_path = PathBuf::from(self.export_output_path.trim());
                 match accent_export::export_document_bytes(
                     &self.buffer,
-                    self.dialect,
+                    self.markdown_config,
                     &self.document_title,
                     fmt,
                 ) {
@@ -3044,7 +3137,7 @@ impl Session {
                 let out_path = PathBuf::from(&self.export_output_path);
                 if let Ok(bytes) = accent_export::export_document_bytes(
                     &self.buffer,
-                    self.dialect,
+                    self.markdown_config,
                     &self.document_title,
                     fmt,
                 ) {
@@ -3167,7 +3260,7 @@ impl Session {
     pub fn inspect_json(&self) -> String {
         let stats = self.buffer.stats();
         let live_spans = self.buffer.compute_live_spans(
-            self.dialect,
+            self.markdown_config,
             self.view_while_typing,
             self.buffer.selection_byte_range(),
         );
@@ -3175,7 +3268,7 @@ impl Session {
             "document_title": self.document_title,
             "theme": self.theme,
             "locale": self.locale,
-            "dialect": self.dialect,
+            "markdown_config": self.markdown_config,
             "line_width": self.line_width,
             "typography": self.typography,
             "discovered_system_fonts": self.font_catalog.families.len(),
@@ -3382,7 +3475,7 @@ mod tests {
             session.apply(Action::SetTheme(ThemeMode::Dark));
             session.apply(Action::SetPalettePreset(ColorPalettePreset::NordicForest));
             session.apply(Action::SetLocale(Locale::En));
-            session.apply(Action::SetDialect(MarkdownDialect::Glfm));
+            session.apply(Action::SetMarkdownConfig(MarkdownConfig::gfm_all_extensions()));
             session.apply(Action::SetLineWidth(LineWidthMode::Wide));
             session.apply(Action::SetProseFont("Literata".to_string()));
             session.apply(Action::SetCodeFont("JetBrains Mono".to_string()));
@@ -3403,7 +3496,7 @@ mod tests {
         assert_eq!(restored.theme, ThemeMode::Dark);
         assert_eq!(restored.palette_preset, ColorPalettePreset::NordicForest);
         assert_eq!(restored.locale, Locale::En);
-        assert_eq!(restored.dialect, MarkdownDialect::Glfm);
+        assert_eq!(restored.markdown_config, MarkdownConfig::gfm_all_extensions());
         assert_eq!(restored.line_width, LineWidthMode::Wide);
         assert_eq!(restored.typography.prose_font_family, "Literata");
         assert_eq!(restored.typography.code_font_family, "JetBrains Mono");
@@ -4280,6 +4373,65 @@ mod tests {
         let restored = Session::with_config_and_recovery(config_path, recovery_dir);
         assert!(!restored.wal_autosave_enabled);
         assert!(!restored.disk_watcher_enabled);
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn test_legacy_dialect_migration_commonmark_gfm_glfm_and_markdown_config_roundtrip() {
+        let base_dir = std::env::temp_dir().join(format!(
+            "accent_legacy_dialect_migration_test_{}_{}",
+            std::process::id(),
+            accent_storage::current_utc_ms()
+        ));
+        std::fs::create_dir_all(&base_dir).unwrap();
+        let config_path = base_dir.join("settings.json");
+        let recovery_dir = base_dir.join("recovery");
+
+        // 1. Legacy `"dialect": "CommonMark"` -> base: CommonMark (with default toggle flags)
+        std::fs::write(&config_path, r#"{"dialect": "CommonMark"}"#).unwrap();
+        let s_cm = Session::with_config_and_recovery(config_path.clone(), recovery_dir.clone());
+        assert_eq!(s_cm.markdown_config.base, MarkdownBase::CommonMark);
+        assert_eq!(s_cm.markdown_config.extensions, MarkdownExtensions::default());
+
+        // 2. Legacy `"dialect": "Gfm"` -> base: Gfm, math=true, mermaid=true, alerts=true, footnotes=false, frontmatter=false
+        std::fs::write(&config_path, r#"{"dialect": "Gfm"}"#).unwrap();
+        let s_gfm = Session::with_config_and_recovery(config_path.clone(), recovery_dir.clone());
+        assert_eq!(s_gfm.markdown_config.base, MarkdownBase::Gfm);
+        assert!(s_gfm.markdown_config.extensions.math);
+        assert!(s_gfm.markdown_config.extensions.mermaid);
+        assert!(s_gfm.markdown_config.extensions.alerts);
+        assert!(!s_gfm.markdown_config.extensions.footnotes);
+        assert!(!s_gfm.markdown_config.extensions.frontmatter);
+
+        // 3. Legacy `"dialect": "Glfm"` -> base: Gfm with all 5 modular extensions set to true
+        std::fs::write(&config_path, r#"{"dialect": "Glfm"}"#).unwrap();
+        let mut s_glfm = Session::with_config_and_recovery(config_path.clone(), recovery_dir.clone());
+        assert_eq!(s_glfm.markdown_config.base, MarkdownBase::Gfm);
+        assert_eq!(s_glfm.markdown_config.extensions, MarkdownExtensions::all_enabled());
+
+        // 4. Saving settings writes `"markdown_config"` and omits legacy `"dialect"`
+        s_glfm.apply(Action::SetMarkdownConfig(MarkdownConfig {
+            base: MarkdownBase::Gfm,
+            extensions: MarkdownExtensions {
+                math: false,
+                mermaid: true,
+                alerts: false,
+                footnotes: true,
+                frontmatter: false,
+            },
+        }));
+        let saved_json = std::fs::read_to_string(&config_path).unwrap();
+        assert!(saved_json.contains("\"markdown_config\""));
+        assert!(!saved_json.contains("\"dialect\""));
+
+        let s_roundtrip = Session::with_config_and_recovery(config_path, recovery_dir);
+        assert_eq!(s_roundtrip.markdown_config.base, MarkdownBase::Gfm);
+        assert!(!s_roundtrip.markdown_config.extensions.math);
+        assert!(s_roundtrip.markdown_config.extensions.mermaid);
+        assert!(!s_roundtrip.markdown_config.extensions.alerts);
+        assert!(s_roundtrip.markdown_config.extensions.footnotes);
+        assert!(!s_roundtrip.markdown_config.extensions.frontmatter);
+
         let _ = std::fs::remove_dir_all(&base_dir);
     }
 }

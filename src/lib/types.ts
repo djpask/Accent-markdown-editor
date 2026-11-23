@@ -9,7 +9,20 @@ export type ColorPalettePreset =
 
 export type Locale = 'En' | 'It' | 'Es';
 
-export type MarkdownDialect = 'CommonMark' | 'Gfm' | 'Glfm';
+export type MarkdownBase = 'Gfm' | 'CommonMark';
+
+export interface MarkdownExtensions {
+  math: boolean;
+  mermaid: boolean;
+  alerts: boolean;
+  footnotes: boolean;
+  frontmatter: boolean;
+}
+
+export interface MarkdownConfig {
+  base: MarkdownBase;
+  extensions: MarkdownExtensions;
+}
 
 export type LineWidthMode =
   | 'Compact'
@@ -154,7 +167,7 @@ export interface UiSessionSnapshot {
   palette_css: PaletteCssTokens;
   theme_circle_colors: ThemeCircleColors;
   locale: Locale;
-  dialect: MarkdownDialect;
+  markdown_config: MarkdownConfig;
   line_width: LineWidthMode;
   line_width_badge: string;
   fluid_margin_pct: number;
@@ -193,7 +206,7 @@ export type SessionAction =
   | { SetTheme: ThemeMode }
   | { SetPalettePreset: ColorPalettePreset }
   | { SetLocale: Locale }
-  | { SetDialect: MarkdownDialect }
+  | { SetMarkdownConfig: MarkdownConfig }
   | { SetLineWidth: LineWidthMode }
   | { SetProseFont: string }
   | { SetCodeFont: string }

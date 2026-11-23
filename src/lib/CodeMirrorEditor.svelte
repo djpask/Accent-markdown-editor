@@ -13,17 +13,18 @@
     WidgetType,
   } from '@codemirror/view';
   import { defaultKeymap } from '@codemirror/commands';
-  import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
+  import { markdown, commonmarkLanguage } from '@codemirror/lang-markdown';
   import {
     syntaxHighlighting,
     HighlightStyle,
     StreamLanguage,
     type Language,
+    type LanguageSupport,
   } from '@codemirror/language';
   import { jsonLanguage } from '@codemirror/lang-json';
   import { rustLanguage } from '@codemirror/lang-rust';
   import { pythonLanguage } from '@codemirror/lang-python';
-  import { yamlLanguage } from '@codemirror/lang-yaml';
+  import { yamlLanguage, yamlFrontmatter } from '@codemirror/lang-yaml';
   import { htmlLanguage } from '@codemirror/lang-html';
   import { cssLanguage } from '@codemirror/lang-css';
   import {
@@ -35,9 +36,10 @@
   import { shell } from '@codemirror/legacy-modes/mode/shell';
   import { toml } from '@codemirror/legacy-modes/mode/toml';
   import { styleTags, tags, Tag } from '@lezer/highlight';
+  import { GFM, type MarkdownExtension } from '@lezer/markdown';
   import { getOrFetchMermaidSvg, renderLatexToHtml } from './mathAndMermaid';
   import { charToUtf16Offset, utf16ToCharOffset } from './textOffsets';
-  import type { ThemeMode } from './types';
+  import type { MarkdownConfig, ThemeMode } from './types';
 
   const shellLanguage = StreamLanguage.define(shell);
   const tomlLanguage = StreamLanguage.define(toml);
@@ -105,6 +107,7 @@
     selectionStartChar: number;
     selectionEndChar: number;
     viewWhileTyping: boolean;
+    markdownConfig: MarkdownConfig;
     themeMode: ThemeMode;
     proseFont: string;
     codeFont: string;
@@ -128,6 +131,7 @@
     selectionStartChar,
     selectionEndChar,
     viewWhileTyping,
+    markdownConfig,
     themeMode,
     proseFont,
     codeFont,
@@ -148,11 +152,45 @@
   let lastAppliedSyncToken = -1;
   let suppressOutgoing = false;
 
+  const languageCompartment = new Compartment();
   const themeCompartment = new Compartment();
   const readOnlyCompartment = new Compartment();
   const livePreviewCompartment = new Compartment();
   const searchHighlightCompartment = new Compartment();
   const refreshLivePreviewEffect = StateEffect.define<boolean>();
+
+  const baseStyleExtension: MarkdownExtension = {
+    props: [
+      styleTags({
+        'OrderedList/... BulletList/...': tags.content,
+        ListMark: listMarkerTag,
+        CodeText: tags.content,
+        CodeInfo: tags.processingInstruction,
+        InlineCode: inlineCodeTag,
+        'InlineCode/...': inlineCodeTag,
+      }),
+    ],
+  };
+
+  function buildMarkdownLanguageSupport(cfg: MarkdownConfig): LanguageSupport {
+    if (cfg.base === 'CommonMark') {
+      return markdown({
+        base: commonmarkLanguage,
+        codeLanguages: resolveCodeLanguage,
+        extensions: [baseStyleExtension],
+      });
+    }
+    // GFM 0.29-gfm: commonmarkLanguage + GFM (Table, TaskList, Strikethrough, Autolink),
+    // explicitly excluding Pandoc Subscript (~...~) so single-tilde never conflicts with GFM §6.5.
+    const gfmSupport = markdown({
+      base: commonmarkLanguage,
+      codeLanguages: resolveCodeLanguage,
+      extensions: [GFM, baseStyleExtension],
+    });
+    return cfg.extensions.frontmatter
+      ? yamlFrontmatter({ content: gfmSupport })
+      : gfmSupport;
+  }
 
   class KatexMathWidget extends WidgetType {
     latex: string;
@@ -284,7 +322,8 @@
   function buildCaretAwareDecorations(
     view: EditorView,
     enabled: boolean,
-    currentTheme: ThemeMode
+    currentTheme: ThemeMode,
+    cfg: MarkdownConfig
   ): DecorationSet {
     const state = view.state;
     const doc = state.doc;
@@ -293,6 +332,12 @@
     const selTo = sel.to;
     const selStartLine = doc.lineAt(selFrom).number;
     const selEndLine = doc.lineAt(selTo).number;
+
+    const isGfm = cfg.base === 'Gfm';
+    const mathEnabled = isGfm && cfg.extensions.math;
+    const mermaidEnabled = isGfm && cfg.extensions.mermaid;
+    const alertsEnabled = isGfm && cfg.extensions.alerts;
+    const frontmatterEnabled = isGfm && cfg.extensions.frontmatter;
 
     const isCaretInSpan = (from: number, to: number): boolean => {
       return selFrom <= to && selTo >= from;
@@ -305,6 +350,33 @@
     const ranges: Range<Decoration>[] = [];
     const totalLines = doc.lines;
     let lineNum = 1;
+
+    // 0. Leading YAML Frontmatter (`--- ... ---`) when `frontmatterEnabled` is active
+    if (frontmatterEnabled && totalLines >= 2 && doc.line(1).text.trim() === '---') {
+      let fmEnd = -1;
+      for (let scan = 2; scan <= totalLines; scan++) {
+        const st = doc.line(scan).text.trim();
+        if (st === '---' || st === '...') {
+          fmEnd = scan;
+          break;
+        }
+      }
+      if (fmEnd > 1) {
+        for (let ln = 1; ln <= fmEnd; ln++) {
+          const l = doc.line(ln);
+          const classes = ['cm-live-codeblock-line'];
+          if (ln === 1) classes.push('cm-live-codeblock-first');
+          if (ln === fmEnd) classes.push('cm-live-codeblock-last');
+          ranges.push(
+            Decoration.line({
+              class: classes.join(' '),
+              ...(ln === 1 ? { attributes: { 'data-code-lang': 'yaml' } } : {}),
+            }).range(l.from)
+          );
+        }
+        lineNum = fmEnd + 1;
+      }
+    }
 
     while (lineNum <= totalLines) {
       const line = doc.line(lineNum);
@@ -334,7 +406,7 @@
         if (endLineNum > startLineNum) {
           const caretInsideBlock = isCaretOnLines(startLineNum, endLineNum);
 
-          if (enabled && fenceLang === 'mermaid' && !caretInsideBlock) {
+          if (enabled && mermaidEnabled && fenceLang === 'mermaid' && !caretInsideBlock) {
             const mermaidCode = bodyLines.join('\n');
             const firstLine = doc.line(startLineNum);
             const cachedSvg = getOrFetchMermaidSvg(mermaidCode, currentTheme, () => {
@@ -362,6 +434,32 @@
                     firstLine.from,
                     cachedSvg
                   ),
+                  side: -1,
+                }).range(firstLine.from)
+              );
+            }
+            for (let ln = startLineNum + 1; ln <= endLineNum; ln++) {
+              const l = doc.line(ln);
+              ranges.push(
+                Decoration.line({ class: 'cm-live-mermaid-hidden-line' }).range(l.from)
+              );
+              if (l.to > l.from) {
+                ranges.push(Decoration.replace({}).range(l.from, l.to));
+              }
+            }
+          } else if (enabled && mathEnabled && fenceLang === 'math' && !caretInsideBlock) {
+            const mathCode = bodyLines.join('\n');
+            const firstLine = doc.line(startLineNum);
+            if (firstLine.to > firstLine.from) {
+              ranges.push(
+                Decoration.replace({
+                  widget: new KatexMathWidget(mathCode, true, firstLine.from),
+                }).range(firstLine.from, firstLine.to)
+              );
+            } else {
+              ranges.push(
+                Decoration.widget({
+                  widget: new KatexMathWidget(mathCode, true, firstLine.from),
                   side: -1,
                 }).range(firstLine.from)
               );
@@ -413,8 +511,12 @@
         continue;
       }
 
-      // 2. Check for multi-line Display Math Block ($$ ... $$)
-      if (trimmed.startsWith('$$') && (trimmed === '$$' || !trimmed.slice(2).includes('$$'))) {
+      // 2. Check for multi-line Display Math Block ($$ ... $$) — gated on `mathEnabled`
+      if (
+        mathEnabled &&
+        trimmed.startsWith('$$') &&
+        (trimmed === '$$' || !trimmed.slice(2).includes('$$'))
+      ) {
         const startLineNum = lineNum;
         let endLineNum = lineNum;
         const mathLines: string[] = [];
@@ -468,16 +570,18 @@
         }
       }
 
-      // 3. Single-line Display Math ($$...$$)
-      const singleDisplayMath = trimmed.match(/^\$\$(.+)\$\$$/);
-      if (singleDisplayMath && !isCaretOnLines(lineNum, lineNum)) {
-        ranges.push(
-          Decoration.replace({
-            widget: new KatexMathWidget(singleDisplayMath[1], true, line.from),
-          }).range(line.from, line.to)
-        );
-        lineNum++;
-        continue;
+      // 3. Single-line Display Math ($$...$$) — gated on `mathEnabled`
+      if (mathEnabled) {
+        const singleDisplayMath = trimmed.match(/^\$\$(.+)\$\$$/);
+        if (singleDisplayMath && !isCaretOnLines(lineNum, lineNum)) {
+          ranges.push(
+            Decoration.replace({
+              widget: new KatexMathWidget(singleDisplayMath[1], true, line.from),
+            }).range(line.from, line.to)
+          );
+          lineNum++;
+          continue;
+        }
       }
 
       // 4. ATX Headings (# .. ######)
@@ -497,11 +601,18 @@
         }
       }
 
-      // 5. Blockquotes (> )
+      // 5. Blockquotes (> ) & GFM Alerts (> [!NOTE] etc. when `alertsEnabled`)
       const quoteMatch = text.match(/^(\s*>\s?)/);
       if (quoteMatch) {
+        const afterQuote = text.slice(quoteMatch[1].length).trimStart();
+        const alertMatch = alertsEnabled
+          ? afterQuote.match(/^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]/i)
+          : null;
+        const quoteLineClass = alertMatch
+          ? `cm-live-blockquote-line cm-live-alert-line cm-live-alert-${alertMatch[1].toLowerCase()}`
+          : 'cm-live-blockquote-line';
         ranges.push(
-          Decoration.line({ class: 'cm-live-blockquote-line' }).range(line.from)
+          Decoration.line({ class: quoteLineClass }).range(line.from)
         );
         if (!isCaretOnLines(lineNum, lineNum)) {
           ranges.push(
@@ -510,8 +621,8 @@
         }
       }
 
-      // 6. Task Lists (- [ ] / - [x]) & Bullet/Ordered List Markers
-      const taskMatch = text.match(/^(\s*[-*+]\s+\[([ xX])\]\s+)/);
+      // 6. Task Lists (- [ ] / - [x], GFM §5.3 only) & Bullet/Ordered List Markers
+      const taskMatch = isGfm ? text.match(/^(\s*[-*+]\s+\[([ xX])\]\s+)/) : null;
       if (taskMatch && !isCaretOnLines(lineNum, lineNum)) {
         const prefixLen = taskMatch[1].length;
         const checked = taskMatch[2].toLowerCase() === 'x';
@@ -540,7 +651,24 @@
         occupied.push([a, b]);
       };
 
-      // 7a. Inline Code (`code`)
+      // 7a. Inline Code (`code`) — plus backtick math ($`...`$) when `mathEnabled`
+      if (mathEnabled) {
+        for (const m of text.matchAll(/\$`([^`\n]+)`\$/g)) {
+          if (m.index === undefined) continue;
+          const from = line.from + m.index;
+          const to = from + m[0].length;
+          if (isOccupied(from, to)) continue;
+          markOccupied(from, to);
+          if (!isCaretInSpan(from, to)) {
+            ranges.push(
+              Decoration.replace({
+                widget: new KatexMathWidget(m[1], false, from),
+              }).range(from, to)
+            );
+          }
+        }
+      }
+
       for (const m of text.matchAll(/`([^`\n]+)`/g)) {
         if (m.index === undefined) continue;
         const from = line.from + m.index;
@@ -556,19 +684,21 @@
         }
       }
 
-      // 7b. Inline KaTeX Math ($...$)
-      for (const m of text.matchAll(/(?<!\\|\$)\$([^\s$][^$\n]*?[^\s$]|[^\s$])\$/g)) {
-        if (m.index === undefined) continue;
-        const from = line.from + m.index;
-        const to = from + m[0].length;
-        if (isOccupied(from, to)) continue;
-        markOccupied(from, to);
-        if (!isCaretInSpan(from, to)) {
-          ranges.push(
-            Decoration.replace({
-              widget: new KatexMathWidget(m[1], false, from),
-            }).range(from, to)
-          );
+      // 7b. Inline KaTeX Math ($...$) — gated on `mathEnabled`
+      if (mathEnabled) {
+        for (const m of text.matchAll(/(?<!\\|\$)\$([^\s$][^$\n]*?[^\s$]|[^\s$])\$/g)) {
+          if (m.index === undefined) continue;
+          const from = line.from + m.index;
+          const to = from + m[0].length;
+          if (isOccupied(from, to)) continue;
+          markOccupied(from, to);
+          if (!isCaretInSpan(from, to)) {
+            ranges.push(
+              Decoration.replace({
+                widget: new KatexMathWidget(m[1], false, from),
+              }).range(from, to)
+            );
+          }
         }
       }
 
@@ -606,19 +736,21 @@
         }
       }
 
-      // 7e. Strikethrough (~~text~~)
-      for (const m of text.matchAll(/~~(?=\S)([^\n]*?\S)~~/g)) {
-        if (m.index === undefined) continue;
-        const from = line.from + m.index;
-        const to = from + m[0].length;
-        if (isOccupied(from, to)) continue;
-        markOccupied(from, to);
-        if (!isCaretInSpan(from, to) && to - from > 4) {
-          ranges.push(Decoration.replace({}).range(from, from + 2));
-          ranges.push(
-            Decoration.mark({ class: 'cm-live-strike' }).range(from + 2, to - 2)
-          );
-          ranges.push(Decoration.replace({}).range(to - 2, to));
+      // 7e. Strikethrough (~~text~~, GFM §6.5 only)
+      if (isGfm) {
+        for (const m of text.matchAll(/~~(?=\S)([^\n]*?\S)~~/g)) {
+          if (m.index === undefined) continue;
+          const from = line.from + m.index;
+          const to = from + m[0].length;
+          if (isOccupied(from, to)) continue;
+          markOccupied(from, to);
+          if (!isCaretInSpan(from, to) && to - from > 4) {
+            ranges.push(Decoration.replace({}).range(from, from + 2));
+            ranges.push(
+              Decoration.mark({ class: 'cm-live-strike' }).range(from + 2, to - 2)
+            );
+            ranges.push(Decoration.replace({}).range(to - 2, to));
+          }
         }
       }
 
@@ -646,12 +778,16 @@
     return Decoration.set(ranges, true);
   }
 
-  function createLivePreviewPlugin(enabled: boolean, currentTheme: ThemeMode) {
+  function createLivePreviewPlugin(
+    enabled: boolean,
+    currentTheme: ThemeMode,
+    cfg: MarkdownConfig
+  ) {
     return ViewPlugin.fromClass(
       class {
         decorations: DecorationSet;
         constructor(view: EditorView) {
-          this.decorations = buildCaretAwareDecorations(view, enabled, currentTheme);
+          this.decorations = buildCaretAwareDecorations(view, enabled, currentTheme, cfg);
         }
         update(update: ViewUpdate) {
           const hasRefreshEffect = update.transactions.some((tr) =>
@@ -666,7 +802,8 @@
             this.decorations = buildCaretAwareDecorations(
               update.view,
               enabled,
-              currentTheme
+              currentTheme,
+              cfg
             );
           }
         }
@@ -921,29 +1058,14 @@
         highlightSpecialChars(),
         drawSelection(),
         EditorView.lineWrapping,
-        markdown({
-          base: markdownLanguage,
-          codeLanguages: resolveCodeLanguage,
-          extensions: [
-            {
-              props: [
-                styleTags({
-                  'OrderedList/... BulletList/...': tags.content,
-                  ListMark: listMarkerTag,
-                  CodeText: tags.content,
-                  CodeInfo: tags.processingInstruction,
-                  InlineCode: inlineCodeTag,
-                  'InlineCode/...': inlineCodeTag,
-                }),
-              ],
-            },
-          ],
-        }),
+        languageCompartment.of(buildMarkdownLanguageSupport(markdownConfig)),
         syntaxHighlighting(accentMarkdownHighlight),
         keymap.of([...defaultKeymap]),
         themeCompartment.of(buildEditorTheme()),
         readOnlyCompartment.of(EditorState.readOnly.of(readOnly)),
-        livePreviewCompartment.of(createLivePreviewPlugin(viewWhileTyping, themeMode)),
+        livePreviewCompartment.of(
+          createLivePreviewPlugin(viewWhileTyping, themeMode, markdownConfig)
+        ),
         searchHighlightCompartment.of(
           createSearchHighlightPlugin(searchBarOpen ? searchQuery : '')
         ),
@@ -999,7 +1121,7 @@
   });
 
   $effect(() => {
-    // Reconfigure typography, column geometry, view-while-typing, search highlights, and theme dynamically
+    // Reconfigure language compartment, typography, column geometry, view-while-typing, search highlights, and theme dynamically
     const _pf = proseFont;
     const _cf = codeFont;
     const _fs = fontSize;
@@ -1009,14 +1131,21 @@
     const _ro = readOnly;
     const _vwt = viewWhileTyping;
     const _tm = themeMode;
+    const _mcBase = markdownConfig.base;
+    const _mcMath = markdownConfig.extensions.math;
+    const _mcMermaid = markdownConfig.extensions.mermaid;
+    const _mcAlerts = markdownConfig.extensions.alerts;
+    const _mcFootnotes = markdownConfig.extensions.footnotes;
+    const _mcFrontmatter = markdownConfig.extensions.frontmatter;
     const activeSearch = searchBarOpen ? searchQuery : '';
     if (view) {
       view.dispatch({
         effects: [
+          languageCompartment.reconfigure(buildMarkdownLanguageSupport(markdownConfig)),
           themeCompartment.reconfigure(buildEditorTheme()),
           readOnlyCompartment.reconfigure(EditorState.readOnly.of(readOnly)),
           livePreviewCompartment.reconfigure(
-            createLivePreviewPlugin(viewWhileTyping, themeMode)
+            createLivePreviewPlugin(viewWhileTyping, themeMode, markdownConfig)
           ),
           searchHighlightCompartment.reconfigure(createSearchHighlightPlugin(activeSearch)),
         ],
@@ -1089,6 +1218,27 @@
     padding-left: 14px !important;
     color: var(--markup-quote-fg);
     font-style: normal;
+  }
+
+  :global(.cm-live-alert-line) {
+    font-weight: 600;
+    background-color: color-mix(in srgb, var(--bg-code-block) 45%, transparent);
+    border-radius: 0 5px 5px 0;
+  }
+  :global(.cm-live-alert-note) {
+    border-left-color: var(--accent-link);
+  }
+  :global(.cm-live-alert-tip) {
+    border-left-color: var(--markup-task-done);
+  }
+  :global(.cm-live-alert-important) {
+    border-left-color: var(--syntax-keyword);
+  }
+  :global(.cm-live-alert-warning) {
+    border-left-color: var(--accent-orange);
+  }
+  :global(.cm-live-alert-caution) {
+    border-left-color: var(--spellcheck-red);
   }
 
   :global(.cm-live-codeblock-line) {

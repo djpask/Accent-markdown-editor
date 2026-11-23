@@ -46,54 +46,66 @@ export function getOrFetchMermaidSvg(
 }
 
 /**
- * Post-processes preview HTML to render display (`$$...$$`) and inline (`$...$`) KaTeX math
- * while preserving `<pre>`, `<code>`, and `<svg>` blocks untouched.
+ * Post-processes `comrak` preview HTML to render display (`$$...$$`, fenced `math`) and inline
+ * (`$...$`, `` $`...`$ ``) KaTeX math when `mathEnabled` is active, while preserving `<pre>`,
+ * `<code>`, and `<svg>` blocks untouched.
  */
-export function renderMathInPreviewHtml(html: string): string {
-  // Split HTML into protected tags (<pre...>, <code...>, <svg...>) vs normal HTML prose
+export function renderMathInPreviewHtml(html: string, mathEnabled = true): string {
+  if (!mathEnabled) {
+    return html;
+  }
+
+  const decodeEntities = (raw: string) =>
+    raw
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&apos;/g, "'")
+      .replace(/&amp;/g, '&');
+
+  // 1. Render comrak fenced ```math blocks (<pre><code class="language-math" data-math-style="display">...</code></pre>)
+  //    and backtick inline math $`...`$ (<code data-math-style="inline">...</code>) before splitting protected code tags.
+  let stage1 = html.replace(
+    /<pre[^>]*><code[^>]*\bdata-math-style="display"[^>]*>([\s\S]*?)<\/code><\/pre>/gi,
+    (_match, expr: string) =>
+      `<div class="katex-display-block" data-testid="katex-display">${renderLatexToHtml(decodeEntities(expr), true)}</div>`
+  );
+  stage1 = stage1.replace(
+    /<code[^>]*\bdata-math-style="inline"[^>]*>([\s\S]*?)<\/code>/gi,
+    (_match, expr: string) =>
+      `<span class="katex-inline-span" data-testid="katex-inline">${renderLatexToHtml(decodeEntities(expr), false)}</span>`
+  );
+
+  // 2. Split remaining HTML into protected tags (<pre...>, <code...>, <svg...>) vs normal HTML prose
   const protectedRegex = /(<pre[\s\S]*?<\/pre>|<code[\s\S]*?<\/code>|<svg[\s\S]*?<\/svg>)/gi;
-  const parts = html.split(protectedRegex);
+  const parts = stage1.split(protectedRegex);
 
   return parts
     .map((part, idx) => {
       if (idx % 2 === 1) {
         return part;
       }
-      const decodeEntities = (raw: string) =>
-        raw
-          .replace(/&lt;/g, '<')
-          .replace(/&gt;/g, '>')
-          .replace(/&quot;/g, '"')
-          .replace(/&#39;/g, "'")
-          .replace(/&amp;/g, '&');
 
-      // 0. Replace pulldown-cmark native math spans (<span class="math math-display/inline">)
+      // 3. Replace comrak dollar math spans (<span data-math-style="display|inline">)
       let processed = part.replace(
-        /<span class="math math-display">([\s\S]*?)<\/span>/gi,
+        /<span[^>]*\bdata-math-style="display"[^>]*>([\s\S]*?)<\/span>/gi,
         (_match, expr: string) =>
           `<div class="katex-display-block" data-testid="katex-display">${renderLatexToHtml(decodeEntities(expr), true)}</div>`
       );
       processed = processed.replace(
-        /<span class="math math-inline">([\s\S]*?)<\/span>/gi,
+        /<span[^>]*\bdata-math-style="inline"[^>]*>([\s\S]*?)<\/span>/gi,
         (_match, expr: string) =>
           `<span class="katex-inline-span" data-testid="katex-inline">${renderLatexToHtml(decodeEntities(expr), false)}</span>`
       );
 
-      // 1. Fallback: replace raw display math $$...$$
+      // 4. Multi-paragraph display math fallback ($$...$$ spanning blank lines)
       processed = processed.replace(/\$\$([\s\S]+?)\$\$/g, (_match, expr: string) => {
         const clean = decodeEntities(
           expr.replace(/<\/?p>/gi, '\n').replace(/<br\s*\/?>/gi, '\n')
         );
         return `<div class="katex-display-block" data-testid="katex-display">${renderLatexToHtml(clean, true)}</div>`;
       });
-
-      // 2. Fallback: replace raw inline math $...$ (non-empty, not starting/ending with space, single line)
-      processed = processed.replace(
-        /(^|[^\\$])\$([^\s$][^$\n]*?[^\s$]|[^\s$])\$/g,
-        (_match, prefix: string, expr: string) => {
-          return `${prefix}<span class="katex-inline-span" data-testid="katex-inline">${renderLatexToHtml(decodeEntities(expr), false)}</span>`;
-        }
-      );
 
       return processed;
     })

@@ -4,7 +4,7 @@
 
 #define MyAppName "Accent"
 #define MyAppFullName "Accent Markdown Editor"
-#define MyAppVersion "0.8.23"
+#define MyAppVersion "0.8.24"
 #define MyAppPublisher "Accent Developers"
 #define MyAppURL "https://github.com/accent-editor/accent"
 #define MyAppExeName "accent.exe"

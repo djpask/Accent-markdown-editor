@@ -349,12 +349,12 @@ Conflicts: accent
 Replaces: accent
 Maintainer: Accent Developers <maintainers@accent-editor.org>
 Homepage: https://github.com/accent-editor/accent
-Description: Distraction-free multiplatform Markdown editor and viewer in pure Rust
- Accent is a fast, clean-room Markdown editor and viewer written in 100% pure
- Rust using eframe/egui, inspired by Apostrophe.
+Description: Distraction-free multiplatform Markdown editor and viewer
+ Accent is a fast, local-first Markdown editor and viewer combining a pure-Rust
+ backend with a Tauri v2 + Svelte 5 + CodeMirror 6 desktop interface.
  .
- Features include Caret-Aware Live Preview (View-while-typing), Focus and Zen
- modes, native GPU-rasterized Mermaid diagrams without WebView, atomic saving
+ Features include Caret-Aware Live Preview (View-while-typing), multi-tab
+ editing, offline KaTeX math and pure-Rust Mermaid diagrams, atomic saving
  with sub-300ms crash-recovery journaling, and zero-dependency native export to
  PDF, DOCX, ODT, LaTeX, EPUB, and HTML5.
 EOF

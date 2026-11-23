@@ -201,3 +201,11 @@ La versione corrente del progetto è definita in modo centralizzato nel file [`V
 ## Licenza
 
 Distribuito sotto doppia licenza **MIT OR Apache-2.0**.
+
+
+## Ispirazione e riconoscimenti
+
+**Accent** è un progetto indipendente scritto da zero in Rust, Tauri v2, Svelte 5 e CodeMirror 6, ma deve molto a due progetti open source che ne hanno ispirato la visione iniziale:
+
+- **[Apostrophe](https://gitlab.gnome.org/World/apostrophe)** — per l'idea originaria di un ambiente di scrittura Markdown essenziale, calmo e privo di distrazioni visive.
+- **[mdfried](https://github.com/benaja/mdfried)** — per l'ispirazione sulla gerarchia cromatica ad alto contrasto dei titoli e della sintassi su sfondo scuro, da cui è nata la palette predefinita *Amber & Coral*.

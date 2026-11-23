@@ -1,6 +1,6 @@
 pub mod theme;
 
-use accent_core::{AstSpanKind, MarkdownDialect};
+use accent_core::{AstSpanKind, MarkdownConfig};
 use accent_session::{
     ActiveOverlay, ColorPalettePreset, ExportFormat, I18n, LineWidthMode, Locale, PreviewLayout,
     Session, StatMetric, ThemeMode, TypographyConfig, format_thousands,
@@ -75,7 +75,7 @@ pub struct UiSessionSnapshot {
     pub palette_css: PaletteCssTokens,
     pub theme_circle_colors: ThemeCircleColors,
     pub locale: Locale,
-    pub dialect: MarkdownDialect,
+    pub markdown_config: MarkdownConfig,
     pub line_width: LineWidthMode,
     pub line_width_badge: String,
     pub fluid_margin_pct: u8,
@@ -418,6 +418,86 @@ pub fn build_i18n_map(locale: Locale) -> BTreeMap<String, String> {
             "Markdown Documents",
             "Documentos Markdown",
         ),
+        ("base_gfm", "GFM Standard", "GFM Standard", "GFM Standard"),
+        ("base_commonmark", "CommonMark", "CommonMark", "CommonMark"),
+        (
+            "extensions_title",
+            "Estensioni modulari",
+            "Modular Extensions",
+            "Extensiones modulares",
+        ),
+        (
+            "extensions_sub",
+            "Attivabili singolarmente su GFM Standard",
+            "Independently toggleable on GFM Standard",
+            "Activables individualmente en GFM Standard",
+        ),
+        (
+            "extensions_disabled_cm",
+            "Disattivate in modalità CommonMark rigorosa",
+            "Disabled in strict CommonMark mode",
+            "Desactivadas en modo CommonMark estricto",
+        ),
+        (
+            "ext_math",
+            "Matematica KaTeX",
+            "Math (KaTeX)",
+            "Matemáticas KaTeX",
+        ),
+        (
+            "ext_math_sub",
+            "Formule inline ($...$) e blocchi matematici ($$...$$)",
+            "Inline formulas ($...$) and display math blocks ($$...$$)",
+            "Fórmulas en línea ($...$) y bloques matemáticos ($$...$$)",
+        ),
+        (
+            "ext_mermaid",
+            "Diagrammi Mermaid",
+            "Mermaid Diagrams",
+            "Diagramas Mermaid",
+        ),
+        (
+            "ext_mermaid_sub",
+            "Rendering SVG nativo dei blocchi di codice mermaid",
+            "Native SVG rendering for fenced mermaid blocks",
+            "Renderizado SVG nativo de bloques mermaid",
+        ),
+        (
+            "ext_alerts",
+            "Avvisi / Callout",
+            "Callouts / Alerts",
+            "Avisos / Callouts",
+        ),
+        (
+            "ext_alerts_sub",
+            "Blocchi evidenziati [!NOTE], [!TIP], [!IMPORTANT], [!WARNING], [!CAUTION]",
+            "Styled [!NOTE], [!TIP], [!IMPORTANT], [!WARNING], [!CAUTION] blocks",
+            "Bloques destacados [!NOTE], [!TIP], [!IMPORTANT], [!WARNING], [!CAUTION]",
+        ),
+        (
+            "ext_footnotes",
+            "Note a piè di pagina",
+            "Footnotes",
+            "Notas al pie",
+        ),
+        (
+            "ext_footnotes_sub",
+            "Riferimenti nel testo [^1] e definizioni [^1]: ...",
+            "Inline references [^1] and definitions [^1]: ...",
+            "Referencias en línea [^1] y definiciones [^1]: ...",
+        ),
+        (
+            "ext_frontmatter",
+            "Frontmatter YAML",
+            "YAML Frontmatter",
+            "Frontmatter YAML",
+        ),
+        (
+            "ext_frontmatter_sub",
+            "Intestazione metadati iniziale delimitata da ---",
+            "Leading metadata header delimited by ---",
+            "Encabezado inicial de metadatos delimitado por ---",
+        ),
     ];
     for &(k, it, en, es) in extras {
         let val = match locale {
@@ -434,7 +514,7 @@ pub fn extract_outline_headings(session: &Session) -> Vec<OutlineHeadingSnapshot
     let text = session.buffer.as_str();
     let spans = session
         .buffer
-        .compute_live_spans(session.dialect, false, 0..0);
+        .compute_live_spans(session.markdown_config, false, 0..0);
     let mut headings = Vec::new();
     for ls in spans.iter() {
         if let AstSpanKind::Heading { level } = ls.span.kind {
@@ -590,7 +670,7 @@ pub fn build_session_snapshot(session: &Session) -> UiSessionSnapshot {
         palette_css,
         theme_circle_colors,
         locale: session.locale,
-        dialect: session.dialect,
+        markdown_config: session.markdown_config,
         line_width: session.line_width,
         line_width_badge: session.line_width.short_badge().to_string(),
         fluid_margin_pct,

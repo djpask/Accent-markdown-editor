@@ -123,60 +123,571 @@ fn main() {
 | `Ctrl+Shift+P` | Attiva/disattiva pannello di anteprima |
 ";
 
-/// Supported Markdown dialects in Accent (`SPECS.md` Pillar 5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum MarkdownDialect {
-    CommonMark,
+/// Base Markdown grammar (`SPECS.md` §1.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum MarkdownBase {
+    /// Strict CommonMark `0.29` + the 5 formal `0.29-gfm` extensions (`§4.10`, `§5.3`, `§6.5`, `§6.9`, `§6.11`).
     #[default]
     Gfm,
-    Glfm,
+    /// Pure CommonMark `0.29` with all GFM and modular extensions disabled.
+    CommonMark,
 }
 
-impl MarkdownDialect {
-    pub fn from_str_name(s: &str) -> Option<Self> {
+fn default_ext_true() -> bool {
+    true
+}
+
+/// Modular extensions independently toggleable when `MarkdownBase::Gfm` is active (`SPECS.md` §1.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MarkdownExtensions {
+    #[serde(default = "default_ext_true")]
+    pub math: bool,
+    #[serde(default = "default_ext_true")]
+    pub mermaid: bool,
+    #[serde(default = "default_ext_true")]
+    pub alerts: bool,
+    pub footnotes: bool,
+    pub frontmatter: bool,
+}
+
+impl Default for MarkdownExtensions {
+    fn default() -> Self {
+        Self {
+            math: true,
+            mermaid: true,
+            alerts: true,
+            footnotes: false,
+            frontmatter: false,
+        }
+    }
+}
+
+impl MarkdownExtensions {
+    pub const fn all_enabled() -> Self {
+        Self {
+            math: true,
+            mermaid: true,
+            alerts: true,
+            footnotes: true,
+            frontmatter: true,
+        }
+    }
+
+    pub const fn all_disabled() -> Self {
+        Self {
+            math: false,
+            mermaid: false,
+            alerts: false,
+            footnotes: false,
+            frontmatter: false,
+        }
+    }
+}
+
+/// Two-tier Markdown configuration shared across `comrak`, Outline, Exporters, and CodeMirror 6 (`SPECS.md` §1.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct MarkdownConfig {
+    pub base: MarkdownBase,
+    pub extensions: MarkdownExtensions,
+}
+
+impl MarkdownConfig {
+    pub const fn gfm() -> Self {
+        Self {
+            base: MarkdownBase::Gfm,
+            extensions: MarkdownExtensions {
+                math: true,
+                mermaid: true,
+                alerts: true,
+                footnotes: false,
+                frontmatter: false,
+            },
+        }
+    }
+
+    pub const fn commonmark() -> Self {
+        Self {
+            base: MarkdownBase::CommonMark,
+            extensions: MarkdownExtensions {
+                math: true,
+                mermaid: true,
+                alerts: true,
+                footnotes: false,
+                frontmatter: false,
+            },
+        }
+    }
+
+    pub const fn gfm_all_extensions() -> Self {
+        Self {
+            base: MarkdownBase::Gfm,
+            extensions: MarkdownExtensions::all_enabled(),
+        }
+    }
+
+    /// Transparent migration helper from legacy `settings.json` `"dialect"` strings.
+    pub fn from_legacy_dialect_str(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "commonmark" | "cm" => Some(Self::CommonMark),
-            "gfm" | "github" => Some(Self::Gfm),
-            "glfm" | "gitlab" => Some(Self::Glfm),
+            "commonmark" | "cm" => Some(Self::commonmark()),
+            "gfm" | "github" => Some(Self::gfm()),
+            "glfm" | "gitlab" => Some(Self::gfm_all_extensions()),
             _ => None,
         }
     }
 
+    #[inline]
+    pub const fn is_gfm(self) -> bool {
+        matches!(self.base, MarkdownBase::Gfm)
+    }
+
+    #[inline]
+    pub const fn math_enabled(self) -> bool {
+        self.is_gfm() && self.extensions.math
+    }
+
+    #[inline]
+    pub const fn mermaid_enabled(self) -> bool {
+        self.is_gfm() && self.extensions.mermaid
+    }
+
+    #[inline]
+    pub const fn alerts_enabled(self) -> bool {
+        self.is_gfm() && self.extensions.alerts
+    }
+
+    #[inline]
+    pub const fn footnotes_enabled(self) -> bool {
+        self.is_gfm() && self.extensions.footnotes
+    }
+
+    #[inline]
+    pub const fn frontmatter_enabled(self) -> bool {
+        self.is_gfm() && self.extensions.frontmatter
+    }
+
     pub fn display_name(self) -> &'static str {
-        match self {
-            Self::CommonMark => "CommonMark",
-            Self::Gfm => "GitHub Flavored Markdown (GFM)",
-            Self::Glfm => "GitLab Flavored Markdown (GLFM)",
+        match self.base {
+            MarkdownBase::CommonMark => "CommonMark",
+            MarkdownBase::Gfm => "GFM Standard",
         }
     }
 
     pub fn to_comrak_options(self) -> Options<'static> {
         let mut opts = Options::default();
         opts.parse.smart = false;
-        match self {
-            Self::CommonMark => {}
-            Self::Gfm => {
+        opts.render.github_pre_lang = false;
+        opts.render.unsafe_ = true;
+        match self.base {
+            MarkdownBase::CommonMark => {}
+            MarkdownBase::Gfm => {
                 opts.extension.table = true;
                 opts.extension.tasklist = true;
                 opts.extension.strikethrough = true;
                 opts.extension.autolink = true;
-                opts.extension.alerts = true;
-            }
-            Self::Glfm => {
-                opts.extension.table = true;
-                opts.extension.tasklist = true;
-                opts.extension.strikethrough = true;
-                opts.extension.autolink = true;
-                opts.extension.alerts = true;
-                opts.extension.math_dollars = true;
-                opts.extension.math_code = true;
-                opts.extension.footnotes = true;
-                opts.extension.front_matter_delimiter = Some("---".to_string());
-                opts.extension.multiline_block_quotes = true;
+                opts.extension.tagfilter = true;
+
+                opts.extension.alerts = self.extensions.alerts;
+                opts.extension.footnotes = self.extensions.footnotes;
+                if self.extensions.frontmatter {
+                    opts.extension.front_matter_delimiter = Some("---".to_string());
+                }
+                if self.extensions.math {
+                    opts.extension.math_dollars = true;
+                    opts.extension.math_code = true;
+                }
             }
         }
         opts
     }
+}
+
+const GFM_DISALLOWED_RAW_HTML_TAGS: [&str; 9] = [
+    "title",
+    "textarea",
+    "style",
+    "xmp",
+    "iframe",
+    "noembed",
+    "noframes",
+    "script",
+    "plaintext",
+];
+
+fn is_disallowed_raw_html_tag(slice_from_lt: &str) -> bool {
+    let bytes = slice_from_lt.as_bytes();
+    if bytes.len() < 3 || bytes[0] != b'<' {
+        return false;
+    }
+    let name_start = if bytes[1] == b'/' { 2 } else { 1 };
+    let rest = &bytes[name_start..];
+    for tag in GFM_DISALLOWED_RAW_HTML_TAGS {
+        let tb = tag.as_bytes();
+        if rest.len() >= tb.len() && rest[..tb.len()].eq_ignore_ascii_case(tb) {
+            if rest.len() == tb.len() {
+                return true;
+            }
+            let next = rest[tb.len()];
+            if next.is_ascii_whitespace() || next == b'>' || next == b'/' {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn decode_html_entities_minimal(val: &str) -> String {
+    let bytes = val.as_bytes();
+    let mut out = String::with_capacity(val.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'&' {
+            if i + 2 < bytes.len() && bytes[i + 1] == b'#' {
+                let is_hex = bytes[i + 2] == b'x' || bytes[i + 2] == b'X';
+                let digits_start = if is_hex { i + 3 } else { i + 2 };
+                let mut end = digits_start;
+                while end < bytes.len()
+                    && ((is_hex && bytes[end].is_ascii_hexdigit())
+                        || (!is_hex && bytes[end].is_ascii_digit()))
+                {
+                    end += 1;
+                }
+                if end > digits_start {
+                    let num_str = &val[digits_start..end];
+                    let radix = if is_hex { 16 } else { 10 };
+                    if let Ok(code) = u32::from_str_radix(num_str, radix) {
+                        if let Some(ch) = char::from_u32(code) {
+                            out.push(ch);
+                            i = if end < bytes.len() && bytes[end] == b';' {
+                                end + 1
+                            } else {
+                                end
+                            };
+                            continue;
+                        }
+                    }
+                }
+            } else if let Some(semi_rel) = val[i + 1..].find(';') {
+                let entity = &val[i + 1..i + 1 + semi_rel];
+                let replacement = match entity.to_ascii_lowercase().as_str() {
+                    "colon" => Some(':'),
+                    "tab" => Some('\t'),
+                    "newline" => Some('\n'),
+                    "amp" => Some('&'),
+                    "quot" => Some('"'),
+                    "apos" => Some('\''),
+                    "lt" => Some('<'),
+                    "gt" => Some('>'),
+                    _ => None,
+                };
+                if let Some(ch) = replacement {
+                    out.push(ch);
+                    i += 1 + semi_rel + 1;
+                    continue;
+                }
+            }
+        }
+        let ch = val[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn is_dangerous_uri_value(raw_val: &str) -> bool {
+    let decoded = decode_html_entities_minimal(raw_val);
+    let mut compact = String::with_capacity(decoded.len());
+    for ch in decoded.chars() {
+        if ch > ' ' && ch != '\x7f' {
+            compact.push(ch.to_ascii_lowercase());
+        }
+    }
+    compact.starts_with("javascript:")
+        || compact.starts_with("vbscript:")
+        || compact.starts_with("data:text/html")
+}
+
+fn is_dangerous_style_value(raw_val: &str) -> bool {
+    let decoded = decode_html_entities_minimal(raw_val);
+    let mut compact = String::with_capacity(decoded.len());
+    let db = decoded.as_bytes();
+    let mut i = 0;
+    while i < db.len() {
+        if i + 1 < db.len() && db[i] == b'/' && db[i + 1] == b'*' {
+            if let Some(end_rel) = decoded[i + 2..].find("*/") {
+                i += 2 + end_rel + 2;
+                continue;
+            }
+            break;
+        }
+        let ch = decoded[i..].chars().next().unwrap();
+        if ch > ' ' && ch != '\x7f' && ch != '\\' {
+            compact.push(ch.to_ascii_lowercase());
+        }
+        i += ch.len_utf8();
+    }
+    compact.contains("javascript:")
+        || compact.contains("vbscript:")
+        || compact.contains("expression(")
+}
+
+fn push_sanitized_attr_value(out: &mut String, val: &str, quote_char: Option<char>) {
+    match quote_char {
+        Some('"') => {
+            out.push('"');
+            out.push_str(val);
+            out.push('"');
+        }
+        Some('\'') => {
+            out.push('\'');
+            out.push_str(val);
+            out.push('\'');
+        }
+        None | Some(_) => {
+            out.push('"');
+            for ch in val.chars() {
+                if ch == '"' {
+                    out.push_str("&quot;");
+                } else {
+                    out.push(ch);
+                }
+            }
+            out.push('"');
+        }
+    }
+}
+
+fn sanitize_opening_tag_inner(inner: &str, out: &mut String) {
+    let ib = inner.as_bytes();
+    let mut name_end = 0;
+    while name_end < ib.len()
+        && (ib[name_end].is_ascii_alphanumeric()
+            || ib[name_end] == b'-'
+            || ib[name_end] == b':')
+    {
+        name_end += 1;
+    }
+    let tag_name = &inner[..name_end];
+    out.push('<');
+    out.push_str(tag_name);
+
+    let rest = &inner[name_end..];
+    let rb = rest.as_bytes();
+    let mut p = 0;
+    let mut self_closing = false;
+    let mut had_space_before_slash = false;
+
+    while p < rb.len() {
+        let ws_start = p;
+        while p < rb.len() && rb[p].is_ascii_whitespace() {
+            p += 1;
+        }
+        if p >= rb.len() {
+            break;
+        }
+        if rb[p] == b'/' {
+            if rest[p + 1..]
+                .bytes()
+                .all(|b| b.is_ascii_whitespace())
+            {
+                self_closing = true;
+                had_space_before_slash = p > ws_start;
+                break;
+            }
+            p += 1;
+            continue;
+        }
+
+        let attr_s = p;
+        while p < rb.len()
+            && !rb[p].is_ascii_whitespace()
+            && rb[p] != b'='
+            && rb[p] != b'/'
+        {
+            p += 1;
+        }
+        let attr_name = &rest[attr_s..p];
+        if attr_name.is_empty() {
+            p += 1;
+            continue;
+        }
+        let attr_lower = attr_name.to_ascii_lowercase();
+
+        while p < rb.len() && rb[p].is_ascii_whitespace() {
+            p += 1;
+        }
+
+        if p < rb.len() && rb[p] == b'=' {
+            p += 1;
+            while p < rb.len() && rb[p].is_ascii_whitespace() {
+                p += 1;
+            }
+            let (val, quote_char) = if p < rb.len() && (rb[p] == b'"' || rb[p] == b'\'') {
+                let q = rb[p];
+                p += 1;
+                let vs = p;
+                while p < rb.len() && rb[p] != q {
+                    p += 1;
+                }
+                let v = &rest[vs..p];
+                if p < rb.len() && rb[p] == q {
+                    p += 1;
+                }
+                (v, Some(q as char))
+            } else {
+                let vs = p;
+                while p < rb.len() && !rb[p].is_ascii_whitespace() {
+                    if rb[p] == b'/'
+                        && rest[p + 1..].bytes().all(|b| b.is_ascii_whitespace())
+                    {
+                        break;
+                    }
+                    p += 1;
+                }
+                (&rest[vs..p], None)
+            };
+
+            if attr_lower.starts_with("on") || attr_lower == "srcdoc" {
+                continue;
+            }
+            if matches!(
+                attr_lower.as_str(),
+                "href" | "src" | "xlink:href" | "action" | "formaction" | "poster" | "data"
+            ) {
+                out.push(' ');
+                out.push_str(attr_name);
+                out.push('=');
+                if is_dangerous_uri_value(val) {
+                    out.push_str("\"\"");
+                } else {
+                    push_sanitized_attr_value(out, val, quote_char);
+                }
+            } else if attr_lower == "style" {
+                if !is_dangerous_style_value(val) {
+                    out.push(' ');
+                    out.push_str(attr_name);
+                    out.push('=');
+                    push_sanitized_attr_value(out, val, quote_char);
+                }
+            } else {
+                out.push(' ');
+                out.push_str(attr_name);
+                out.push('=');
+                push_sanitized_attr_value(out, val, quote_char);
+            }
+        } else if !attr_lower.starts_with("on") && attr_lower != "srcdoc" {
+            out.push(' ');
+            out.push_str(attr_name);
+        }
+    }
+
+    if self_closing {
+        if had_space_before_slash {
+            out.push_str(" />");
+        } else {
+            out.push_str("/>");
+        }
+    } else {
+        out.push('>');
+    }
+}
+
+/// Sanitizes `comrak`-rendered HTML before insertion into Accent's WebView or standalone HTML output:
+/// 1. Enforces GFM `§6.11` Disallowed Raw HTML filtering (`<title>`, `<textarea>`, `<style>`, `<xmp>`,
+///    `<iframe>`, `<noembed>`, `<noframes>`, `<script>`, `<plaintext>`) even when `base == CommonMark`,
+///    preventing document-embedded `<style>` or `<script>` blocks from altering application chrome or running JS.
+/// 2. Preserves benign raw HTML tags (`<kbd>`, `<sup>`, `<sub>`, `<details>`, `<summary>`, `<img>`, etc.).
+/// 3. Strips inline event-handler attributes (`on*`, `srcdoc`) and neutralizes `javascript:` / `vbscript:` URIs.
+pub fn sanitize_html_for_webview(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() + 32);
+    let bytes = html.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        let Some(rel_lt) = html[i..].find('<') else {
+            out.push_str(&html[i..]);
+            break;
+        };
+        let lt = i + rel_lt;
+        if lt > i {
+            out.push_str(&html[i..lt]);
+        }
+
+        let tail = &html[lt..];
+        let tb = tail.as_bytes();
+
+        if tail.starts_with("<!--") {
+            if let Some(end_rel) = tail[4..].find("-->") {
+                let end = 4 + end_rel + 3;
+                out.push_str(&tail[..end]);
+                i = lt + end;
+            } else {
+                out.push_str(tail);
+                break;
+            }
+            continue;
+        }
+
+        if is_disallowed_raw_html_tag(tail) {
+            out.push_str("&lt;");
+            i = lt + 1;
+            continue;
+        }
+
+        if tb.len() >= 3 && tb[1] == b'/' && tb[2].is_ascii_alphabetic() {
+            if let Some(gt_rel) = tail.find('>') {
+                out.push_str(&tail[..=gt_rel]);
+                i = lt + gt_rel + 1;
+            } else {
+                out.push_str("&lt;");
+                i = lt + 1;
+            }
+            continue;
+        }
+
+        if tb.len() >= 2 && tb[1].is_ascii_alphabetic() {
+            let mut quote: Option<u8> = None;
+            let mut gt_rel: Option<usize> = None;
+            for (k, &b) in tb.iter().enumerate().skip(1) {
+                if let Some(q) = quote {
+                    if b == q {
+                        quote = None;
+                    }
+                } else if b == b'"' || b == b'\'' {
+                    quote = Some(b);
+                } else if b == b'>' {
+                    gt_rel = Some(k);
+                    break;
+                }
+            }
+
+            if let Some(gt) = gt_rel {
+                sanitize_opening_tag_inner(&tail[1..gt], &mut out);
+                i = lt + gt + 1;
+            } else {
+                out.push_str("&lt;");
+                i = lt + 1;
+            }
+            continue;
+        }
+
+        out.push_str("&lt;");
+        i = lt + 1;
+    }
+
+    out
+}
+
+/// Renders Markdown to HTML via `comrak` configured with `config`.
+pub fn render_markdown_html(markdown: &str, config: MarkdownConfig) -> String {
+    comrak::markdown_to_html(markdown, &config.to_comrak_options())
+}
+
+/// Renders Markdown to WebView-safe HTML via `comrak` + `sanitize_html_for_webview`.
+pub fn render_webview_html(markdown: &str, config: MarkdownConfig) -> String {
+    let raw = render_markdown_html(markdown, config);
+    sanitize_html_for_webview(&raw)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -511,7 +1022,7 @@ struct UndoHistory {
 
 #[derive(Debug, Clone)]
 struct PreparedLiveBase {
-    key: (u64, MarkdownDialect),
+    key: (u64, MarkdownConfig),
     ast_spans: Arc<Vec<AstSpan>>,
     delimiters: Vec<Arc<[Range<usize>]>>,
     spans_by_line: Vec<Vec<usize>>,
@@ -526,12 +1037,12 @@ struct PreparedLiveBase {
 
 #[derive(Debug, Clone, Default)]
 struct DocumentAstCache {
-    ast_key: Option<(u64, MarkdownDialect)>,
+    ast_key: Option<(u64, MarkdownConfig)>,
     ast_spans: Arc<Vec<AstSpan>>,
     prepared_base: Option<PreparedLiveBase>,
-    preview_key: Option<(u64, MarkdownDialect)>,
+    preview_key: Option<(u64, MarkdownConfig)>,
     preview_blocks: Arc<Vec<PreviewBlock>>,
-    preview_ever_used_for: Option<MarkdownDialect>,
+    preview_ever_used_for: Option<MarkdownConfig>,
 }
 
 fn common_utf8_prefix_suffix(old: &str, new: &str) -> (usize, usize, usize) {
@@ -786,8 +1297,12 @@ impl DocumentBuffer {
         self.selection_end_char_offset = secondary_char.min(self.rope.len_chars());
     }
 
-    pub fn render_html(&self, dialect: MarkdownDialect) -> String {
-        comrak::markdown_to_html(self.as_str(), &dialect.to_comrak_options())
+    pub fn render_html(&self, config: MarkdownConfig) -> String {
+        render_markdown_html(self.as_str(), config)
+    }
+
+    pub fn render_webview_html(&self, config: MarkdownConfig) -> String {
+        render_webview_html(self.as_str(), config)
     }
 
     /// Converts a byte offset to a character offset in $O(\log N)$ via `ropey::Rope`.
@@ -1039,20 +1554,20 @@ impl DocumentBuffer {
         line_start..(line_start + content_len)
     }
 
-    /// Returns cached `Arc<Vec<AstSpan>>` for `(self.revision, dialect)`, parsing via `comrak` only on revision/dialect change.
-    pub fn extract_ast_spans_arc(&self, dialect: MarkdownDialect) -> Arc<Vec<AstSpan>> {
-        let key = (self.revision, dialect);
+    /// Returns cached `Arc<Vec<AstSpan>>` for `(self.revision, config)`, parsing via `comrak` only on revision/config change.
+    pub fn extract_ast_spans_arc(&self, config: MarkdownConfig) -> Arc<Vec<AstSpan>> {
+        let key = (self.revision, config);
         let also_build_preview = {
             let c = self.cache.borrow();
             if c.ast_key == Some(key) {
                 return Arc::clone(&c.ast_spans);
             }
-            c.preview_ever_used_for == Some(dialect) && c.preview_key != Some(key)
+            c.preview_ever_used_for == Some(config) && c.preview_key != Some(key)
         };
 
         let text = self.as_str();
         let arena = Arena::new();
-        let opts = dialect.to_comrak_options();
+        let opts = config.to_comrak_options();
         let root = comrak::parse_document(&arena, text, &opts);
 
         let mut spans = Vec::new();
@@ -1079,9 +1594,9 @@ impl DocumentBuffer {
         arc
     }
 
-    /// Parses the document using `comrak` with the requested `MarkdownDialect` and returns all AST `Sourcepos` spans.
-    pub fn extract_ast_spans(&self, dialect: MarkdownDialect) -> Vec<AstSpan> {
-        (*self.extract_ast_spans_arc(dialect)).clone()
+    /// Parses the document using `comrak` with the requested `MarkdownConfig` and returns all AST `Sourcepos` spans.
+    pub fn extract_ast_spans(&self, config: MarkdownConfig) -> Vec<AstSpan> {
+        (*self.extract_ast_spans_arc(config)).clone()
     }
 
     fn compute_span_delimiter_ranges(&self, span: &AstSpan, text: &str) -> Arc<[Range<usize>]> {
@@ -1268,8 +1783,8 @@ impl DocumentBuffer {
         }
     }
 
-    fn ensure_prepared_base(&self, dialect: MarkdownDialect) {
-        let key = (self.revision, dialect);
+    fn ensure_prepared_base(&self, config: MarkdownConfig) {
+        let key = (self.revision, config);
         if self
             .cache
             .borrow()
@@ -1279,7 +1794,7 @@ impl DocumentBuffer {
         {
             return;
         }
-        let spans = self.extract_ast_spans_arc(dialect);
+        let spans = self.extract_ast_spans_arc(config);
         let text = self.as_str();
         let total_lines = self.rope.len_lines().max(1);
         let max_line_idx = total_lines.saturating_sub(1);
@@ -1377,14 +1892,14 @@ impl DocumentBuffer {
     /// allowing `accent-ui` to reuse its cached `Galley` without re-shaping typography via `ab_glyph`.
     pub fn live_visibility_signature(
         &self,
-        dialect: MarkdownDialect,
+        config: MarkdownConfig,
         view_while_typing: bool,
         caret_byte_range: Range<usize>,
     ) -> u64 {
         if !view_while_typing {
             return u64::MAX;
         }
-        self.ensure_prepared_base(dialect);
+        self.ensure_prepared_base(config);
         let c = self.cache.borrow();
         let Some(base) = c.prepared_base.as_ref() else {
             return 0;
@@ -1405,14 +1920,14 @@ impl DocumentBuffer {
         }
     }
 
-    /// Returns cached `Arc<Vec<LiveSpan>>` for `(self.revision, dialect, view_while_typing, expanded_spans)`.
+    /// Returns cached `Arc<Vec<LiveSpan>>` for `(self.revision, config, view_while_typing, expanded_spans)`.
     pub fn compute_live_spans_arc(
         &self,
-        dialect: MarkdownDialect,
+        config: MarkdownConfig,
         view_while_typing: bool,
         caret_byte_range: Range<usize>,
     ) -> Arc<Vec<LiveSpan>> {
-        self.ensure_prepared_base(dialect);
+        self.ensure_prepared_base(config);
 
         if !view_while_typing {
             {
@@ -1465,15 +1980,15 @@ impl DocumentBuffer {
         arc
     }
 
-    /// Computes Caret-Aware `LiveSpan`s given the active dialect, whether `view_while_typing` is enabled,
+    /// Computes Caret-Aware `LiveSpan`s given the active `MarkdownConfig`, whether `view_while_typing` is enabled,
     /// and the current cursor/selection byte range (`caret_byte_range`).
     pub fn compute_live_spans(
         &self,
-        dialect: MarkdownDialect,
+        config: MarkdownConfig,
         view_while_typing: bool,
         caret_byte_range: Range<usize>,
     ) -> Vec<LiveSpan> {
-        (*self.compute_live_spans_arc(dialect, view_while_typing, caret_byte_range)).clone()
+        (*self.compute_live_spans_arc(config, view_while_typing, caret_byte_range)).clone()
     }
 
     fn collect_node_spans<'a>(&self, node: &'a AstNode<'a>, out: &mut Vec<AstSpan>) {
@@ -1716,7 +2231,7 @@ impl DocumentBuffer {
     /// lines overlapping expanded spans when the cursor enters/leaves a Markdown span.
     pub fn build_editor_segments_arc(
         &self,
-        dialect: MarkdownDialect,
+        config: MarkdownConfig,
         view_while_typing: bool,
         caret_byte_range: Range<usize>,
     ) -> Arc<Vec<EditorTextSegment>> {
@@ -1724,7 +2239,7 @@ impl DocumentBuffer {
         if text.is_empty() {
             return Arc::new(Vec::new());
         }
-        self.ensure_prepared_base(dialect);
+        self.ensure_prepared_base(config);
 
         if !view_while_typing {
             {
@@ -2037,11 +2552,11 @@ impl DocumentBuffer {
     /// Every character (including `\n`) is preserved in order so `TextEdit` cursor offsets never drift.
     pub fn build_editor_segments(
         &self,
-        dialect: MarkdownDialect,
+        config: MarkdownConfig,
         view_while_typing: bool,
         caret_byte_range: Range<usize>,
     ) -> Vec<EditorTextSegment> {
-        (*self.build_editor_segments_arc(dialect, view_while_typing, caret_byte_range)).clone()
+        (*self.build_editor_segments_arc(config, view_while_typing, caret_byte_range)).clone()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2317,19 +2832,19 @@ impl DocumentBuffer {
     }
 
     /// Produces AST-styled lines for the editor strictly from `comrak` `Sourcepos` spans.
-    pub fn styled_lines(&self, dialect: MarkdownDialect) -> Vec<StyledLine> {
-        self.styled_lines_caret_aware(dialect, false, 0..0)
+    pub fn styled_lines(&self, config: MarkdownConfig) -> Vec<StyledLine> {
+        self.styled_lines_caret_aware(config, false, 0..0)
     }
 
     /// Produces AST-styled lines with optional Caret-Aware *View-while-typing* delimiter collapsing.
     pub fn styled_lines_caret_aware(
         &self,
-        dialect: MarkdownDialect,
+        config: MarkdownConfig,
         view_while_typing: bool,
         caret_byte_range: Range<usize>,
     ) -> Vec<StyledLine> {
         let text = self.text();
-        let live_spans = self.compute_live_spans(dialect, view_while_typing, caret_byte_range);
+        let live_spans = self.compute_live_spans(config, view_while_typing, caret_byte_range);
         let num_lines = self.len_lines();
         let mut result = Vec::with_capacity(num_lines);
 
@@ -2607,12 +3122,12 @@ impl DocumentBuffer {
         segments
     }
 
-    /// Parses the document into structured `PreviewBlock`s for Split/Full/Windowed Preview rendering, cached by `(revision, dialect)`.
-    pub fn parse_preview_blocks_arc(&self, dialect: MarkdownDialect) -> Arc<Vec<PreviewBlock>> {
-        let key = (self.revision, dialect);
+    /// Parses the document into structured `PreviewBlock`s for Split/Full/Windowed Preview rendering, cached by `(revision, config)`.
+    pub fn parse_preview_blocks_arc(&self, config: MarkdownConfig) -> Arc<Vec<PreviewBlock>> {
+        let key = (self.revision, config);
         let also_build_spans = {
             let mut c = self.cache.borrow_mut();
-            c.preview_ever_used_for = Some(dialect);
+            c.preview_ever_used_for = Some(config);
             if c.preview_key == Some(key) {
                 return Arc::clone(&c.preview_blocks);
             }
@@ -2621,7 +3136,7 @@ impl DocumentBuffer {
 
         let text = self.as_str();
         let arena = Arena::new();
-        let opts = dialect.to_comrak_options();
+        let opts = config.to_comrak_options();
         let root = comrak::parse_document(&arena, text, &opts);
 
         let mut blocks = Vec::new();
@@ -2649,8 +3164,8 @@ impl DocumentBuffer {
     }
 
     /// Parses the document into structured `PreviewBlock`s for Split/Full/Windowed Preview rendering.
-    pub fn parse_preview_blocks(&self, dialect: MarkdownDialect) -> Vec<PreviewBlock> {
-        (*self.parse_preview_blocks_arc(dialect)).clone()
+    pub fn parse_preview_blocks(&self, config: MarkdownConfig) -> Vec<PreviewBlock> {
+        (*self.parse_preview_blocks_arc(config)).clone()
     }
 
     fn collect_preview_block<'a>(&self, node: &'a AstNode<'a>, out: &mut Vec<PreviewBlock>) {
@@ -2889,9 +3404,9 @@ impl DocumentBuffer {
         }
     }
 
-    /// Classifies lines using the AST engine (`MarkdownDialect::Gfm` by default).
+    /// Classifies lines using the AST engine (`MarkdownConfig::gfm()` by default).
     pub fn classify_lines(&self) -> Vec<LineKind> {
-        let styled = self.styled_lines(MarkdownDialect::Gfm);
+        let styled = self.styled_lines(MarkdownConfig::gfm());
         styled
             .into_iter()
             .map(|sl| {
@@ -3052,20 +3567,20 @@ parametro_sincronizzazione__c, attributo_personalizzato__c,
 indice_archivio_principale__c, stato_elaborazione_finale__c)
 ";
         let buf = DocumentBuffer::from_str_content(sample);
-        for dialect in [
-            MarkdownDialect::CommonMark,
-            MarkdownDialect::Gfm,
-            MarkdownDialect::Glfm,
+        for config in [
+            MarkdownConfig::commonmark(),
+            MarkdownConfig::gfm(),
+            MarkdownConfig::gfm_all_extensions(),
         ] {
-            let spans = buf.extract_ast_spans(dialect);
+            let spans = buf.extract_ast_spans(config);
             assert!(
                 !spans
                     .iter()
                     .any(|s| matches!(s.kind, AstSpanKind::Strong | AstSpanKind::Emph)),
-                "Intraword `__c` must NEVER produce Strong or Emph AST spans in {dialect:?}"
+                "Intraword `__c` must NEVER produce Strong or Emph AST spans in {config:?}"
             );
 
-            let styled = buf.styled_lines(dialect);
+            let styled = buf.styled_lines(config);
             for line in styled {
                 for seg in line.segments {
                     assert!(
@@ -3079,11 +3594,11 @@ indice_archivio_principale__c, stato_elaborazione_finale__c)
     }
 
     #[test]
-    fn test_multi_dialect_ast_spans_commonmark_gfm_glfm() {
+    fn test_markdown_config_ast_spans_commonmark_vs_gfm_and_extensions() {
         let md = "# Heading\n\n**bold** and ~~strike~~\n\n$x + y = z$\n";
         let buf = DocumentBuffer::from_str_content(md);
 
-        let cm_spans = buf.extract_ast_spans(MarkdownDialect::CommonMark);
+        let cm_spans = buf.extract_ast_spans(MarkdownConfig::commonmark());
         assert!(cm_spans
             .iter()
             .any(|s| matches!(s.kind, AstSpanKind::Heading { level: 1 })));
@@ -3097,19 +3612,21 @@ indice_archivio_principale__c, stato_elaborazione_finale__c)
             .iter()
             .any(|s| matches!(s.kind, AstSpanKind::MathInline)));
 
-        let gfm_spans = buf.extract_ast_spans(MarkdownDialect::Gfm);
-        assert!(gfm_spans
+        let mut gfm_no_math = MarkdownConfig::gfm();
+        gfm_no_math.extensions.math = false;
+        let gfm_no_math_spans = buf.extract_ast_spans(gfm_no_math);
+        assert!(gfm_no_math_spans
             .iter()
             .any(|s| matches!(s.kind, AstSpanKind::Strikethrough)));
-        assert!(!gfm_spans
+        assert!(!gfm_no_math_spans
             .iter()
             .any(|s| matches!(s.kind, AstSpanKind::MathInline)));
 
-        let glfm_spans = buf.extract_ast_spans(MarkdownDialect::Glfm);
-        assert!(glfm_spans
+        let gfm_default_spans = buf.extract_ast_spans(MarkdownConfig::gfm());
+        assert!(gfm_default_spans
             .iter()
             .any(|s| matches!(s.kind, AstSpanKind::Strikethrough)));
-        assert!(glfm_spans
+        assert!(gfm_default_spans
             .iter()
             .any(|s| matches!(s.kind, AstSpanKind::MathInline)));
     }
@@ -3120,7 +3637,7 @@ indice_archivio_principale__c, stato_elaborazione_finale__c)
         let buf = DocumentBuffer::from_str_content(md);
 
         // 1. Caret at byte 0 (outside both **parola** and ~~barrato~~) with view_while_typing = true
-        let collapsed_spans = buf.compute_live_spans(MarkdownDialect::Gfm, true, 0..0);
+        let collapsed_spans = buf.compute_live_spans(MarkdownConfig::gfm(), true, 0..0);
         let strong_span = collapsed_spans
             .iter()
             .find(|s| matches!(s.span.kind, AstSpanKind::Strong))
@@ -3128,7 +3645,7 @@ indice_archivio_principale__c, stato_elaborazione_finale__c)
         assert_eq!(strong_span.visibility, DelimiterVisibility::Collapsed);
         assert_eq!(strong_span.delimiter_byte_ranges.len(), 2);
 
-        let segs_collapsed = buf.build_editor_segments(MarkdownDialect::Gfm, true, 0..0);
+        let segs_collapsed = buf.build_editor_segments(MarkdownConfig::gfm(), true, 0..0);
         // Verify 1:1 text preservation (zero cursor drift)
         let reconstructed: String = segs_collapsed.iter().map(|s| s.as_str(md)).collect();
         assert_eq!(reconstructed, md);
@@ -3137,7 +3654,7 @@ indice_archivio_principale__c, stato_elaborazione_finale__c)
             .any(|s| s.as_str(md) == "**" && s.collapsed_delimiter));
 
         // 2. Caret at byte 9 (inside `**parola**`, byte range 7..17) -> Strong becomes Expanded!
-        let expanded_spans = buf.compute_live_spans(MarkdownDialect::Gfm, true, 9..9);
+        let expanded_spans = buf.compute_live_spans(MarkdownConfig::gfm(), true, 9..9);
         let strong_expanded = expanded_spans
             .iter()
             .find(|s| matches!(s.span.kind, AstSpanKind::Strong))
@@ -3180,7 +3697,7 @@ let x = 42;
         let neutral_pos = md.find("Paragrafo neutro").unwrap();
 
         let segs = buf.build_editor_segments(
-            MarkdownDialect::Gfm,
+            MarkdownConfig::gfm(),
             true,
             neutral_pos..(neutral_pos + 1),
         );
@@ -3212,7 +3729,7 @@ let x = 42;
 
         // Verify table lines are collapsed when caret is outside, and expand when caret enters table
         let live_outside = buf.compute_live_spans(
-            MarkdownDialect::Gfm,
+            MarkdownConfig::gfm(),
             true,
             neutral_pos..(neutral_pos + 1),
         );
@@ -3225,7 +3742,7 @@ let x = 42;
 
         let table_pos = md.find("Valore 1").unwrap();
         let live_inside =
-            buf.compute_live_spans(MarkdownDialect::Gfm, true, table_pos..(table_pos + 1));
+            buf.compute_live_spans(MarkdownConfig::gfm(), true, table_pos..(table_pos + 1));
         let table_inside = live_inside
             .iter()
             .find(|s| matches!(s.span.kind, AstSpanKind::Table { .. }))
@@ -3256,7 +3773,7 @@ let x = 42;
         let buf = DocumentBuffer::from_str_content(&content);
 
         let t0 = std::time::Instant::now();
-        let segs_1 = buf.build_editor_segments_arc(MarkdownDialect::Gfm, true, 0..0);
+        let segs_1 = buf.build_editor_segments_arc(MarkdownConfig::gfm(), true, 0..0);
         let cold_ms = t0.elapsed().as_secs_f64() * 1000.0;
         assert!(
             !segs_1.is_empty(),
@@ -3268,7 +3785,7 @@ let x = 42;
 
         // Second call with identical state must hit cache in < 0.5 ms
         let t1 = std::time::Instant::now();
-        let segs_2 = buf.build_editor_segments_arc(MarkdownDialect::Gfm, true, 0..0);
+        let segs_2 = buf.build_editor_segments_arc(MarkdownConfig::gfm(), true, 0..0);
         let warm_ms = t1.elapsed().as_secs_f64() * 1000.0;
         assert!(Arc::ptr_eq(&segs_1, &segs_2));
         assert!(
@@ -3283,7 +3800,7 @@ let x = 42;
 
         // Verify ordered lists (`1. Primo elemento...`) have `ordered: true` and NO collapsed delimiter ranges,
         // while bullet lists (`* Elemento puntato generico`) have `ordered: false` and collapsed `* ` delimiter!
-        let live_spans = buf.compute_live_spans_arc(MarkdownDialect::Gfm, true, 0..0);
+        let live_spans = buf.compute_live_spans_arc(MarkdownConfig::gfm(), true, 0..0);
         let has_ordered = live_spans.iter().any(|ls| {
             matches!(
                 ls.span.kind,
@@ -3334,7 +3851,7 @@ let x = 42;
         let mut buf = DocumentBuffer::from_str_content(doc);
 
         // Locate the `Strong` span for `**parola**`
-        let spans = buf.extract_ast_spans(MarkdownDialect::Gfm);
+        let spans = buf.extract_ast_spans(MarkdownConfig::gfm());
         let strong_span = spans
             .iter()
             .find(|s| matches!(s.kind, AstSpanKind::Strong))
@@ -3354,12 +3871,12 @@ let x = 42;
         for char_pos in 0..=buf.len_chars() {
             buf.set_cursor(char_pos);
             let caret_bytes = buf.selection_byte_range();
-            let live = buf.compute_live_spans(MarkdownDialect::Gfm, true, caret_bytes.clone());
+            let live = buf.compute_live_spans(MarkdownConfig::gfm(), true, caret_bytes.clone());
             let strong_live = live
                 .iter()
                 .find(|ls| matches!(ls.span.kind, AstSpanKind::Strong))
                 .expect("LiveSpan for Strong should exist");
-            let segs = buf.build_editor_segments(MarkdownDialect::Gfm, true, caret_bytes);
+            let segs = buf.build_editor_segments(MarkdownConfig::gfm(), true, caret_bytes);
             let any_collapsed = segs.iter().any(|s| s.collapsed_delimiter);
 
             if (start_char..=end_char).contains(&char_pos) {
@@ -3396,7 +3913,7 @@ let x = 42;
 
 ```bash
 # Comment line
-DISPLAY=:99 apostrophe
+DISPLAY=:99 ./target/debug/accent-ui
 ```
 
 | Costrutto | Colore |
@@ -3405,7 +3922,7 @@ DISPLAY=:99 apostrophe
 ";
         let buf = DocumentBuffer::from_str_content(md);
         // Source mode (view_while_typing = false -> all spans Expanded)
-        let segs = buf.build_editor_segments(MarkdownDialect::Gfm, false, 0..0);
+        let segs = buf.build_editor_segments(MarkdownConfig::gfm(), false, 0..0);
         let reconstructed: String = segs.iter().map(|s| s.as_str(md)).collect();
         assert_eq!(reconstructed, md);
 
@@ -3430,7 +3947,9 @@ DISPLAY=:99 apostrophe
             .any(|s| s.as_str(md) == "# Comment line" && s.code_block && s.code_comment));
         assert!(segs
             .iter()
-            .any(|s| s.as_str(md) == "DISPLAY=:99 apostrophe" && s.code_block && !s.code_comment));
+            .any(|s| s.as_str(md) == "DISPLAY=:99 ./target/debug/accent-ui"
+                && s.code_block
+                && !s.code_comment));
         // Expanded table pipes and header cells
         assert!(segs.iter().any(|s| s.as_str(md) == "|" && s.table_pipe));
         assert!(segs
@@ -3458,7 +3977,7 @@ Paragrafo con **grassetto 🦀👍🏽✨**, *corsivo 👩‍💻*, ~~barrato �
 ";
         let buf = DocumentBuffer::from_str_content(md);
         for view_while_typing in [false, true] {
-            let segs = buf.build_editor_segments(MarkdownDialect::Gfm, view_while_typing, 0..0);
+            let segs = buf.build_editor_segments(MarkdownConfig::gfm(), view_while_typing, 0..0);
             let reconstructed: String = segs.iter().map(|s| s.as_str(md)).collect();
             assert_eq!(
                 reconstructed, md,
@@ -3486,7 +4005,7 @@ Paragrafo con **grassetto 🦀👍🏽✨**, *corsivo 👩‍💻*, ~~barrato �
         let md = "Inizio 🚀👨‍👩‍👧‍👦🇮🇹 **grassetto 🦀✨** e `codice 💡` fine\n";
         let mut buf = DocumentBuffer::from_str_content(md);
 
-        let spans = buf.extract_ast_spans(MarkdownDialect::Gfm);
+        let spans = buf.extract_ast_spans(MarkdownConfig::gfm());
         let strong_span = spans
             .iter()
             .find(|s| matches!(s.kind, AstSpanKind::Strong))
@@ -3502,8 +4021,8 @@ Paragrafo con **grassetto 🦀👍🏽✨**, *corsivo 👩‍💻*, ~~barrato �
         for char_pos in 0..=buf.len_chars() {
             buf.set_cursor(char_pos);
             let caret_bytes = buf.selection_byte_range();
-            let live = buf.compute_live_spans(MarkdownDialect::Gfm, true, caret_bytes.clone());
-            let segs = buf.build_editor_segments(MarkdownDialect::Gfm, true, caret_bytes);
+            let live = buf.compute_live_spans(MarkdownConfig::gfm(), true, caret_bytes.clone());
+            let segs = buf.build_editor_segments(MarkdownConfig::gfm(), true, caret_bytes);
             let reconstructed: String = segs.iter().map(|s| s.as_str(md)).collect();
             assert_eq!(reconstructed, md);
 
@@ -3540,7 +4059,7 @@ Paragrafo con **grassetto 🦀👍🏽✨**, *corsivo 👩‍💻*, ~~barrato �
         );
 
         let buf = DocumentBuffer::from_str_content("# Titolo :rocket:\n\nTesto con :bulb: e :fire:\n");
-        let blocks = buf.parse_preview_blocks(MarkdownDialect::Gfm);
+        let blocks = buf.parse_preview_blocks(MarkdownConfig::gfm());
         assert_eq!(blocks.len(), 2);
         if let PreviewBlock::Heading { inlines, .. } = &blocks[0] {
             let joined: String = inlines.iter().map(|i| i.text.as_str()).collect();
@@ -3570,13 +4089,13 @@ Paragrafo con **grassetto 🦀👍🏽✨**, *corsivo 👩‍💻*, ~~barrato �
         assert!(buf.len_chars() > 35_000);
 
         // Cold build and 1:1 verification
-        let segs_cold = buf.build_editor_segments_arc(MarkdownDialect::Gfm, true, 0..0);
+        let segs_cold = buf.build_editor_segments_arc(MarkdownConfig::gfm(), true, 0..0);
         let reconstructed: String = segs_cold.iter().map(|s| s.as_str(&big_md)).collect();
         assert_eq!(reconstructed, big_md);
 
         // Warm cache must be sub-millisecond
         let t_warm = std::time::Instant::now();
-        let segs_warm = buf.build_editor_segments_arc(MarkdownDialect::Gfm, true, 0..0);
+        let segs_warm = buf.build_editor_segments_arc(MarkdownConfig::gfm(), true, 0..0);
         let warm_ms = t_warm.elapsed().as_secs_f64() * 1000.0;
         assert!(Arc::ptr_eq(&segs_cold, &segs_warm));
         assert!(warm_ms < 1.0, "Warm cache took {warm_ms:.3} ms");
@@ -3589,7 +4108,7 @@ Paragrafo con **grassetto 🦀👍🏽✨**, *corsivo 👩‍💻*, ~~barrato �
             buf.insert_text("🎯👨‍🔬🇮🇹");
         }
         let segs_after_edits =
-            buf.build_editor_segments_arc(MarkdownDialect::Gfm, true, buf.selection_byte_range());
+            buf.build_editor_segments_arc(MarkdownConfig::gfm(), true, buf.selection_byte_range());
         let after_doc = buf.as_str();
         let after_reconstructed: String =
             segs_after_edits.iter().map(|s| s.as_str(after_doc)).collect();
@@ -3613,10 +4132,10 @@ Paragrafo con **grassetto 🦀👍🏽✨**, *corsivo 👩‍💻*, ~~barrato �
         let md = "Riga neutra iniziale con molte parole semplici.\n\nSeconda riga con **grassetto** qui.\n";
         let buf = DocumentBuffer::from_str_content(md);
         assert!(!buf.has_color_emojis());
-        let segs_a = buf.build_editor_segments_arc(MarkdownDialect::Gfm, true, 0..0);
-        let segs_b = buf.build_editor_segments_arc(MarkdownDialect::Gfm, true, 12..12);
-        let sig_a = buf.live_visibility_signature(MarkdownDialect::Gfm, true, 0..0);
-        let sig_b = buf.live_visibility_signature(MarkdownDialect::Gfm, true, 12..12);
+        let segs_a = buf.build_editor_segments_arc(MarkdownConfig::gfm(), true, 0..0);
+        let segs_b = buf.build_editor_segments_arc(MarkdownConfig::gfm(), true, 12..12);
+        let sig_a = buf.live_visibility_signature(MarkdownConfig::gfm(), true, 0..0);
+        let sig_b = buf.live_visibility_signature(MarkdownConfig::gfm(), true, 12..12);
         assert_eq!(sig_a, 0);
         assert_eq!(sig_a, sig_b);
         assert!(
@@ -3626,18 +4145,18 @@ Paragrafo con **grassetto 🦀👍🏽✨**, *corsivo 👩‍💻*, ~~barrato �
 
         let bold_off = md.find("grassetto").unwrap();
         let sig_bold =
-            buf.live_visibility_signature(MarkdownDialect::Gfm, true, bold_off..bold_off);
+            buf.live_visibility_signature(MarkdownConfig::gfm(), true, bold_off..bold_off);
         let sig_bold_next = buf.live_visibility_signature(
-            MarkdownDialect::Gfm,
+            MarkdownConfig::gfm(),
             true,
             (bold_off + 2)..(bold_off + 2),
         );
         assert_ne!(sig_bold, sig_a);
         assert_eq!(sig_bold, sig_bold_next);
         let segs_bold_1 =
-            buf.build_editor_segments_arc(MarkdownDialect::Gfm, true, bold_off..bold_off);
+            buf.build_editor_segments_arc(MarkdownConfig::gfm(), true, bold_off..bold_off);
         let segs_bold_2 = buf.build_editor_segments_arc(
-            MarkdownDialect::Gfm,
+            MarkdownConfig::gfm(),
             true,
             (bold_off + 2)..(bold_off + 2),
         );
@@ -3699,5 +4218,202 @@ Paragrafo con **grassetto 🦀👍🏽✨**, *corsivo 👩‍💻*, ~~barrato �
         buf.set_selection(start_char, start_char);
         assert_eq!(buf.selection_stats(), None);
         assert_eq!(buf.active_stats(), full_stats);
+    }
+
+    #[test]
+    fn test_commonmark_strict_purity_zero_extension_leakage() {
+        let md = "\
+---
+title: Metadata
+---
+
+| Col A | Col B |
+|:---|---:|
+| 1 | 2 |
+
+- [x] Task item
+~~strikethrough~~ and ~single~
+Visit https://example.org and www.example.com or user@example.com.
+
+> [!NOTE]
+> Callout text
+
+Inline $x + y = z$ and footnote[^1].
+
+[^1]: Footnote body.
+";
+        // Even if all extension booleans are true in struct memory, CommonMark base must disable all of them
+        let cfg = MarkdownConfig {
+            base: MarkdownBase::CommonMark,
+            extensions: MarkdownExtensions::all_enabled(),
+        };
+        assert!(!cfg.is_gfm());
+        assert!(!cfg.math_enabled());
+        assert!(!cfg.mermaid_enabled());
+        assert!(!cfg.alerts_enabled());
+        assert!(!cfg.footnotes_enabled());
+        assert!(!cfg.frontmatter_enabled());
+
+        let html = render_markdown_html(md, cfg);
+        assert!(!html.contains("<table>"), "CommonMark must not parse GFM tables");
+        assert!(
+            !html.contains("type=\"checkbox\""),
+            "CommonMark must not parse GFM tasklists"
+        );
+        assert!(
+            !html.contains("<del>"),
+            "CommonMark must not parse GFM strikethrough"
+        );
+        assert!(
+            !html.contains("<a href=\"https://example.org\">"),
+            "CommonMark must not auto-link bare URLs"
+        );
+        assert!(
+            !html.contains("markdown-alert"),
+            "CommonMark must not parse alerts"
+        );
+        assert!(
+            !html.contains("data-math-style"),
+            "CommonMark must not parse dollar math"
+        );
+        assert!(
+            !html.contains("data-footnotes"),
+            "CommonMark must not parse footnotes"
+        );
+        // Leading `---\ntitle: Metadata\n---` in strict CommonMark becomes `<hr />` + Setext `<h2>Metadata</h2>`
+        assert!(html.contains("<hr />"));
+        assert!(html.contains("<h2>title: Metadata</h2>"));
+    }
+
+    #[test]
+    fn test_gfm_029_extended_autolinks_and_disallowed_raw_html_tagfilter() {
+        let cfg = MarkdownConfig::gfm();
+        let md_links = "See https://accent-editor.org/docs, www.rust-lang.org! Contact info@accent-editor.org.";
+        let html_links = render_webview_html(md_links, cfg);
+        assert!(html_links.contains("<a href=\"https://accent-editor.org/docs\">https://accent-editor.org/docs</a>,"));
+        assert!(html_links.contains("<a href=\"http://www.rust-lang.org\">www.rust-lang.org</a>!"));
+        assert!(html_links.contains("<a href=\"mailto:info@accent-editor.org\">info@accent-editor.org</a>."));
+
+        // Benign HTML tags (§4.6 / §6.10) must be preserved
+        let md_benign = "Premi <kbd>Ctrl</kbd>+<kbd>S</kbd> per x<sup>2</sup>.\n\n<details><summary>Info</summary><p>Dettaglio</p></details>\n";
+        let html_benign = render_webview_html(md_benign, cfg);
+        assert!(html_benign.contains("<kbd>Ctrl</kbd>+<kbd>S</kbd>"));
+        assert!(html_benign.contains("<sup>2</sup>"));
+        assert!(html_benign.contains("<details><summary>Info</summary><p>Dettaglio</p></details>"));
+
+        // All 9 GFM §6.11 Disallowed Raw HTML tags must be filtered (`<` -> `&lt;`)
+        for tag in [
+            "title",
+            "textarea",
+            "style",
+            "xmp",
+            "iframe",
+            "noembed",
+            "noframes",
+            "script",
+            "plaintext",
+        ] {
+            let md_bad = format!("<{tag}>payload</{tag}> and <{} class=\"x\">X</{}>", tag.to_uppercase(), tag.to_uppercase());
+            let html_out = render_webview_html(&md_bad, cfg);
+            assert!(
+                !html_out.to_ascii_lowercase().contains(&format!("<{tag}>"))
+                    && !html_out.to_ascii_lowercase().contains(&format!("<{tag} ")),
+                "GFM §6.11 must filter disallowed tag <{tag}>: got {html_out}"
+            );
+            assert!(html_out.contains(&format!("&lt;{tag}>")));
+        }
+    }
+
+    #[test]
+    fn test_webview_html_sanitization_events_uris_and_commonmark_protection() {
+        let md = "\
+<img src=\"diagram.png\" onerror=\"alert(1)\" alt=\"ok\" />
+<div onclick='steal()' onmouseover=bad() class=\"card\">Sicuro</div>
+<img/onload=\"evil()\" src=\"icon.svg\">
+[Link JS](javascript:alert(1))
+[Link VBS](vbscript:msgbox(1))
+<a href=\"  &#106;ava&#x73;cript&colon;alert(2)\">Obfuscated</a>
+<style>body { display: none !important; }</style>
+<script>window.__pwn = 1;</script>
+
+```html
+<img src=\"x\" onerror=\"alert('keep inside code block')\">
+```
+";
+        for cfg in [MarkdownConfig::gfm(), MarkdownConfig::commonmark()] {
+            let safe = render_webview_html(md, cfg);
+            assert!(!safe.contains("onerror=\"alert(1)\""));
+            assert!(!safe.contains("onclick="));
+            assert!(!safe.contains("onmouseover="));
+            assert!(!safe.contains("onload="));
+            assert!(safe.contains("<img src=\"diagram.png\" alt=\"ok\" />"));
+            assert!(safe.contains("<div class=\"card\">Sicuro</div>"));
+            assert!(!safe.to_ascii_lowercase().contains("href=\"javascript:"));
+            assert!(!safe.to_ascii_lowercase().contains("href=\"vbscript:"));
+            assert!(!safe.contains("&#106;ava"));
+            assert!(
+                !safe.contains("<style>") && safe.contains("&lt;style>"),
+                "Even in {cfg:?}, WebView HTML must filter <style> so app chrome stays intact: {safe}"
+            );
+            assert!(
+                !safe.contains("<script>") && safe.contains("&lt;script>"),
+                "Even in {cfg:?}, WebView HTML must filter <script>: {safe}"
+            );
+            // Escaped code inside `<pre><code>` must remain untouched
+            assert!(safe.contains("&lt;img src=&quot;x&quot; onerror=&quot;alert('keep inside code block')&quot;&gt;"));
+        }
+    }
+
+    #[test]
+    fn test_markdown_extensions_individual_toggle_isolation_and_legacy_migration() {
+        // 1. Legacy dialect migration helper
+        assert_eq!(
+            MarkdownConfig::from_legacy_dialect_str("CommonMark"),
+            Some(MarkdownConfig::commonmark())
+        );
+        assert_eq!(
+            MarkdownConfig::from_legacy_dialect_str("Gfm"),
+            Some(MarkdownConfig::gfm())
+        );
+        assert_eq!(
+            MarkdownConfig::from_legacy_dialect_str("Glfm"),
+            Some(MarkdownConfig::gfm_all_extensions())
+        );
+
+        // 2. Math toggle isolation (`$100 ... $200` stays literal when math == false)
+        let md_math = "Prezzo da $100 a $200 e formula $E = mc^2$.\n";
+        let mut cfg_no_math = MarkdownConfig::gfm();
+        cfg_no_math.extensions.math = false;
+        let html_no_math = render_webview_html(md_math, cfg_no_math);
+        assert!(!html_no_math.contains("data-math-style"));
+        assert!(html_no_math.contains("Prezzo da $100 a $200"));
+
+        let html_with_math = render_webview_html(md_math, MarkdownConfig::gfm());
+        assert!(html_with_math.contains("data-math-style=\"inline\""));
+
+        // 3. Alerts toggle isolation
+        let md_alert = "> [!WARNING]\n> Attenzione ai dati.\n";
+        let mut cfg_no_alerts = MarkdownConfig::gfm();
+        cfg_no_alerts.extensions.alerts = false;
+        assert!(!render_webview_html(md_alert, cfg_no_alerts).contains("markdown-alert"));
+        assert!(render_webview_html(md_alert, MarkdownConfig::gfm()).contains("markdown-alert-warning"));
+
+        // 4. Footnotes toggle isolation
+        let md_fn = "Testo con nota[^1].\n\n[^1]: Dettaglio piè di pagina.\n";
+        assert!(!render_webview_html(md_fn, MarkdownConfig::gfm()).contains("data-footnotes"));
+        let mut cfg_fn = MarkdownConfig::gfm();
+        cfg_fn.extensions.footnotes = true;
+        assert!(render_webview_html(md_fn, cfg_fn).contains("data-footnotes"));
+
+        // 5. Frontmatter toggle isolation
+        let md_fm = "---\ntitle: Specifica\n---\n\n# Capitolo\n";
+        let html_no_fm = render_webview_html(md_fm, MarkdownConfig::gfm());
+        assert!(html_no_fm.contains("<h2>title: Specifica</h2>"));
+
+        let mut cfg_fm = MarkdownConfig::gfm();
+        cfg_fm.extensions.frontmatter = true;
+        let html_with_fm = render_webview_html(md_fm, cfg_fm);
+        assert!(!html_with_fm.contains("title: Specifica"));
+        assert!(html_with_fm.contains("<h1>Capitolo</h1>"));
     }
 }

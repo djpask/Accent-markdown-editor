@@ -652,61 +652,18 @@ fn render_mermaid_diagram(
     })
 }
 
-fn html_unescape_basic(s: &str) -> String {
-    s.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
-}
-
-fn inject_rust_mermaid_svgs(raw_html: &str, session: &Session) -> String {
-    let prefix = "<pre><code class=\"language-";
-    let close_tag = "</code></pre>";
-    let mut out = String::with_capacity(raw_html.len() + 1024);
-    let mut rest = raw_html;
-    while let Some(start) = rest.find(prefix) {
-        out.push_str(&rest[..start]);
-        let after_prefix = &rest[start + prefix.len()..];
-        if let Some(quote_end) = after_prefix.find("\">") {
-            let lang = &after_prefix[..quote_end];
-            let after_open = &after_prefix[quote_end + 2..];
-            if lang == "mermaid" {
-                if let Some(end) = after_open.find(close_tag) {
-                    let escaped_code = &after_open[..end];
-                    let code = html_unescape_basic(escaped_code);
-                    let diagram = session.render_mermaid(&code);
-                    out.push_str(
-                        "<div class=\"accent-mermaid-block\" data-testid=\"mermaid-svg-block\">",
-                    );
-                    out.push_str(&diagram.svg);
-                    out.push_str("</div>");
-                    rest = &after_open[end + close_tag.len()..];
-                    continue;
-                }
-            } else {
-                out.push_str("<pre data-code-lang=\"");
-                out.push_str(lang);
-                out.push_str("\"><code class=\"language-");
-                out.push_str(lang);
-                out.push_str("\">");
-                rest = after_open;
-                continue;
-            }
-        }
-        out.push_str(prefix);
-        rest = after_prefix;
-    }
-    out.push_str(rest);
-    out
+pub fn render_session_preview_html(session: &Session) -> String {
+    accent_export::render_markdown_to_html_with_mermaid(
+        session.buffer.as_str(),
+        session.markdown_config,
+        |code| session.render_mermaid(code).svg.clone(),
+    )
 }
 
 #[tauri::command]
 fn render_preview_html(state: State<'_, Arc<TauriAppState>>) -> Result<String, String> {
     let session = state.session.lock().map_err(|e| e.to_string())?;
-    let raw_html = accent_export::render_markdown_to_html(session.buffer.as_str());
-    Ok(inject_rust_mermaid_svgs(&raw_html, &session))
+    Ok(render_session_preview_html(&session))
 }
 
 pub fn parse_cli_args(args: &[String]) -> LaunchOptions {
@@ -1084,15 +1041,26 @@ mod tests {
         assert_eq!(snap.palette_css.bg_canvas, "#2c3038");
         assert_eq!(snap.i18n.get("open").map(String::as_str), Some("Apri"));
 
-        // Verify Mermaid SVG injection and data-code-lang enrichment in preview HTML
-        let raw_html = accent_export::render_markdown_to_html(
-            "# Titolo\n\n```json\n{\"a\": 1}\n```\n\n```mermaid\nflowchart LR\n  A[Start] --> B[End]\n```\n",
-        );
-        let with_svg = inject_rust_mermaid_svgs(&raw_html, &session);
+        // Verify unified comrak Preview HTML (Mermaid SVG gating, §6.9 autolinks, §6.11 tagfilter, data-code-lang)
+        session.apply(Action::UpdateBufferText(
+            "# Titolo\n\nVisita https://accent-editor.org e <kbd>Ctrl+P</kbd>\n\n<script>evil()</script>\n\n```json\n{\"a\": 1}\n```\n\n```mermaid\nflowchart LR\n  A[Start] --> B[End]\n```\n".to_string(),
+        ));
+        let with_svg = render_session_preview_html(&session);
         assert!(with_svg.contains("data-code-lang=\"json\""));
+        assert!(with_svg.contains("<a href=\"https://accent-editor.org\">https://accent-editor.org</a>"));
+        assert!(with_svg.contains("<kbd>Ctrl+P</kbd>"));
+        assert!(!with_svg.contains("<script>") && with_svg.contains("&lt;script>"));
         assert!(with_svg.contains("class=\"accent-mermaid-block\""));
         assert!(with_svg.contains("<svg"));
         assert!(with_svg.contains("#282B32"));
+
+        // Disable Mermaid toggle -> mermaid block remains plain code block
+        let mut no_mermaid_cfg = session.markdown_config;
+        no_mermaid_cfg.extensions.mermaid = false;
+        session.apply(Action::SetMarkdownConfig(no_mermaid_cfg));
+        let without_svg = render_session_preview_html(&session);
+        assert!(!without_svg.contains("accent-mermaid-block"));
+        assert!(without_svg.contains("data-code-lang=\"mermaid\""));
 
         let _ = std::fs::remove_dir_all(&test_dir);
     }
@@ -1119,7 +1087,7 @@ mod tests {
 
     #[test]
     fn test_version_system_consistency() {
-        assert_eq!(VERSION, "0.8.23");
+        assert_eq!(VERSION, "0.8.24");
         assert_eq!(accent_core::VERSION, VERSION);
         let version_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../VERSION");
         let file_ver = std::fs::read_to_string(version_file)
@@ -1165,6 +1133,16 @@ mod tests {
                 "sc_split_preview",
                 "dialog_accept_open",
                 "dialog_accept_save",
+                "base_gfm",
+                "base_commonmark",
+                "extensions_title",
+                "extensions_sub",
+                "extensions_disabled_cm",
+                "ext_math",
+                "ext_mermaid",
+                "ext_alerts",
+                "ext_footnotes",
+                "ext_frontmatter",
             ] {
                 let v = map.get(required_key).map(String::as_str).unwrap_or("");
                 assert!(

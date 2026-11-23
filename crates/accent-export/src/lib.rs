@@ -1,7 +1,6 @@
-use accent_core::{DocumentBuffer, MarkdownDialect, PreviewBlock, PreviewInline};
+use accent_core::{DocumentBuffer, MarkdownConfig, PreviewBlock, PreviewInline};
 use accent_mermaid::{MermaidCache, MermaidTheme};
 use docx_rs::{Docx, Paragraph, Pic, Run, RunFonts, Table, TableCell, TableRow};
-use pulldown_cmark::{html, Options, Parser};
 use serde::{Deserialize, Serialize};
 use std::io::{Cursor, Write};
 use zip::write::SimpleFileOptions;
@@ -58,33 +57,161 @@ impl ExportFormat {
     }
 }
 
-pub fn render_markdown_to_html(markdown: &str) -> String {
-    let mut opts = Options::empty();
-    opts.insert(Options::ENABLE_TABLES);
-    opts.insert(Options::ENABLE_STRIKETHROUGH);
-    opts.insert(Options::ENABLE_TASKLISTS);
-    opts.insert(Options::ENABLE_MATH);
-    let parser = Parser::new_ext(markdown, opts);
-    let mut html_out = String::new();
-    html::push_html(&mut html_out, parser);
-    html_out
+fn html_unescape_basic(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
 }
 
-/// Top-level dispatcher that exports a `DocumentBuffer` (or Markdown string) to the target `ExportFormat`.
+/// Unified HTML preview/copy/export renderer built on `accent-core`'s `comrak` + GFM `§6.11` pipeline.
+/// Renders fenced `mermaid` blocks into themed SVGs ONLY when `config.mermaid_enabled()` is `true`.
+pub fn render_markdown_to_html_with_mermaid<F>(
+    markdown: &str,
+    config: MarkdownConfig,
+    mut render_mermaid_svg: F,
+) -> String
+where
+    F: FnMut(&str) -> String,
+{
+    let raw_html = accent_core::render_webview_html(markdown, config);
+    let prefix = "<pre><code class=\"language-";
+    let close_tag = "</code></pre>";
+    let mut out = String::with_capacity(raw_html.len() + 1024);
+    let mut rest = raw_html.as_str();
+
+    while let Some(start) = rest.find(prefix) {
+        out.push_str(&rest[..start]);
+        let after_prefix = &rest[start + prefix.len()..];
+        if let Some(quote_end) = after_prefix.find('"') {
+            let lang = &after_prefix[..quote_end];
+            let after_quote = &after_prefix[quote_end + 1..];
+            if let Some(gt_rel) = after_quote.find('>') {
+                let extra_code_attrs = &after_quote[..gt_rel];
+                let after_open = &after_quote[gt_rel + 1..];
+
+                if lang.eq_ignore_ascii_case("mermaid") && config.mermaid_enabled() {
+                    if let Some(end) = after_open.find(close_tag) {
+                        let escaped_code = &after_open[..end];
+                        let code = html_unescape_basic(escaped_code);
+                        let svg = render_mermaid_svg(&code);
+                        out.push_str(
+                            "<div class=\"accent-mermaid-block\" data-testid=\"mermaid-svg-block\">",
+                        );
+                        out.push_str(&svg);
+                        out.push_str("</div>");
+                        rest = &after_open[end + close_tag.len()..];
+                        continue;
+                    }
+                } else if extra_code_attrs.contains("data-math-style") {
+                    out.push_str("<pre><code class=\"language-");
+                    out.push_str(lang);
+                    out.push('"');
+                    out.push_str(extra_code_attrs);
+                    out.push('>');
+                    rest = after_open;
+                    continue;
+                } else {
+                    out.push_str("<pre data-code-lang=\"");
+                    out.push_str(lang);
+                    out.push_str("\"><code class=\"language-");
+                    out.push_str(lang);
+                    out.push('"');
+                    out.push_str(extra_code_attrs);
+                    out.push('>');
+                    rest = after_open;
+                    continue;
+                }
+            }
+        }
+        out.push_str(prefix);
+        rest = after_prefix;
+    }
+
+    out.push_str(rest);
+    out
+}
+
+pub fn render_markdown_to_html(
+    markdown: &str,
+    config: MarkdownConfig,
+    theme: MermaidTheme,
+) -> String {
+    let mut cache = MermaidCache::new();
+    render_markdown_to_html_with_mermaid(markdown, config, |code| {
+        cache.get_or_render_screen_themed(code, theme).svg.clone()
+    })
+}
+
+/// Exports Markdown to a self-contained HTML5 document using the unified `comrak` pipeline.
+pub fn export_markdown_to_standalone_html(
+    markdown: &str,
+    config: MarkdownConfig,
+    title: &str,
+) -> String {
+    let body = render_markdown_to_html(markdown, config, MermaidTheme::Light);
+    let esc_title = xml_escape(title);
+    format!(
+        "<!DOCTYPE html>\n\
+<html lang=\"it\">\n\
+<head>\n\
+  <meta charset=\"utf-8\"/>\n\
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>\n\
+  <title>{esc_title}</title>\n\
+  <style>\n\
+    body {{ font-family: system-ui, -apple-system, sans-serif; line-height: 1.6; max-width: 52rem; margin: 2rem auto; padding: 0 1.25rem; color: #2e3436; background: #ffffff; }}\n\
+    .preview-prose {{ position: relative; isolation: isolate; contain: layout style paint; overflow-wrap: break-word; }}\n\
+    h1, h2, h3, h4, h5, h6 {{ color: #1a202c; line-height: 1.3; }}\n\
+    pre {{ background: #f4f1ea; padding: 0.85rem 1rem; border-radius: 6px; overflow-x: auto; }}\n\
+    code {{ font-family: monospace; background: #f4f1ea; padding: 0.15em 0.35em; border-radius: 4px; }}\n\
+    pre code {{ background: none; padding: 0; }}\n\
+    blockquote {{ margin: 1em 0; padding: 0.25em 0 0.25em 1em; border-left: 3px solid #c85a17; color: #4a5568; }}\n\
+    table {{ border-collapse: collapse; width: 100%; margin: 1em 0; }}\n\
+    th, td {{ border: 1px solid #cbd5e0; padding: 0.45em 0.7em; }}\n\
+    th:not([align]), td:not([align]) {{ text-align: left; }}\n\
+    [align=\"center\"] {{ text-align: center; }}\n\
+    [align=\"right\"] {{ text-align: right; }}\n\
+    th {{ background: #edf2f7; font-weight: 700; }}\n\
+    kbd {{ font-family: monospace; font-size: 0.88em; padding: 0.1em 0.4em; border: 1px solid #cbd5e0; border-radius: 4px; background: #f7fafc; }}\n\
+    .markdown-alert {{ margin: 1em 0; padding: 0.65em 1em; border-left: 4px solid #3182ce; border-radius: 6px; background: #f7fafc; }}\n\
+    .markdown-alert-title {{ margin: 0 0 0.35em 0; font-weight: 700; }}\n\
+    .markdown-alert-tip {{ border-left-color: #2f855a; }}\n\
+    .markdown-alert-important {{ border-left-color: #6b46c1; }}\n\
+    .markdown-alert-warning {{ border-left-color: #c05621; }}\n\
+    .markdown-alert-caution {{ border-left-color: #c53030; }}\n\
+    .accent-mermaid-block {{ display: flex; justify-content: center; margin: 1em 0; overflow-x: auto; }}\n\
+    .accent-mermaid-block svg {{ max-width: 100%; height: auto; }}\n\
+  </style>\n\
+</head>\n\
+<body>\n\
+<article class=\"preview-prose\">\n\
+{body}</article>\n\
+</body>\n\
+</html>\n"
+    )
+}
+
+/// Top-level dispatcher that exports a `DocumentBuffer` to the target `ExportFormat`.
 pub fn export_document_bytes(
     buffer: &DocumentBuffer,
-    dialect: MarkdownDialect,
+    config: MarkdownConfig,
     title: &str,
     format: ExportFormat,
 ) -> Result<Vec<u8>, String> {
-    let blocks = buffer.parse_preview_blocks(dialect);
+    if format == ExportFormat::Html {
+        return Ok(export_markdown_to_standalone_html(buffer.as_str(), config, title).into_bytes());
+    }
+    let blocks = buffer.parse_preview_blocks(config);
+    let allow_mermaid = config.mermaid_enabled();
     match format {
-        ExportFormat::Pdf => Ok(export_to_pdf(&blocks, title)),
-        ExportFormat::Docx => export_to_docx(&blocks, title),
-        ExportFormat::Odt => export_to_odt(&blocks, title),
+        ExportFormat::Pdf => Ok(export_to_pdf_with_options(&blocks, title, allow_mermaid)),
+        ExportFormat::Docx => export_to_docx_with_options(&blocks, title, allow_mermaid),
+        ExportFormat::Odt => export_to_odt_with_options(&blocks, title, allow_mermaid),
         ExportFormat::Latex => Ok(export_to_latex(&blocks, title).into_bytes()),
-        ExportFormat::Epub => export_to_epub(&blocks, title),
-        ExportFormat::Html => Ok(export_to_standalone_html(&blocks, title).into_bytes()),
+        ExportFormat::Epub => export_to_epub_with_options(&blocks, title, allow_mermaid),
+        ExportFormat::Html => unreachable!(),
     }
 }
 
@@ -267,7 +394,15 @@ fn build_docx_paragraph_from_inlines(inlines: &[PreviewInline], base_size_half_p
 }
 
 /// Generates a structured OpenXML `.docx` document using `docx-rs`, including embedded Mermaid PNG images.
-pub fn export_to_docx(blocks: &[PreviewBlock], _title: &str) -> Result<Vec<u8>, String> {
+pub fn export_to_docx(blocks: &[PreviewBlock], title: &str) -> Result<Vec<u8>, String> {
+    export_to_docx_with_options(blocks, title, true)
+}
+
+pub fn export_to_docx_with_options(
+    blocks: &[PreviewBlock],
+    _title: &str,
+    allow_mermaid: bool,
+) -> Result<Vec<u8>, String> {
     let mut docx = Docx::new();
     let mut mermaid_cache = MermaidCache::new();
 
@@ -300,7 +435,7 @@ pub fn export_to_docx(blocks: &[PreviewBlock], _title: &str) -> Result<Vec<u8>, 
             }
             PreviewBlock::CodeBlock { info, code } => {
                 let lang = info.split_whitespace().next().unwrap_or("");
-                if lang.eq_ignore_ascii_case("mermaid") {
+                if allow_mermaid && lang.eq_ignore_ascii_case("mermaid") {
                     let rendered = mermaid_cache.get_or_render_themed(code, MermaidTheme::Light);
                     if !rendered.png_bytes.is_empty() {
                         let pic = Pic::new(&rendered.png_bytes).size(
@@ -427,6 +562,14 @@ fn serialize_inlines_to_odf(inlines: &[PreviewInline]) -> String {
 
 /// Builds a compliant ODF 1.2 `.odt` ZIP archive with an uncompressed `mimetype` header as the first entry.
 pub fn export_to_odt(blocks: &[PreviewBlock], title: &str) -> Result<Vec<u8>, String> {
+    export_to_odt_with_options(blocks, title, true)
+}
+
+pub fn export_to_odt_with_options(
+    blocks: &[PreviewBlock],
+    title: &str,
+    allow_mermaid: bool,
+) -> Result<Vec<u8>, String> {
     let mut buf = Cursor::new(Vec::new());
     let mut zip = ZipWriter::new(&mut buf);
 
@@ -464,7 +607,7 @@ pub fn export_to_odt(blocks: &[PreviewBlock], title: &str) -> Result<Vec<u8>, St
             }
             PreviewBlock::CodeBlock { info, code } => {
                 let lang = info.split_whitespace().next().unwrap_or("");
-                if lang.eq_ignore_ascii_case("mermaid") {
+                if allow_mermaid && lang.eq_ignore_ascii_case("mermaid") {
                     let rendered = mermaid_cache.get_or_render_themed(code, MermaidTheme::Light);
                     if !rendered.png_bytes.is_empty() {
                         let pic_path = format!("Pictures/mermaid_{b_idx}.png");
@@ -643,95 +786,16 @@ fn serialize_inlines_to_xhtml(inlines: &[PreviewInline]) -> String {
     out
 }
 
-pub fn export_to_standalone_html(blocks: &[PreviewBlock], title: &str) -> String {
-    let mut body = String::with_capacity(4096);
-    let mut mermaid_cache = MermaidCache::new();
-    for block in blocks {
-        match block {
-            PreviewBlock::Heading { level, inlines, .. } => {
-                let lv = (*level).clamp(1, 6);
-                body.push_str(&format!(
-                    "<h{lv}>{}</h{lv}>\n",
-                    serialize_inlines_to_xhtml(inlines)
-                ));
-            }
-            PreviewBlock::Paragraph { inlines } => {
-                body.push_str(&format!("<p>{}</p>\n", serialize_inlines_to_xhtml(inlines)));
-            }
-            PreviewBlock::BlockQuote { inlines } => {
-                body.push_str(&format!(
-                    "<blockquote><p>{}</p></blockquote>\n",
-                    serialize_inlines_to_xhtml(inlines)
-                ));
-            }
-            PreviewBlock::CodeBlock { info, code } => {
-                let lang = info.split_whitespace().next().unwrap_or("");
-                if lang.eq_ignore_ascii_case("mermaid") {
-                    let rendered = mermaid_cache.get_or_render_themed(code, MermaidTheme::Light);
-                    body.push_str(&format!(
-                        "<div class=\"mermaid-diagram\">{}</div>\n",
-                        rendered.svg
-                    ));
-                } else {
-                    body.push_str(&format!(
-                        "<pre><code>{}</code></pre>\n",
-                        xml_escape(code)
-                    ));
-                }
-            }
-            PreviewBlock::List { ordered, items } => {
-                let tag = if *ordered { "ol" } else { "ul" };
-                body.push_str(&format!("<{tag}>\n"));
-                for item in items {
-                    let prefix = match item.task {
-                        Some(true) => "☑ ",
-                        Some(false) => "☐ ",
-                        None => "",
-                    };
-                    body.push_str(&format!(
-                        "  <li>{prefix}{}</li>\n",
-                        serialize_inlines_to_xhtml(&item.inlines)
-                    ));
-                }
-                body.push_str(&format!("</{tag}>\n"));
-            }
-            PreviewBlock::Table { headers, rows } => {
-                body.push_str("<table>\n");
-                if !headers.is_empty() {
-                    body.push_str("  <thead><tr>");
-                    for h in headers {
-                        body.push_str(&format!("<th>{}</th>", xml_escape(h)));
-                    }
-                    body.push_str("</tr></thead>\n");
-                }
-                body.push_str("  <tbody>\n");
-                for row in rows {
-                    body.push_str("    <tr>");
-                    for c in row {
-                        body.push_str(&format!("<td>{}</td>", xml_escape(c)));
-                    }
-                    body.push_str("</tr>\n");
-                }
-                body.push_str("  </tbody>\n</table>\n");
-            }
-            PreviewBlock::Image { alt, url } => {
-                body.push_str(&format!(
-                    r#"<figure><img src="{}" alt="{}"/><figcaption>{}</figcaption></figure>"#,
-                    xml_escape(url),
-                    xml_escape(alt),
-                    xml_escape(alt)
-                ));
-            }
-        }
-    }
-    format!(
-        "<!DOCTYPE html>\n<html lang=\"it\">\n<head><meta charset=\"utf-8\"/><title>{}</title></head>\n<body>\n{body}</body>\n</html>\n",
-        xml_escape(title)
-    )
-}
-
 /// Generates a compliant EPUB 3 archive containing `mimetype`, `META-INF/container.xml`, `OEBPS/content.opf`, `OEBPS/style.css`, and `OEBPS/chapter1.xhtml`.
 pub fn export_to_epub(blocks: &[PreviewBlock], title: &str) -> Result<Vec<u8>, String> {
+    export_to_epub_with_options(blocks, title, true)
+}
+
+pub fn export_to_epub_with_options(
+    blocks: &[PreviewBlock],
+    title: &str,
+    allow_mermaid: bool,
+) -> Result<Vec<u8>, String> {
     let mut buf = Cursor::new(Vec::new());
     let mut zip = ZipWriter::new(&mut buf);
 
@@ -791,7 +855,7 @@ pub fn export_to_epub(blocks: &[PreviewBlock], title: &str) -> Result<Vec<u8>, S
             }
             PreviewBlock::CodeBlock { info, code } => {
                 let lang = info.split_whitespace().next().unwrap_or("");
-                if lang.eq_ignore_ascii_case("mermaid") {
+                if allow_mermaid && lang.eq_ignore_ascii_case("mermaid") {
                     let rendered = mermaid_cache.get_or_render_themed(code, MermaidTheme::Light);
                     if !rendered.png_bytes.is_empty() {
                         let rel_img = format!("images/mermaid_{b_idx}.png");
@@ -988,6 +1052,14 @@ struct PdfImageXObject {
 /// Generates a paginated PDF 1.4 binary document (`%PDF-1.4`) from the AST `PreviewBlock`s,
 /// including headings, paragraphs, code blocks, lists, tables, and rasterized Mermaid diagrams.
 pub fn export_to_pdf(blocks: &[PreviewBlock], title: &str) -> Vec<u8> {
+    export_to_pdf_with_options(blocks, title, true)
+}
+
+pub fn export_to_pdf_with_options(
+    blocks: &[PreviewBlock],
+    title: &str,
+    allow_mermaid: bool,
+) -> Vec<u8> {
     let page_w = 595.28_f32;
     let page_h = 841.89_f32;
     let margin_x = 54.0_f32;
@@ -1095,7 +1167,7 @@ pub fn export_to_pdf(blocks: &[PreviewBlock], title: &str) -> Vec<u8> {
             }
             PreviewBlock::CodeBlock { info, code } => {
                 let lang = info.split_whitespace().next().unwrap_or("");
-                if lang.eq_ignore_ascii_case("mermaid") {
+                if allow_mermaid && lang.eq_ignore_ascii_case("mermaid") {
                     let rendered =
                         mermaid_cache.get_or_render_screen_themed(code, MermaidTheme::Light);
                     if rendered.width > 0 && rendered.height > 0 && !rendered.rgba_pixels.is_empty()
@@ -1346,18 +1418,54 @@ flowchart LR
 ";
 
     #[test]
-    fn test_render_markdown_to_html() {
-        let html = render_markdown_to_html("# Title\n\nall you can ~~eat~~ drink\n");
-        assert!(html.contains("<h1>Title</h1>"));
-        assert!(html.contains("<del>eat</del>"));
+    fn test_render_markdown_to_html_unified_comrak_and_mermaid_gating() {
+        let md = "\
+# Title
+
+all you can ~~eat~~ drink at https://accent-editor.org!
+
+<kbd>Ctrl+S</kbd>
+<script>alert(1)</script>
+
+```mermaid
+flowchart LR
+  A[Input] --> B[Output]
+```
+";
+        // 1. GFM default (mermaid == true): renders strikethrough, autolink, <kbd>, filters <script>, and renders Mermaid SVG
+        let html_gfm = render_markdown_to_html(md, MarkdownConfig::gfm(), MermaidTheme::Light);
+        assert!(html_gfm.contains("<h1>Title</h1>"));
+        assert!(html_gfm.contains("<del>eat</del>"));
+        assert!(html_gfm.contains("<a href=\"https://accent-editor.org\">https://accent-editor.org</a>!"));
+        assert!(html_gfm.contains("<kbd>Ctrl+S</kbd>"));
+        assert!(!html_gfm.contains("<script>") && html_gfm.contains("&lt;script>"));
+        assert!(html_gfm.contains("class=\"accent-mermaid-block\""));
+        assert!(html_gfm.contains("<svg"));
+
+        // 2. GFM with extensions.mermaid == false: keeps Mermaid block as <pre data-code-lang="mermaid">
+        let mut gfm_no_mermaid = MarkdownConfig::gfm();
+        gfm_no_mermaid.extensions.mermaid = false;
+        let html_no_mermaid = render_markdown_to_html(md, gfm_no_mermaid, MermaidTheme::Light);
+        assert!(!html_no_mermaid.contains("accent-mermaid-block"));
+        assert!(html_no_mermaid.contains("data-code-lang=\"mermaid\""));
+
+        // 3. CommonMark: no strikethrough, no autolink, no Mermaid SVG, <script> still filtered for WebView safety
+        let html_cm = render_markdown_to_html(md, MarkdownConfig::commonmark(), MermaidTheme::Light);
+        assert!(!html_cm.contains("<del>"));
+        assert!(!html_cm.contains("<a href=\"https://accent-editor.org\">"));
+        assert!(!html_cm.contains("accent-mermaid-block"));
+        assert!(!html_cm.contains("<script>") && html_cm.contains("&lt;script>"));
     }
 
     #[test]
-    fn test_all_five_exporters_pdf_docx_odt_latex_epub() {
+    fn test_all_exporters_pdf_docx_odt_latex_epub_and_standalone_html() {
         let buf = DocumentBuffer::from_str_content(RICH_TEST_MARKDOWN);
+        let mut cfg = MarkdownConfig::gfm();
+        // Disable dollar math for the literal `$50_1` LaTeX escaping check
+        cfg.extensions.math = false;
 
         // 1. PDF (.pdf)
-        let pdf_bytes = export_document_bytes(&buf, MarkdownDialect::Gfm, "Test Export", ExportFormat::Pdf)
+        let pdf_bytes = export_document_bytes(&buf, cfg, "Test Export", ExportFormat::Pdf)
             .expect("PDF export failed");
         assert!(pdf_bytes.starts_with(b"%PDF-1.4"));
         assert!(
@@ -1368,7 +1476,7 @@ flowchart LR
         assert!(pdf_bytes.ends_with(b"%%EOF\n"));
 
         // 2. Word (.docx)
-        let docx_bytes = export_document_bytes(&buf, MarkdownDialect::Gfm, "Test Export", ExportFormat::Docx)
+        let docx_bytes = export_document_bytes(&buf, cfg, "Test Export", ExportFormat::Docx)
             .expect("DOCX export failed");
         let mut docx_zip = ZipArchive::new(Cursor::new(&docx_bytes)).expect("valid DOCX zip");
         let mut doc_xml = String::new();
@@ -1381,7 +1489,7 @@ flowchart LR
         assert!(doc_xml.contains("Esportazione PDF nativa"));
 
         // 3. OpenDocument Text (.odt)
-        let odt_bytes = export_document_bytes(&buf, MarkdownDialect::Gfm, "Test Export", ExportFormat::Odt)
+        let odt_bytes = export_document_bytes(&buf, cfg, "Test Export", ExportFormat::Odt)
             .expect("ODT export failed");
         let mut odt_zip = ZipArchive::new(Cursor::new(&odt_bytes)).expect("valid ODT zip");
         {
@@ -1400,7 +1508,7 @@ flowchart LR
         assert!(odt_content.contains("Pictures/mermaid_"));
 
         // 4. LaTeX (.tex)
-        let tex_bytes = export_document_bytes(&buf, MarkdownDialect::Gfm, "Test Export", ExportFormat::Latex)
+        let tex_bytes = export_document_bytes(&buf, cfg, "Test Export", ExportFormat::Latex)
             .expect("LaTeX export failed");
         let tex_str = String::from_utf8(tex_bytes).expect("valid UTF-8 .tex");
         assert!(tex_str.contains("\\documentclass[11pt,a4paper]{article}"));
@@ -1413,7 +1521,7 @@ flowchart LR
         );
 
         // 5. EPUB (.epub)
-        let epub_bytes = export_document_bytes(&buf, MarkdownDialect::Gfm, "Test Export", ExportFormat::Epub)
+        let epub_bytes = export_document_bytes(&buf, cfg, "Test Export", ExportFormat::Epub)
             .expect("EPUB export failed");
         let mut epub_zip = ZipArchive::new(Cursor::new(&epub_bytes)).expect("valid EPUB zip");
         {
@@ -1436,5 +1544,14 @@ flowchart LR
             .expect("read chapter1.xhtml");
         assert!(ch1.contains("Documento Completo di Test"));
         assert!(ch1.contains("images/mermaid_"));
+
+        // 6. Standalone HTML (.html) via unified comrak pipeline
+        let html_bytes = export_document_bytes(&buf, cfg, "Test Export", ExportFormat::Html)
+            .expect("HTML export failed");
+        let html_str = String::from_utf8(html_bytes).expect("valid UTF-8 .html");
+        assert!(html_str.contains("<!DOCTYPE html>"));
+        assert!(html_str.contains("<article class=\"preview-prose\">"));
+        assert!(html_str.contains("<del>barrato</del>"));
+        assert!(html_str.contains("class=\"accent-mermaid-block\""));
     }
 }
