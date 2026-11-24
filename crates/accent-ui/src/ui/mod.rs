@@ -58,6 +58,14 @@ pub struct MermaidSvgPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolvedLocalImagePayload {
+    pub ok: bool,
+    pub kind: String,
+    pub src: String,
+    pub canonical_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiSessionSnapshot {
     pub tabs: Vec<TabSnapshot>,
     pub active_tab_index: usize,

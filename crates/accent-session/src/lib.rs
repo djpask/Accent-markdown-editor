@@ -3097,11 +3097,13 @@ impl Session {
             Action::ExecuteExport => {
                 let fmt = self.selected_export_format;
                 let out_path = PathBuf::from(self.export_output_path.trim());
+                let base_dir = self.current_file_path.as_deref().and_then(|p| p.parent());
                 match accent_export::export_document_bytes(
                     &self.buffer,
                     self.markdown_config,
                     &self.document_title,
                     fmt,
+                    base_dir,
                 ) {
                     Ok(bytes) => {
                         if accent_storage::atomic_save_bytes(&out_path, &bytes).is_ok() {
@@ -3135,11 +3137,13 @@ impl Session {
                 self.selected_export_format = fmt;
                 self.update_default_export_path();
                 let out_path = PathBuf::from(&self.export_output_path);
+                let base_dir = self.current_file_path.as_deref().and_then(|p| p.parent());
                 if let Ok(bytes) = accent_export::export_document_bytes(
                     &self.buffer,
                     self.markdown_config,
                     &self.document_title,
                     fmt,
+                    base_dir,
                 ) {
                     let _ = accent_storage::atomic_save_bytes(&out_path, &bytes);
                     self.status_message = Some(match self.locale {

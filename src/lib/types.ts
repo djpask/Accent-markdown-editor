@@ -150,6 +150,13 @@ export interface MermaidSvgPayload {
   height: number;
 }
 
+export interface ResolvedLocalImagePayload {
+  ok: boolean;
+  kind: 'asset' | 'data' | 'missing';
+  src: string;
+  canonical_path: string | null;
+}
+
 export interface UiSessionSnapshot {
   tabs: TabSnapshot[];
   active_tab_index: number;

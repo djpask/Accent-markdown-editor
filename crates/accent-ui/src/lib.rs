@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use ui::{
-    MermaidSvgPayload, UiSessionSnapshot, build_session_snapshot,
+    MermaidSvgPayload, ResolvedLocalImagePayload, UiSessionSnapshot, build_session_snapshot,
     theme::{AccentPalette, PaletteCssTokens},
 };
 
@@ -652,18 +652,89 @@ fn render_mermaid_diagram(
     })
 }
 
-pub fn render_session_preview_html(session: &Session) -> String {
-    accent_export::render_markdown_to_html_with_mermaid(
+pub fn render_session_preview_html_with_scope<F>(
+    session: &Session,
+    on_allowed_asset_file: F,
+) -> String
+where
+    F: FnMut(&std::path::Path),
+{
+    let base_dir = session.current_file_path.as_deref().and_then(|p| p.parent());
+    accent_export::render_markdown_to_webview_preview_html(
         session.buffer.as_str(),
         session.markdown_config,
+        base_dir,
         |code| session.render_mermaid(code).svg.clone(),
+        on_allowed_asset_file,
     )
 }
 
+pub fn render_session_preview_html(session: &Session) -> String {
+    render_session_preview_html_with_scope(session, |_| {})
+}
+
 #[tauri::command]
-fn render_preview_html(state: State<'_, Arc<TauriAppState>>) -> Result<String, String> {
+fn render_preview_html(
+    app: AppHandle,
+    state: State<'_, Arc<TauriAppState>>,
+) -> Result<String, String> {
     let session = state.session.lock().map_err(|e| e.to_string())?;
-    Ok(render_session_preview_html(&session))
+    let scope = app.asset_protocol_scope();
+    Ok(render_session_preview_html_with_scope(&session, |canon_path| {
+        let _ = scope.allow_file(canon_path);
+    }))
+}
+
+#[tauri::command]
+fn resolve_local_image(
+    app: AppHandle,
+    state: State<'_, Arc<TauriAppState>>,
+    base_file_path: Option<String>,
+    raw_url: String,
+) -> Result<ResolvedLocalImagePayload, String> {
+    let effective_file_path = match base_file_path {
+        Some(ref s) if !s.trim().is_empty() => Some(PathBuf::from(s)),
+        _ => {
+            let session = state.session.lock().map_err(|e| e.to_string())?;
+            session.current_file_path.clone()
+        }
+    };
+    let base_dir = effective_file_path.as_deref().and_then(|p| p.parent());
+    let Some(resolved) = accent_export::resolve_local_image_file(&raw_url, base_dir) else {
+        return Ok(ResolvedLocalImagePayload {
+            ok: false,
+            kind: "missing".to_string(),
+            src: String::new(),
+            canonical_path: None,
+        });
+    };
+
+    if resolved.ext_lower == "svg" {
+        if let Some(data_uri) = accent_export::load_local_image_as_data_uri(&resolved) {
+            return Ok(ResolvedLocalImagePayload {
+                ok: true,
+                kind: "data".to_string(),
+                src: data_uri,
+                canonical_path: None,
+            });
+        }
+        return Ok(ResolvedLocalImagePayload {
+            ok: false,
+            kind: "missing".to_string(),
+            src: String::new(),
+            canonical_path: None,
+        });
+    }
+
+    let _ = app.asset_protocol_scope().allow_file(&resolved.canonical_path);
+    let asset_url = accent_export::convert_canonical_path_to_tauri_asset_url(&resolved.canonical_path);
+    let canon_str = resolved.canonical_path.to_string_lossy().to_string();
+    Ok(ResolvedLocalImagePayload {
+        ok: true,
+        kind: "asset".to_string(),
+        src: asset_url,
+        canonical_path: Some(canon_str),
+    })
 }
 
 pub fn parse_cli_args(args: &[String]) -> LaunchOptions {
@@ -786,6 +857,7 @@ pub fn run_app(opts: LaunchOptions) -> Result<(), String> {
             preview_palette_tokens,
             render_mermaid_diagram,
             render_preview_html,
+            resolve_local_image,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -1087,7 +1159,7 @@ mod tests {
 
     #[test]
     fn test_version_system_consistency() {
-        assert_eq!(VERSION, "0.8.26");
+        assert_eq!(VERSION, "0.8.27");
         assert_eq!(accent_core::VERSION, VERSION);
         let version_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../VERSION");
         let file_ver = std::fs::read_to_string(version_file)

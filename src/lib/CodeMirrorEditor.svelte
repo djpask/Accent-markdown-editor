@@ -33,6 +33,7 @@
 
   interface Props {
     activeTabId: number;
+    currentFilePath?: string | null;
     bufferText: string;
     bufferRevision: number;
     externalSyncToken: number;
@@ -57,6 +58,7 @@
 
   let {
     activeTabId,
+    currentFilePath = null,
     bufferText,
     bufferRevision: _bufferRevision,
     externalSyncToken,
@@ -350,7 +352,12 @@
         themeCompartment.of(buildEditorTheme()),
         readOnlyCompartment.of(EditorState.readOnly.of(readOnly)),
         livePreviewCompartment.of(
-          createLivePreviewExtensions(viewWhileTyping, themeMode, markdownConfig)
+          createLivePreviewExtensions(
+            viewWhileTyping,
+            themeMode,
+            markdownConfig,
+            currentFilePath
+          )
         ),
         searchHighlightCompartment.of(
           createSearchHighlightPlugin(searchBarOpen ? searchQuery : '')
@@ -423,6 +430,7 @@
     const _mcAlerts = markdownConfig.extensions.alerts;
     const _mcFootnotes = markdownConfig.extensions.footnotes;
     const _mcFrontmatter = markdownConfig.extensions.frontmatter;
+    const _cfp = currentFilePath;
     const activeSearch = searchBarOpen ? searchQuery : '';
     if (view) {
       view.dispatch({
@@ -431,7 +439,12 @@
           themeCompartment.reconfigure(buildEditorTheme()),
           readOnlyCompartment.reconfigure(EditorState.readOnly.of(readOnly)),
           livePreviewCompartment.reconfigure(
-            createLivePreviewExtensions(viewWhileTyping, themeMode, markdownConfig)
+            createLivePreviewExtensions(
+              viewWhileTyping,
+              themeMode,
+              markdownConfig,
+              _cfp
+            )
           ),
           searchHighlightCompartment.reconfigure(createSearchHighlightPlugin(activeSearch)),
         ],
@@ -816,6 +829,87 @@
     display: block;
     max-width: 100%;
     height: auto;
+  }
+
+  /* CommonMark / GFM §6.7 Caret-Aware ImageWidget & Compact Fallback Badge */
+  :global(.cm-image-widget.is-standalone.is-loaded) {
+    display: inline-flex;
+    justify-content: center;
+    align-items: center;
+    max-width: 100%;
+    margin: 6px 0;
+    padding: 6px;
+    border-radius: 9px;
+    border: 1px solid color-mix(in srgb, var(--border-headerbar) 85%, transparent);
+    background-color: color-mix(in srgb, var(--bg-code-block) 36%, transparent);
+    box-shadow: 0 2px 10px color-mix(in srgb, #000000 8%, transparent);
+    cursor: pointer;
+    user-select: none;
+  }
+
+  :global(.cm-image-widget.is-inline.is-loaded) {
+    display: inline-flex;
+    align-items: center;
+    vertical-align: middle;
+    max-width: 100%;
+    margin: 2px 3px;
+    padding: 3px;
+    border-radius: 6px;
+    border: 1px solid color-mix(in srgb, var(--border-headerbar) 80%, transparent);
+    background-color: color-mix(in srgb, var(--bg-code-block) 32%, transparent);
+    box-shadow: 0 1px 6px color-mix(in srgb, #000000 7%, transparent);
+    cursor: pointer;
+    user-select: none;
+  }
+
+  :global(.cm-image-widget-img) {
+    display: block;
+    max-width: 100%;
+    max-height: 320px;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    border-radius: 5px;
+  }
+
+  :global(.cm-image-widget.is-inline .cm-image-widget-img) {
+    max-height: 160px;
+  }
+
+  :global(.cm-image-fallback-badge) {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    padding: 2px 10px;
+    margin: 1px 2px;
+    border-radius: 6px;
+    border: 1px dashed var(--border-headerbar);
+    background-color: color-mix(in srgb, var(--bg-code-block) 52%, transparent);
+    color: var(--fg-muted);
+    font-size: 0.9em;
+    line-height: 1.35;
+    cursor: pointer;
+    user-select: none;
+    vertical-align: baseline;
+  }
+
+  :global(.cm-image-fallback-badge:hover) {
+    border-color: var(--accent-orange);
+    color: var(--fg-primary);
+  }
+
+  :global(.cm-image-fallback-icon) {
+    font-size: 0.95em;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+
+  :global(.cm-image-fallback-alt) {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 42ch;
   }
 
   /* GFM §4.10 Caret-Aware Live Table Widget & Aligned Monospace Source Lines */

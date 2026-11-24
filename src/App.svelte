@@ -1336,6 +1336,7 @@
             <CodeMirrorEditor
               bind:this={cmRef}
               activeTabId={snapshot.active_tab_id}
+              currentFilePath={snapshot.current_file_path}
               bufferText={snapshot.buffer_text}
               bufferRevision={snapshot.buffer_revision}
               externalSyncToken={externalSyncToken}
@@ -3252,6 +3253,54 @@
 
   :global(.preview-prose a) {
     color: var(--accent-link);
+  }
+
+  :global(.preview-prose img) {
+    display: inline-block;
+    max-width: 100%;
+    max-height: 360px;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--border-headerbar) 85%, transparent);
+    background-color: color-mix(in srgb, var(--bg-code-block) 28%, transparent);
+    padding: 4px;
+    box-shadow: 0 2px 10px color-mix(in srgb, #000000 8%, transparent);
+    vertical-align: middle;
+  }
+
+  :global(.preview-prose p > img:not(:only-child)) {
+    max-height: 150px;
+    margin: 2px 3px;
+  }
+
+  :global(.preview-prose .preview-image-fallback) {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    padding: 2px 10px;
+    border-radius: 6px;
+    border: 1px dashed var(--border-headerbar);
+    background-color: color-mix(in srgb, var(--bg-code-block) 52%, transparent);
+    color: var(--fg-muted);
+    font-size: 0.9em;
+    line-height: 1.35;
+    vertical-align: baseline;
+  }
+
+  :global(.preview-prose .preview-image-fallback-icon) {
+    font-size: 0.95em;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+
+  :global(.preview-prose .preview-image-fallback-alt) {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 44ch;
   }
 
   :global(.preview-prose code) {

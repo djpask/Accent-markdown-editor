@@ -84,7 +84,7 @@
   - [x] Implement Menu `☰` with the 4 theme circles and the dedicated **Temi e palette** modal (live combined preview + `Annulla` / `Salva` footer).
   - [x] Implement the 2-tab **Preferences** modal (*Tipografia e Pagina*, *Editor e Lingua*, per-tab *Ripristina predefiniti*, fixed *Annulla* / `Salva` footer), Search & Replace, WAL/disk-change banners, and all Rust exporters.
 
-- [ ] **Phase 5: GFM `0.29-gfm` Conformance, Modular Extensions & AST Live Preview**
+- [x] **Phase 5: GFM `0.29-gfm` Conformance, Modular Extensions & AST Live Preview**
   - [x] **Phase 5.1 — `MarkdownConfig`, Unified `comrak` Backend & HTML Security (`§6.11`):**
     - Replace `MarkdownDialect` with `MarkdownConfig` (`MarkdownBase` + `MarkdownExtensions`) across `accent-core`, `accent-session` (with backward-compatible `settings.json` migration and i18n in `it`/`en`/`es`), IPC snapshots, and the *Editor e Lingua* Preferences tab.
     - Remove `pulldown-cmark` from `render_preview_html` / copy-HTML so Preview Pane, Copy HTML, and standalone HTML export all share `accent-core`'s `comrak` pipeline with Extended Autolinks (`§6.9`), Disallowed Raw HTML `tagfilter` (`§6.11`), and CSS scoping on `.preview-prose`.
@@ -94,6 +94,6 @@
     - Suspend inline delimiter collapsing on raw table lines when the caret enters a table so monospace `|` columns stay aligned.
   - [x] **Phase 5.3 — AST-Driven *View-while-typing* & Interactive Task Lists (`§5.3`):**
     - Migrate `buildCaretAwareDecorations` from per-line regexes and `isOccupied` to `syntaxTree(state)` traversal, fixing backslash escapes (`§6.1`), nested emphasis/strikethrough (`§6.4`–`§6.5`), multi-backtick code spans (`§6.3`), indented code blocks (`§4.4`), HTML blocks (`§4.6`), balanced-parenthesis & reference links (`§6.6`), thematic breaks (`§4.1`), Setext headings (`§4.3`), and clickable task checkboxes (`§5.3`).
-  - [ ] **Phase 5.4 — Local Relative Images (`§6.7`) & Rich AST Exporters:**
+  - [x] **Phase 5.4 — Local Relative Images (`§6.7`) & Rich AST Exporters:**
     - Resolve relative local image paths against `current_file_path` via Tauri's `asset:` protocol in Preview/Editor and embed local images in PDF/DOCX/ODT/EPUB/HTML exports.
     - Enrich `PreviewBlock` (and use direct `comrak` HTML where appropriate) to preserve table column alignments, inline formatting inside table cells, `ThematicBreak`, `LineBreak`, and nested lists/blockquotes across all exporters.

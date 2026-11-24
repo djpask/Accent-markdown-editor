@@ -9,5 +9,6 @@ accent-core = { path = "../accent-core" }
 accent-mermaid = { path = "../accent-mermaid" }
 docx-rs.workspace = true
 flate2.workspace = true
+image.workspace = true
 serde.workspace = true
 zip.workspace = true

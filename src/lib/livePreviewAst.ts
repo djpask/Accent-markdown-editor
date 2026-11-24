@@ -52,7 +52,7 @@ import {
   type ParsedTableCell,
   type TableColumnAlign,
 } from './gfmTable';
-import { openExternalUrl } from './ipc';
+import { openExternalUrl, resolveLocalImageIpc } from './ipc';
 import {
   getCachedMermaidSvg,
   getOrFetchMermaidSvg,
@@ -80,6 +80,7 @@ export interface LivePreviewConfigState {
   enabled: boolean;
   theme: ThemeMode;
   markdownConfig: MarkdownConfig;
+  currentFilePath: string | null;
 }
 
 export const DEFAULT_LIVE_PREVIEW_CONFIG: LivePreviewConfigState = {
@@ -95,6 +96,7 @@ export const DEFAULT_LIVE_PREVIEW_CONFIG: LivePreviewConfigState = {
       frontmatter: false,
     },
   },
+  currentFilePath: null,
 };
 
 export const livePreviewConfigFacet = Facet.define<
@@ -651,6 +653,401 @@ export function classifyAstLinkNode(
   return { kind: 'unresolved-brackets' };
 }
 
+const ALLOWED_EDITOR_IMAGE_EXTENSIONS = new Set<string>([
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'webp',
+  'svg',
+  'bmp',
+  'ico',
+  'avif',
+]);
+
+export type CachedLocalImageEntry =
+  | { status: 'ok'; src: string }
+  | { status: 'missing' };
+
+const localImageResolutionCache = new Map<string, CachedLocalImageEntry>();
+const pendingLocalImageRequests = new Map<string, Promise<void>>();
+
+function isTauriRuntimeAvailable(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    '__TAURI_INTERNALS__' in (window as unknown as Record<string, unknown>)
+  );
+}
+
+function tryPercentDecode(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+export function extractParentDirectory(filePath: string | null): string | null {
+  if (!filePath) return null;
+  const trimmed = filePath.trim();
+  if (!trimmed) return null;
+  const lastSlash = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+  if (lastSlash < 0) return null;
+  if (lastSlash === 0) return '/';
+  if (lastSlash === 2 && /^[a-zA-Z]:/.test(trimmed)) {
+    return trimmed.slice(0, 3);
+  }
+  return trimmed.slice(0, lastSlash);
+}
+
+function isSafeInlineRasterDataUri(rawUrl: string): boolean {
+  const lower = rawUrl.trim().toLowerCase();
+  return (
+    lower.startsWith('data:image/png;base64,') ||
+    lower.startsWith('data:image/jpeg;base64,') ||
+    lower.startsWith('data:image/gif;base64,') ||
+    lower.startsWith('data:image/webp;base64,') ||
+    lower.startsWith('data:image/bmp;base64,') ||
+    lower.startsWith('data:image/x-icon;base64,') ||
+    lower.startsWith('data:image/avif;base64,')
+  );
+}
+
+/**
+ * Resolves a Markdown `§6.7` local relative image path (`diagram.png`, `./assets/img.jpg`,
+ * `../img/logo.png`, including percent-encoding and spaces) against `currentFilePath`'s directory.
+ * Returns `null` if `currentFilePath` is null, `rawUrl` is remote/non-relative, or the extension is not allowed.
+ */
+export function resolveRelativeImagePathForEditor(
+  currentFilePath: string | null,
+  rawUrl: string
+): string | null {
+  const parentDir = extractParentDirectory(currentFilePath);
+  if (!parentDir) return null;
+
+  let trimmed = rawUrl.trim();
+  if (trimmed.startsWith('<') && trimmed.endsWith('>') && trimmed.length >= 2) {
+    trimmed = trimmed.slice(1, -1).trim();
+  }
+  if (
+    !trimmed ||
+    trimmed.startsWith('#') ||
+    trimmed.startsWith('/') ||
+    trimmed.startsWith('\\') ||
+    /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed) ||
+    /[\u0000-\u001F\u007F]/.test(trimmed)
+  ) {
+    return null;
+  }
+
+  const withoutHash = trimmed.split('#')[0] ?? trimmed;
+  const cleanRel = (withoutHash.split('?')[0] ?? withoutHash).trim();
+  if (!cleanRel) return null;
+
+  const decoded = tryPercentDecode(cleanRel);
+  if (
+    !decoded ||
+    decoded.startsWith('/') ||
+    decoded.startsWith('\\') ||
+    /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(decoded) ||
+    /[\u0000-\u001F\u007F]/.test(decoded)
+  ) {
+    return null;
+  }
+
+  const dotIdx = decoded.lastIndexOf('.');
+  const slashIdx = Math.max(decoded.lastIndexOf('/'), decoded.lastIndexOf('\\'));
+  if (dotIdx <= slashIdx || dotIdx === decoded.length - 1) {
+    return null;
+  }
+  const ext = decoded.slice(dotIdx + 1).toLowerCase();
+  if (!ALLOWED_EDITOR_IMAGE_EXTENSIONS.has(ext)) {
+    return null;
+  }
+
+  const isWindows = /^[a-zA-Z]:/.test(parentDir) || parentDir.includes('\\');
+  const sep = isWindows ? '\\' : '/';
+  const baseParts = parentDir.split(/[\\/]+/);
+  const relParts = decoded.split(/[\\/]+/);
+  const stack: string[] = [];
+
+  for (let i = 0; i < baseParts.length; i++) {
+    const seg = baseParts[i];
+    if (i === 0 && (seg === '' || /^[a-zA-Z]:$/.test(seg))) {
+      stack.push(seg);
+      continue;
+    }
+    if (!seg || seg === '.') continue;
+    stack.push(seg);
+  }
+
+  const rootFloor = stack.length > 0 && (stack[0] === '' || /^[a-zA-Z]:$/.test(stack[0])) ? 1 : 0;
+  for (const seg of relParts) {
+    if (!seg || seg === '.') continue;
+    if (seg === '..') {
+      if (stack.length > rootFloor) {
+        stack.pop();
+      } else {
+        return null;
+      }
+    } else {
+      stack.push(seg);
+    }
+  }
+
+  if (stack.length === 1 && stack[0] === '') {
+    return '/';
+  }
+  return stack.join(sep);
+}
+
+function makeLocalImageCacheKey(currentFilePath: string, rawUrl: string): string {
+  const normalized = resolveRelativeImagePathForEditor(currentFilePath, rawUrl);
+  return normalized ?? `${currentFilePath}\0${rawUrl.trim()}`;
+}
+
+export function primeLocalImageResolutionCache(
+  currentFilePath: string,
+  rawUrl: string,
+  entry: CachedLocalImageEntry
+): void {
+  localImageResolutionCache.set(makeLocalImageCacheKey(currentFilePath, rawUrl), entry);
+}
+
+export function clearLocalImageResolutionCache(): void {
+  localImageResolutionCache.clear();
+  pendingLocalImageRequests.clear();
+}
+
+export function lookupEditorImageResolution(
+  currentFilePath: string | null,
+  rawUrl: string
+): CachedLocalImageEntry | 'pending' {
+  if (isSafeInlineRasterDataUri(rawUrl)) {
+    return { status: 'ok', src: rawUrl.trim() };
+  }
+  const normalized = resolveRelativeImagePathForEditor(currentFilePath, rawUrl);
+  if (!normalized || !currentFilePath) {
+    return { status: 'missing' };
+  }
+  const key = makeLocalImageCacheKey(currentFilePath, rawUrl);
+  const cached = localImageResolutionCache.get(key);
+  if (cached) {
+    return cached;
+  }
+  if (!isTauriRuntimeAvailable()) {
+    return { status: 'missing' };
+  }
+  return 'pending';
+}
+
+function triggerLocalImageIpcResolution(
+  currentFilePath: string,
+  rawUrl: string,
+  onResolved: () => void
+): void {
+  const key = makeLocalImageCacheKey(currentFilePath, rawUrl);
+  if (localImageResolutionCache.has(key)) {
+    onResolved();
+    return;
+  }
+  const existing = pendingLocalImageRequests.get(key);
+  if (existing) {
+    void existing.then(onResolved);
+    return;
+  }
+  const req = resolveLocalImageIpc(currentFilePath, rawUrl)
+    .then((payload) => {
+      if (payload.ok && payload.src) {
+        localImageResolutionCache.set(key, { status: 'ok', src: payload.src });
+      } else {
+        localImageResolutionCache.set(key, { status: 'missing' });
+      }
+    })
+    .catch(() => {
+      localImageResolutionCache.set(key, { status: 'missing' });
+    })
+    .finally(() => {
+      pendingLocalImageRequests.delete(key);
+      onResolved();
+    });
+  pendingLocalImageRequests.set(key, req);
+}
+
+function extractVisibleAltFromRange(doc: Text, from: number, to: number): string {
+  if (to <= from) return '';
+  const raw = doc.sliceString(from, to);
+  let out = '';
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i] === '\\' && i + 1 < raw.length && ASCII_PUNCTUATION.has(raw[i + 1])) {
+      out += raw[i + 1];
+      i++;
+      continue;
+    }
+    if (raw[i] === '&') {
+      const semi = raw.indexOf(';', i + 1);
+      if (semi !== -1 && semi - i <= 33) {
+        const candidate = raw.slice(i, semi + 1);
+        const dec = decodeHtmlEntity(candidate);
+        if (dec !== null) {
+          out += dec;
+          i = semi;
+          continue;
+        }
+      }
+    }
+    if (raw[i] === '*' || raw[i] === '_' || raw[i] === '`' || raw[i] === '~') {
+      continue;
+    }
+    out += raw[i];
+  }
+  return out.replace(/\s+/g, ' ').trim();
+}
+
+export type ClassifiedAstImage =
+  | {
+      kind: 'image';
+      alt: string;
+      rawUrl: string;
+      title: string;
+      isStandalone: boolean;
+    }
+  | {
+      kind: 'unresolved-image';
+    };
+
+export function classifyAstImageNode(
+  doc: Text,
+  imageNode: SyntaxNode,
+  refMap: Map<string, ResolvedLinkRef>
+): ClassifiedAstImage {
+  const firstChild = imageNode.firstChild;
+  const lastChild = imageNode.lastChild;
+  if (
+    !firstChild ||
+    !lastChild ||
+    firstChild.name !== 'LinkMark' ||
+    doc.sliceString(firstChild.from, firstChild.to) !== '!['
+  ) {
+    return { kind: 'unresolved-image' };
+  }
+
+  let closeBracketNode: SyntaxNode | null = null;
+  for (let ch = firstChild.nextSibling; ch; ch = ch.nextSibling) {
+    if (ch.name === 'LinkMark' && doc.sliceString(ch.from, ch.to) === ']') {
+      closeBracketNode = ch;
+      break;
+    }
+  }
+  if (!closeBracketNode) {
+    return { kind: 'unresolved-image' };
+  }
+
+  const alt = extractVisibleAltFromRange(doc, firstChild.to, closeBracketNode.from);
+
+  let isStandalone = false;
+  const parent = imageNode.parent;
+  if (parent && parent.name === 'Paragraph') {
+    let onlyQuoteMarksAndImage = true;
+    let ch: SyntaxNode | null = parent.firstChild;
+    while (ch !== null) {
+      if (ch.from !== imageNode.from || ch.to !== imageNode.to) {
+        if (ch.name !== 'QuoteMark') {
+          onlyQuoteMarksAndImage = false;
+          break;
+        }
+      }
+      ch = ch.nextSibling;
+    }
+    if (onlyQuoteMarksAndImage) {
+      const before = doc.sliceString(parent.from, imageNode.from).replace(/>/g, '').trim();
+      const after = doc.sliceString(imageNode.to, parent.to).trim();
+      isStandalone = before.length === 0 && after.length === 0;
+    }
+  }
+
+  // 1. Inline image `![alt](url "title")`
+  if (
+    lastChild.from !== closeBracketNode.from &&
+    lastChild.name === 'LinkMark' &&
+    doc.sliceString(lastChild.from, lastChild.to) === ')'
+  ) {
+    let urlNode: SyntaxNode | null = null;
+    let titleNode: SyntaxNode | null = null;
+    for (let ch = closeBracketNode.nextSibling; ch; ch = ch.nextSibling) {
+      if (ch.name === 'URL' && !urlNode) {
+        urlNode = ch;
+      } else if (ch.name === 'LinkTitle' && !titleNode) {
+        titleNode = ch;
+      }
+    }
+
+    let rawUrl = '';
+    if (urlNode) {
+      rawUrl = doc.sliceString(urlNode.from, urlNode.to).trim();
+      if (rawUrl.startsWith('<') && rawUrl.endsWith('>') && rawUrl.length >= 2) {
+        rawUrl = rawUrl.slice(1, -1).trim();
+      }
+      rawUrl = unescapeAsciiBackslashes(rawUrl);
+    }
+
+    const title =
+      titleNode && titleNode.to - titleNode.from >= 2
+        ? unescapeAsciiBackslashes(
+            doc.sliceString(titleNode.from + 1, titleNode.to - 1)
+          )
+        : '';
+
+    return {
+      kind: 'image',
+      alt,
+      rawUrl,
+      title,
+      isStandalone,
+    };
+  }
+
+  // 2. Full `![alt][ref]` or collapsed `![ref][]` reference image
+  if (lastChild.name === 'LinkLabel' && lastChild.from >= closeBracketNode.to) {
+    const rawRefLabel = doc.sliceString(lastChild.from + 1, lastChild.to - 1);
+    const lookupRaw =
+      rawRefLabel.length === 0
+        ? doc.sliceString(firstChild.to, closeBracketNode.from)
+        : rawRefLabel;
+    const resolved = refMap.get(normalizeLinkReferenceLabel(lookupRaw));
+    if (!resolved) {
+      return { kind: 'unresolved-image' };
+    }
+    return {
+      kind: 'image',
+      alt,
+      rawUrl: resolved.url,
+      title: resolved.title,
+      isStandalone,
+    };
+  }
+
+  // 3. Shortcut reference image `![ref]`
+  if (
+    lastChild.from === closeBracketNode.from &&
+    lastChild.to === closeBracketNode.to
+  ) {
+    const rawInside = doc.sliceString(firstChild.to, closeBracketNode.from);
+    const resolved = refMap.get(normalizeLinkReferenceLabel(rawInside));
+    if (resolved) {
+      return {
+        kind: 'image',
+        alt,
+        rawUrl: resolved.url,
+        title: resolved.title,
+        isStandalone,
+      };
+    }
+  }
+
+  return { kind: 'unresolved-image' };
+}
+
 export function slugifyHeadingText(raw: string): string {
   return raw
     .trim()
@@ -1123,6 +1520,162 @@ export class DecodedEntityWidget extends WidgetType {
       view.focus();
     });
     return span;
+  }
+
+  ignoreEvent(): boolean {
+    return true;
+  }
+}
+
+function populateImageFallbackBadgeDom(
+  host: HTMLElement,
+  alt: string,
+  rawUrl: string,
+  title: string
+): void {
+  const displayLabel = alt || rawUrl || 'Immagine';
+  const tooltip = title
+    ? rawUrl
+      ? `${title} (${rawUrl})`
+      : title
+    : rawUrl || displayLabel;
+
+  host.classList.remove('is-loaded');
+  host.classList.add('is-fallback', 'cm-image-fallback-badge');
+  host.dataset.testid = 'cm-image-fallback';
+  host.setAttribute('role', 'img');
+  host.setAttribute('aria-label', displayLabel);
+  host.title = tooltip;
+
+  while (host.firstChild) {
+    host.removeChild(host.firstChild);
+  }
+
+  const iconEl = document.createElement('span');
+  iconEl.className = 'cm-image-fallback-icon';
+  iconEl.setAttribute('aria-hidden', 'true');
+  iconEl.appendChild(document.createTextNode('🖼'));
+
+  const textEl = document.createElement('span');
+  textEl.className = 'cm-image-fallback-alt';
+  textEl.appendChild(document.createTextNode(displayLabel));
+
+  host.appendChild(iconEl);
+  host.appendChild(textEl);
+}
+
+/**
+ * Caret-aware CommonMark/GFM `§6.7` Image widget (`![alt](url "title")`):
+ * - Renders a responsive themed `<img>` when `rawUrl` resolves against `currentFilePath`;
+ * - Renders a compact fallback badge (`🖼 alt`) without broken browser icons when missing, unsaved, or remote (`https://...`);
+ * - Places the caret at `targetPos` on click to immediately re-expand the Markdown source.
+ */
+export class ImageWidget extends WidgetType {
+  alt: string;
+  rawUrl: string;
+  title: string;
+  targetPos: number;
+  currentFilePath: string | null;
+  isStandalone: boolean;
+  resolvedSrc: string | null;
+  pendingIpc: boolean;
+
+  constructor(
+    alt: string,
+    rawUrl: string,
+    title: string,
+    targetPos: number,
+    currentFilePath: string | null,
+    isStandalone: boolean
+  ) {
+    super();
+    this.alt = alt;
+    this.rawUrl = rawUrl;
+    this.title = title;
+    this.targetPos = targetPos;
+    this.currentFilePath = currentFilePath;
+    this.isStandalone = isStandalone;
+
+    const lookup = lookupEditorImageResolution(currentFilePath, rawUrl);
+    if (lookup === 'pending') {
+      this.resolvedSrc = null;
+      this.pendingIpc = true;
+    } else if (lookup.status === 'ok') {
+      this.resolvedSrc = lookup.src;
+      this.pendingIpc = false;
+    } else {
+      this.resolvedSrc = null;
+      this.pendingIpc = false;
+    }
+  }
+
+  eq(other: ImageWidget): boolean {
+    return (
+      this.alt === other.alt &&
+      this.rawUrl === other.rawUrl &&
+      this.title === other.title &&
+      this.targetPos === other.targetPos &&
+      this.currentFilePath === other.currentFilePath &&
+      this.isStandalone === other.isStandalone &&
+      this.resolvedSrc === other.resolvedSrc &&
+      this.pendingIpc === other.pendingIpc
+    );
+  }
+
+  toDOM(view: EditorView): HTMLElement {
+    const wrap = document.createElement('span');
+    wrap.className = this.isStandalone
+      ? 'cm-image-widget is-standalone'
+      : 'cm-image-widget is-inline';
+
+    if (this.pendingIpc && this.currentFilePath) {
+      populateImageFallbackBadgeDom(wrap, this.alt, this.rawUrl, this.title);
+      triggerLocalImageIpcResolution(this.currentFilePath, this.rawUrl, () => {
+        queueMicrotask(() => {
+          view.dispatch({ effects: refreshLivePreviewEffect.of(true) });
+        });
+      });
+    } else if (this.resolvedSrc) {
+      wrap.classList.add('is-loaded');
+      wrap.dataset.testid = 'cm-image-widget';
+      if (this.title) {
+        wrap.title = this.title;
+      }
+
+      const img = document.createElement('img');
+      img.className = 'cm-image-widget-img';
+      img.src = this.resolvedSrc;
+      img.alt = this.alt;
+      if (this.title) {
+        img.title = this.title;
+      }
+      img.decoding = 'async';
+      img.draggable = false;
+      img.addEventListener('error', () => {
+        if (this.currentFilePath) {
+          primeLocalImageResolutionCache(this.currentFilePath, this.rawUrl, {
+            status: 'missing',
+          });
+        }
+        populateImageFallbackBadgeDom(wrap, this.alt, this.rawUrl, this.title);
+      });
+      wrap.appendChild(img);
+    } else {
+      populateImageFallbackBadgeDom(wrap, this.alt, this.rawUrl, this.title);
+    }
+
+    wrap.addEventListener('mousedown', (e: MouseEvent) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const clamped = Math.max(0, Math.min(this.targetPos, view.state.doc.length));
+      view.dispatch({
+        selection: { anchor: clamped, head: clamped },
+      });
+      view.focus();
+    });
+
+    return wrap;
   }
 
   ignoreEvent(): boolean {
@@ -1745,6 +2298,36 @@ export function buildBlockLiveDecorations(state: EditorState): DecorationSet {
                   block: true,
                 }).range(mb.blockFrom, mb.blockTo)
               );
+            }
+          }
+        }
+
+        // Multi-line §6.7 Images (`![alt\nline2](url)`) must be replaced via StateField so `\n` is allowed
+        const refMapForBlockImages = extractLinkReferenceMap(state);
+        for (let ch = nodeRef.node.firstChild; ch; ch = ch.nextSibling) {
+          if (ch.name === 'Image') {
+            const sLine = doc.lineAt(ch.from).number;
+            const eLine = doc.lineAt(ch.to).number;
+            if (
+              eLine > sLine &&
+              ch.to > ch.from &&
+              !isSelectionIntersecting(state, ch.from, ch.to)
+            ) {
+              const classifiedImg = classifyAstImageNode(doc, ch, refMapForBlockImages);
+              if (classifiedImg.kind === 'image') {
+                decoRanges.push(
+                  Decoration.replace({
+                    widget: new ImageWidget(
+                      classifiedImg.alt,
+                      classifiedImg.rawUrl,
+                      classifiedImg.title,
+                      ch.from,
+                      liveCfg.currentFilePath,
+                      classifiedImg.isStandalone
+                    ),
+                  }).range(ch.from, ch.to)
+                );
+              }
             }
           }
         }
@@ -2932,9 +3515,35 @@ export function buildInlineAndLineLiveDecorations(
           return false;
         }
 
-        // §6.7 Images — Phase 5.4 handles image widgets; protect URL from `$...$` math
+        // §6.7 Images (CommonMark & GFM core): caret-aware ImageWidget with local relative path resolution & clean fallback badge
         if (name === 'Image') {
-          inlineProtectedForDollarMath.push([from, to]);
+          if (!visitedNodeKeys.has(nodeKey)) {
+            visitedNodeKeys.add(nodeKey);
+            inlineProtectedForDollarMath.push([from, to]);
+            if (
+              doc.lineAt(from).number === doc.lineAt(to).number &&
+              to > from &&
+              !isCaretInSpan(from, to)
+            ) {
+              const classifiedImg = classifyAstImageNode(doc, nodeRef.node, refMap);
+              if (classifiedImg.kind === 'image') {
+                pendingReplaces.push({
+                  from,
+                  to,
+                  deco: Decoration.replace({
+                    widget: new ImageWidget(
+                      classifiedImg.alt,
+                      classifiedImg.rawUrl,
+                      classifiedImg.title,
+                      from,
+                      liveCfg.currentFilePath,
+                      classifiedImg.isStandalone
+                    ),
+                  }),
+                });
+              }
+            }
+          }
           return false;
         }
 
@@ -3165,13 +3774,15 @@ const editorCtrlClickLinkHandler = EditorView.domEventHandlers({
 export function createLivePreviewExtensions(
   enabled: boolean,
   currentTheme: ThemeMode,
-  cfg: MarkdownConfig
+  cfg: MarkdownConfig,
+  currentFilePath: string | null = null
 ): Extension {
   const extensions: Extension[] = [
     livePreviewConfigFacet.of({
       enabled,
       theme: currentTheme,
       markdownConfig: cfg,
+      currentFilePath,
     }),
     createLivePreviewPlugin(),
     editorCtrlClickLinkHandler,

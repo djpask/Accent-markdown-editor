@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import type {
@@ -6,6 +6,7 @@ import type {
   ExportFormat,
   MermaidSvgPayload,
   PaletteCssTokens,
+  ResolvedLocalImagePayload,
   SessionAction,
   ThemeMode,
   UiSessionSnapshot,
@@ -74,6 +75,23 @@ export async function renderMermaidDiagram(
 
 export async function renderPreviewHtml(): Promise<string> {
   return invoke<string>('render_preview_html');
+}
+
+export async function resolveLocalImageIpc(
+  baseFilePath: string | null,
+  rawUrl: string
+): Promise<ResolvedLocalImagePayload> {
+  const res = await invoke<ResolvedLocalImagePayload>('resolve_local_image', {
+    baseFilePath,
+    rawUrl,
+  });
+  if (res.ok && res.kind === 'asset' && res.canonical_path && isTauri()) {
+    return {
+      ...res,
+      src: convertFileSrc(res.canonical_path),
+    };
+  }
+  return res;
 }
 
 export async function onSessionUpdated(

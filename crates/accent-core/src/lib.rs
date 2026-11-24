@@ -1,4 +1,7 @@
-use comrak::nodes::{AstNode, LineColumn, ListType, NodeValue, Sourcepos};
+use comrak::nodes::{
+    AlertType, AstNode, LineColumn, ListType, NodeValue, Sourcepos,
+    TableAlignment as ComrakTableAlignment,
+};
 use comrak::{Arena, Options};
 use ropey::Rope;
 use serde::{Deserialize, Serialize};
@@ -935,24 +938,125 @@ pub struct StyledLine {
     pub segments: Vec<StyledSegment>,
 }
 
-/// Structured inline item for rendered Split/Windowed Preview panes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct PreviewInline {
-    pub text: String,
-    pub bold: bool,
-    pub italic: bool,
-    pub strikethrough: bool,
-    pub code: bool,
-    pub link_url: Option<String>,
+/// Column alignment for GFM `§4.10` tables preserved across AST exporters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum TableAlignment {
+    #[default]
+    None,
+    Left,
+    Center,
+    Right,
+}
+
+impl TableAlignment {
+    fn from_comrak(align: ComrakTableAlignment) -> Self {
+        match align {
+            ComrakTableAlignment::None => Self::None,
+            ComrakTableAlignment::Left => Self::Left,
+            ComrakTableAlignment::Center => Self::Center,
+            ComrakTableAlignment::Right => Self::Right,
+        }
+    }
+}
+
+/// Optional GFM callout / alert type on `PreviewBlock::BlockQuote` when `extensions.alerts` is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AlertKind {
+    Note,
+    Tip,
+    Important,
+    Warning,
+    Caution,
+}
+
+impl AlertKind {
+    fn from_comrak(alert_type: AlertType) -> Self {
+        match alert_type {
+            AlertType::Note => Self::Note,
+            AlertType::Tip => Self::Tip,
+            AlertType::Important => Self::Important,
+            AlertType::Warning => Self::Warning,
+            AlertType::Caution => Self::Caution,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Note => "Note",
+            Self::Tip => "Tip",
+            Self::Important => "Important",
+            Self::Warning => "Warning",
+            Self::Caution => "Caution",
+        }
+    }
+}
+
+/// Rich inline AST node for structured document exporters (`L3`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PreviewInline {
+    Text {
+        text: String,
+        bold: bool,
+        italic: bool,
+        strikethrough: bool,
+        code: bool,
+        link_url: Option<String>,
+        link_title: Option<String>,
+    },
+    /// Hard line break (`§6.12` trailing `\` / two spaces, or `<br>`).
+    LineBreak,
+    /// Inline image (`§6.7` `![alt](url "title")`) inside a paragraph, heading, list item, or table cell.
+    Image {
+        alt: String,
+        url: String,
+        title: String,
+    },
+    /// Native math expression (`$...$` or `$$...$$`) when `extensions.math` is active.
+    Math {
+        literal: String,
+        display_math: bool,
+    },
+}
+
+impl PreviewInline {
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self::Text {
+            text: text.into(),
+            bold: false,
+            italic: false,
+            strikethrough: false,
+            code: false,
+            link_url: None,
+            link_title: None,
+        }
+    }
+
+    pub fn plain_text(&self) -> &str {
+        match self {
+            Self::Text { text, .. } => text.as_str(),
+            Self::LineBreak => "\n",
+            Self::Image { alt, .. } => alt.as_str(),
+            Self::Math { literal, .. } => literal.as_str(),
+        }
+    }
+
+    pub fn collect_plain_text(inlines: &[Self]) -> String {
+        let mut out = String::new();
+        for item in inlines {
+            out.push_str(item.plain_text());
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreviewListItem {
-    pub task: Option<bool>,
+    pub checked: Option<bool>,
     pub inlines: Vec<PreviewInline>,
+    pub children: Vec<PreviewBlock>,
 }
 
-/// Structured block item for rendered Split/Windowed Preview panes.
+/// Rich block AST node for structured document exporters (`L3`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PreviewBlock {
     Heading {
@@ -963,8 +1067,10 @@ pub enum PreviewBlock {
     Paragraph {
         inlines: Vec<PreviewInline>,
     },
+    ThematicBreak,
     BlockQuote {
-        inlines: Vec<PreviewInline>,
+        alert: Option<AlertKind>,
+        children: Vec<PreviewBlock>,
     },
     CodeBlock {
         info: String,
@@ -972,15 +1078,23 @@ pub enum PreviewBlock {
     },
     List {
         ordered: bool,
+        start: usize,
+        tight: bool,
         items: Vec<PreviewListItem>,
     },
     Image {
         alt: String,
         url: String,
+        title: String,
     },
     Table {
-        headers: Vec<String>,
-        rows: Vec<Vec<String>>,
+        alignments: Vec<TableAlignment>,
+        headers: Vec<Vec<PreviewInline>>,
+        rows: Vec<Vec<Vec<PreviewInline>>>,
+    },
+    FootnoteDefinition {
+        name: String,
+        children: Vec<PreviewBlock>,
     },
 }
 
@@ -2086,18 +2200,8 @@ impl DocumentBuffer {
                     let mut cells = Vec::new();
                     for cell_node in row_node.children() {
                         let mut cell_inlines = Vec::new();
-                        for c in cell_node.children() {
-                            Self::collect_preview_inlines(
-                                c,
-                                &mut cell_inlines,
-                                false,
-                                false,
-                                false,
-                                None,
-                            );
-                        }
-                        let cell_text: String =
-                            cell_inlines.iter().map(|i| i.text.as_str()).collect();
+                        Self::collect_children_inlines(cell_node, &mut cell_inlines);
+                        let cell_text = PreviewInline::collect_plain_text(&cell_inlines);
                         cells.push(cell_text);
                     }
                     if is_header {
@@ -3178,8 +3282,8 @@ impl DocumentBuffer {
                     if matches!(c.data.borrow().value, NodeValue::Link(_)) {
                         is_link_heading = true;
                     }
-                    Self::collect_preview_inlines(c, &mut inlines, false, false, false, None);
                 }
+                Self::collect_children_inlines(node, &mut inlines);
                 out.push(PreviewBlock::Heading {
                     level: h.level,
                     inlines,
@@ -3187,45 +3291,50 @@ impl DocumentBuffer {
                 });
             }
             NodeValue::Paragraph => {
-                // Check if this paragraph is a standalone image
+                // Check if this paragraph is a standalone block image (`![alt](url "title")`)
                 if node.children().count() == 1 {
                     if let Some(first) = node.first_child() {
                         if let NodeValue::Image(img) = &first.data.borrow().value {
                             let mut alt_inlines = Vec::new();
-                            for c in first.children() {
-                                Self::collect_preview_inlines(
-                                    c,
-                                    &mut alt_inlines,
-                                    false,
-                                    false,
-                                    false,
-                                    None,
-                                );
-                            }
-                            let alt: String =
-                                alt_inlines.iter().map(|i| i.text.as_str()).collect();
+                            Self::collect_children_inlines(first, &mut alt_inlines);
+                            let alt = PreviewInline::collect_plain_text(&alt_inlines);
                             out.push(PreviewBlock::Image {
                                 alt,
                                 url: img.url.clone(),
+                                title: img.title.clone(),
                             });
                             return;
                         }
                     }
                 }
                 let mut inlines = Vec::new();
-                for c in node.children() {
-                    Self::collect_preview_inlines(c, &mut inlines, false, false, false, None);
-                }
+                Self::collect_children_inlines(node, &mut inlines);
                 if !inlines.is_empty() {
                     out.push(PreviewBlock::Paragraph { inlines });
                 }
             }
+            NodeValue::ThematicBreak => {
+                out.push(PreviewBlock::ThematicBreak);
+            }
             NodeValue::BlockQuote | NodeValue::MultilineBlockQuote(_) => {
-                let mut inlines = Vec::new();
+                let mut children = Vec::new();
                 for c in node.children() {
-                    Self::collect_preview_inlines(c, &mut inlines, false, false, false, None);
+                    self.collect_preview_block(c, &mut children);
                 }
-                out.push(PreviewBlock::BlockQuote { inlines });
+                out.push(PreviewBlock::BlockQuote {
+                    alert: None,
+                    children,
+                });
+            }
+            NodeValue::Alert(alert_node) => {
+                let mut children = Vec::new();
+                for c in node.children() {
+                    self.collect_preview_block(c, &mut children);
+                }
+                out.push(PreviewBlock::BlockQuote {
+                    alert: Some(AlertKind::from_comrak(alert_node.alert_type)),
+                    children,
+                });
             }
             NodeValue::CodeBlock(cb) => {
                 out.push(PreviewBlock::CodeBlock {
@@ -3235,41 +3344,64 @@ impl DocumentBuffer {
             }
             NodeValue::List(list) => {
                 let ordered = list.list_type == ListType::Ordered;
+                let start = if ordered { list.start.max(1) } else { 1 };
+                let tight = list.tight;
                 let mut items = Vec::new();
                 for item_node in node.children() {
-                    let task = match item_node.data.borrow().value {
+                    let checked = match item_node.data.borrow().value {
                         NodeValue::TaskItem(sym) => Some(sym.is_some()),
                         _ => None,
                     };
-                    let mut inlines = Vec::new();
-                    for c in item_node.children() {
-                        Self::collect_preview_inlines(c, &mut inlines, false, false, false, None);
+                    let mut item_inlines = Vec::new();
+                    let mut item_children = Vec::new();
+                    let mut child_iter = item_node.children().peekable();
+                    if let Some(first_child) = child_iter.peek() {
+                        let is_plain_lead_para = {
+                            let fd = first_child.data.borrow();
+                            matches!(fd.value, NodeValue::Paragraph)
+                                && !(first_child.children().count() == 1
+                                    && first_child.first_child().is_some_and(|gc| {
+                                        matches!(gc.data.borrow().value, NodeValue::Image(_))
+                                    }))
+                        };
+                        if is_plain_lead_para {
+                            let lead = child_iter.next().unwrap();
+                            Self::collect_children_inlines(lead, &mut item_inlines);
+                        }
                     }
-                    items.push(PreviewListItem { task, inlines });
+                    for rem_child in child_iter {
+                        self.collect_preview_block(rem_child, &mut item_children);
+                    }
+                    items.push(PreviewListItem {
+                        checked,
+                        inlines: item_inlines,
+                        children: item_children,
+                    });
                 }
-                out.push(PreviewBlock::List { ordered, items });
+                out.push(PreviewBlock::List {
+                    ordered,
+                    start,
+                    tight,
+                    items,
+                });
             }
-            NodeValue::Table(_) => {
-                let mut headers = Vec::new();
-                let mut rows = Vec::new();
+            NodeValue::Table(nt) => {
+                let alignments: Vec<TableAlignment> = nt
+                    .alignments
+                    .iter()
+                    .copied()
+                    .map(TableAlignment::from_comrak)
+                    .collect();
+                let mut headers: Vec<Vec<PreviewInline>> = Vec::new();
+                let mut rows: Vec<Vec<Vec<PreviewInline>>> = Vec::new();
                 for row_node in node.children() {
-                    let is_header = matches!(row_node.data.borrow().value, NodeValue::TableRow(true));
-                    let mut cells = Vec::new();
+                    let is_header =
+                        matches!(row_node.data.borrow().value, NodeValue::TableRow(true));
+                    let mut cells: Vec<Vec<PreviewInline>> = Vec::new();
                     for cell_node in row_node.children() {
                         let mut cell_inlines = Vec::new();
-                        for c in cell_node.children() {
-                            Self::collect_preview_inlines(
-                                c,
-                                &mut cell_inlines,
-                                false,
-                                false,
-                                false,
-                                None,
-                            );
-                        }
-                        let cell_text: String =
-                            cell_inlines.iter().map(|i| i.text.as_str()).collect();
-                        cells.push(cell_text);
+                        Self::collect_children_inlines(cell_node, &mut cell_inlines);
+                        cells.push(cell_inlines);
                     }
                     if is_header {
                         headers = cells;
@@ -3277,76 +3409,125 @@ impl DocumentBuffer {
                         rows.push(cells);
                     }
                 }
-                out.push(PreviewBlock::Table { headers, rows });
+                out.push(PreviewBlock::Table {
+                    alignments,
+                    headers,
+                    rows,
+                });
+            }
+            NodeValue::FootnoteDefinition(def) => {
+                let mut children = Vec::new();
+                for c in node.children() {
+                    self.collect_preview_block(c, &mut children);
+                }
+                out.push(PreviewBlock::FootnoteDefinition {
+                    name: def.name.clone(),
+                    children,
+                });
             }
             _ => {}
         }
     }
 
+    fn collect_children_inlines<'a>(parent: &'a AstNode<'a>, out: &mut Vec<PreviewInline>) {
+        let mut html_code_depth = 0usize;
+        for c in parent.children() {
+            if let NodeValue::HtmlInline(raw) = &c.data.borrow().value {
+                let trimmed = raw.trim();
+                if trimmed.eq_ignore_ascii_case("<br>")
+                    || trimmed.eq_ignore_ascii_case("<br/>")
+                    || trimmed.eq_ignore_ascii_case("<br />")
+                {
+                    out.push(PreviewInline::LineBreak);
+                    continue;
+                }
+                if trimmed.eq_ignore_ascii_case("<kbd>") || trimmed.eq_ignore_ascii_case("<code>") {
+                    html_code_depth += 1;
+                    continue;
+                }
+                if trimmed.eq_ignore_ascii_case("</kbd>") || trimmed.eq_ignore_ascii_case("</code>")
+                {
+                    html_code_depth = html_code_depth.saturating_sub(1);
+                    continue;
+                }
+                continue;
+            }
+            Self::collect_preview_inlines(
+                c,
+                out,
+                false,
+                false,
+                false,
+                html_code_depth > 0,
+                None,
+                None,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn collect_preview_inlines<'a>(
         node: &'a AstNode<'a>,
         out: &mut Vec<PreviewInline>,
         bold: bool,
         italic: bool,
         strikethrough: bool,
+        code: bool,
         link_url: Option<String>,
+        link_title: Option<String>,
     ) {
         let data = node.data.borrow();
         match &data.value {
             NodeValue::Text(t) => {
-                out.push(PreviewInline {
+                out.push(PreviewInline::Text {
                     text: expand_emoji_shortcodes(t),
                     bold,
                     italic,
                     strikethrough,
-                    code: false,
+                    code,
                     link_url,
+                    link_title,
                 });
             }
-            NodeValue::SoftBreak | NodeValue::LineBreak => {
-                out.push(PreviewInline {
+            NodeValue::SoftBreak => {
+                out.push(PreviewInline::Text {
                     text: " ".to_string(),
                     bold,
                     italic,
                     strikethrough,
                     code: false,
                     link_url,
+                    link_title,
                 });
             }
+            NodeValue::LineBreak => {
+                out.push(PreviewInline::LineBreak);
+            }
             NodeValue::Code(c) => {
-                out.push(PreviewInline {
+                out.push(PreviewInline::Text {
                     text: c.literal.clone(),
                     bold,
                     italic,
                     strikethrough,
                     code: true,
                     link_url,
+                    link_title,
                 });
             }
             NodeValue::Math(m) => {
-                let formatted = if m.display_math {
-                    format!("$${}$$", m.literal)
-                } else {
-                    format!("${}$", m.literal)
-                };
-                out.push(PreviewInline {
-                    text: formatted,
-                    bold,
-                    italic: true,
-                    strikethrough,
-                    code: true,
-                    link_url,
+                out.push(PreviewInline::Math {
+                    literal: m.literal.clone(),
+                    display_math: m.display_math,
                 });
             }
             NodeValue::HtmlInline(raw) => {
-                out.push(PreviewInline {
-                    text: raw.clone(),
-                    bold,
-                    italic,
-                    strikethrough,
-                    code: false,
-                    link_url,
-                });
+                let trimmed = raw.trim();
+                if trimmed.eq_ignore_ascii_case("<br>")
+                    || trimmed.eq_ignore_ascii_case("<br/>")
+                    || trimmed.eq_ignore_ascii_case("<br />")
+                {
+                    out.push(PreviewInline::LineBreak);
+                }
             }
             NodeValue::Strong => {
                 for c in node.children() {
@@ -3356,7 +3537,9 @@ impl DocumentBuffer {
                         true,
                         italic,
                         strikethrough,
+                        code,
                         link_url.clone(),
+                        link_title.clone(),
                     );
                 }
             }
@@ -3368,16 +3551,32 @@ impl DocumentBuffer {
                         bold,
                         true,
                         strikethrough,
+                        code,
                         link_url.clone(),
+                        link_title.clone(),
                     );
                 }
             }
             NodeValue::Strikethrough => {
                 for c in node.children() {
-                    Self::collect_preview_inlines(c, out, bold, italic, true, link_url.clone());
+                    Self::collect_preview_inlines(
+                        c,
+                        out,
+                        bold,
+                        italic,
+                        true,
+                        code,
+                        link_url.clone(),
+                        link_title.clone(),
+                    );
                 }
             }
             NodeValue::Link(l) => {
+                let next_title = if l.title.is_empty() {
+                    None
+                } else {
+                    Some(l.title.clone())
+                };
                 for c in node.children() {
                     Self::collect_preview_inlines(
                         c,
@@ -3385,9 +3584,32 @@ impl DocumentBuffer {
                         bold,
                         italic,
                         strikethrough,
+                        code,
                         Some(l.url.clone()),
+                        next_title.clone(),
                     );
                 }
+            }
+            NodeValue::Image(img) => {
+                let mut alt_inlines = Vec::new();
+                Self::collect_children_inlines(node, &mut alt_inlines);
+                let alt = PreviewInline::collect_plain_text(&alt_inlines);
+                out.push(PreviewInline::Image {
+                    alt,
+                    url: img.url.clone(),
+                    title: img.title.clone(),
+                });
+            }
+            NodeValue::FootnoteReference(fref) => {
+                out.push(PreviewInline::Text {
+                    text: format!("[{}]", fref.name),
+                    bold,
+                    italic,
+                    strikethrough,
+                    code: false,
+                    link_url,
+                    link_title,
+                });
             }
             _ => {
                 for c in node.children() {
@@ -3397,7 +3619,9 @@ impl DocumentBuffer {
                         bold,
                         italic,
                         strikethrough,
+                        code,
                         link_url.clone(),
+                        link_title.clone(),
                     );
                 }
             }
@@ -4062,7 +4286,7 @@ Paragrafo con **grassetto 🦀👍🏽✨**, *corsivo 👩‍💻*, ~~barrato �
         let blocks = buf.parse_preview_blocks(MarkdownConfig::gfm());
         assert_eq!(blocks.len(), 2);
         if let PreviewBlock::Heading { inlines, .. } = &blocks[0] {
-            let joined: String = inlines.iter().map(|i| i.text.as_str()).collect();
+            let joined = PreviewInline::collect_plain_text(inlines);
             assert_eq!(joined, "Titolo 🚀");
         } else {
             panic!("Expected Heading preview block");
@@ -4415,5 +4639,206 @@ Inline $x + y = z$ and footnote[^1].
         let html_with_fm = render_webview_html(md_fm, cfg_fm);
         assert!(!html_with_fm.contains("title: Specifica"));
         assert!(html_with_fm.contains("<h1>Capitolo</h1>"));
+    }
+
+    #[test]
+    fn test_phase_5_4_rich_preview_blocks_tables_breaks_quotes_lists_and_images() {
+        let md = "\
+# Sezione Principale
+
+Riga uno con hard break\\\nRiga due con icona ![Icona Inline](./assets/icon.png \"Titolo Inline\") e [Guida](https://accent.dev \"Titolo Link\") &copy;.
+
+![Schema Blocco](./assets/diagram.svg \"Titolo Blocco\")
+
+---
+
+> [!IMPORTANT]
+> Primo paragrafo avviso.
+>
+> - Elemento dentro avviso
+>
+> ```rust
+> let ok = true;
+> ```
+
+> Citazione esterna
+> > Citazione annidata
+
+3. [x] Terzo punto completato
+   - Sotto-elemento A
+   - Sotto-elemento B
+4. [ ] Quarto punto aperto
+
+| Sinistra | Centro | Destra | Neutro |
+|:---|:---:|---:|---|
+| **Bold** e *Italic* | ~~Strike~~ e `code` | [Link](https://example.org \"Info\")<br>Seconda riga | ![CellImg](./c.png \"C\") |
+";
+        let buf = DocumentBuffer::from_str_content(md);
+        let blocks = buf.parse_preview_blocks(MarkdownConfig::gfm());
+
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                PreviewBlock::Paragraph { inlines } => Some(inlines),
+                _ => None,
+            })
+            .expect("Expected Paragraph block");
+        assert!(
+            para.iter().any(|i| matches!(i, PreviewInline::LineBreak)),
+            "Hard line break (\\) must produce PreviewInline::LineBreak"
+        );
+        assert!(
+            para.iter().any(|i| matches!(
+                i,
+                PreviewInline::Image { alt, url, title }
+                    if alt == "Icona Inline" && url == "./assets/icon.png" && title == "Titolo Inline"
+            )),
+            "Inline image inside paragraph must produce PreviewInline::Image with alt, url, title"
+        );
+        assert!(
+            para.iter().any(|i| matches!(
+                i,
+                PreviewInline::Text {
+                    text,
+                    link_url: Some(href),
+                    link_title: Some(ltitle),
+                    ..
+                } if text == "Guida" && href == "https://accent.dev" && ltitle == "Titolo Link"
+            )),
+            "Link must preserve both href and title"
+        );
+        assert!(
+            PreviewInline::collect_plain_text(para).contains('©'),
+            "Named entity &copy; must be decoded in PreviewInline text"
+        );
+
+        assert!(
+            blocks.iter().any(|b| matches!(
+                b,
+                PreviewBlock::Image { alt, url, title }
+                    if alt == "Schema Blocco" && url == "./assets/diagram.svg" && title == "Titolo Blocco"
+            )),
+            "Standalone image paragraph must produce PreviewBlock::Image"
+        );
+
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, PreviewBlock::ThematicBreak)),
+            "NodeValue::ThematicBreak must map to PreviewBlock::ThematicBreak"
+        );
+
+        let alert_bq = blocks
+            .iter()
+            .find_map(|b| match b {
+                PreviewBlock::BlockQuote {
+                    alert: Some(AlertKind::Important),
+                    children,
+                } => Some(children),
+                _ => None,
+            })
+            .expect("Expected [!IMPORTANT] BlockQuote");
+        assert_eq!(
+            alert_bq.len(),
+            3,
+            "Alert blockquote must preserve paragraph, list, and code block children"
+        );
+        assert!(matches!(alert_bq[0], PreviewBlock::Paragraph { .. }));
+        assert!(matches!(alert_bq[1], PreviewBlock::List { .. }));
+        assert!(matches!(alert_bq[2], PreviewBlock::CodeBlock { .. }));
+
+        let nested_bq = blocks
+            .iter()
+            .find_map(|b| match b {
+                PreviewBlock::BlockQuote {
+                    alert: None,
+                    children,
+                } => Some(children),
+                _ => None,
+            })
+            .expect("Expected standard outer BlockQuote");
+        assert!(
+            nested_bq
+                .iter()
+                .any(|c| matches!(c, PreviewBlock::BlockQuote { alert: None, .. })),
+            "Outer BlockQuote must preserve nested inner BlockQuote"
+        );
+
+        let ord_list = blocks
+            .iter()
+            .find_map(|b| match b {
+                PreviewBlock::List {
+                    ordered: true,
+                    start,
+                    items,
+                    ..
+                } => Some((*start, items)),
+                _ => None,
+            })
+            .expect("Expected ordered list");
+        assert_eq!(ord_list.0, 3, "Ordered list starting at 3. must preserve start = 3");
+        assert_eq!(ord_list.1.len(), 2);
+        assert_eq!(ord_list.1[0].checked, Some(true));
+        assert_eq!(ord_list.1[1].checked, Some(false));
+        assert!(
+            ord_list.1[0]
+                .children
+                .iter()
+                .any(|c| matches!(c, PreviewBlock::List { ordered: false, .. })),
+            "First list item must contain nested unordered sub-list in children"
+        );
+
+        let (alignments, headers, rows) = blocks
+            .iter()
+            .find_map(|b| match b {
+                PreviewBlock::Table {
+                    alignments,
+                    headers,
+                    rows,
+                } => Some((alignments, headers, rows)),
+                _ => None,
+            })
+            .expect("Expected Table block");
+        assert_eq!(
+            alignments.as_slice(),
+            &[
+                TableAlignment::Left,
+                TableAlignment::Center,
+                TableAlignment::Right,
+                TableAlignment::None,
+            ]
+        );
+        assert_eq!(headers.len(), 4);
+        assert_eq!(rows.len(), 1);
+        let row0 = &rows[0];
+        assert!(row0[0]
+            .iter()
+            .any(|i| matches!(i, PreviewInline::Text { text, bold: true, .. } if text == "Bold")));
+        assert!(row0[0].iter().any(
+            |i| matches!(i, PreviewInline::Text { text, italic: true, .. } if text == "Italic")
+        ));
+        assert!(row0[1].iter().any(|i| matches!(
+            i,
+            PreviewInline::Text {
+                text,
+                strikethrough: true,
+                ..
+            } if text == "Strike"
+        )));
+        assert!(row0[1]
+            .iter()
+            .any(|i| matches!(i, PreviewInline::Text { text, code: true, .. } if text == "code")));
+        assert!(row0[2].iter().any(|i| matches!(
+            i,
+            PreviewInline::Text {
+                link_url: Some(u),
+                link_title: Some(t),
+                ..
+            } if u == "https://example.org" && t == "Info"
+        )));
+        assert!(row0[2].iter().any(|i| matches!(i, PreviewInline::LineBreak)));
+        assert!(row0[3].iter().any(
+            |i| matches!(i, PreviewInline::Image { alt, url, title } if alt == "CellImg" && url == "./c.png" && title == "C")
+        ));
     }
 }
