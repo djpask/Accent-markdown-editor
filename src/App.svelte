@@ -2638,7 +2638,7 @@
               <div><span>{tr('fullscreen_mode')}</span><b>F11</b></div>
             </div>
           {:else}
-            <p style="margin: 0 0 8px 0; font-weight: 700;">Accent Markdown Editor v0.8.26</p>
+            <p style="margin: 0 0 8px 0; font-weight: 700;">Accent Markdown Editor v0.8.28</p>
             <p style="margin: 0; color: var(--fg-muted);">
               Rust Backend (L1–L4) • Tauri v2 • Svelte 5 • CodeMirror 6 • Offline KaTeX &amp; Mermaid
             </p>
