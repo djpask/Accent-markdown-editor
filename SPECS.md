@@ -92,7 +92,7 @@
   - [x] **Phase 5.2 — Caret-Aware Live Table Rendering (`§4.10`):**
     - Implement a `StateField<DecorationSet>` reading Lezer `Table` AST nodes to render a themed `TableWidget` (`Decoration.replace({ widget, block: true })`) when the selection is outside `[table.from, table.to]`, supporting `:---` / `:---:` / `---:` alignments, escaped pipes `\|`, inline cell formatting, header styling (`tags.heading`), and click-to-place-caret.
     - Suspend inline delimiter collapsing on raw table lines when the caret enters a table so monospace `|` columns stay aligned.
-  - [ ] **Phase 5.3 — AST-Driven *View-while-typing* & Interactive Task Lists (`§5.3`):**
+  - [x] **Phase 5.3 — AST-Driven *View-while-typing* & Interactive Task Lists (`§5.3`):**
     - Migrate `buildCaretAwareDecorations` from per-line regexes and `isOccupied` to `syntaxTree(state)` traversal, fixing backslash escapes (`§6.1`), nested emphasis/strikethrough (`§6.4`–`§6.5`), multi-backtick code spans (`§6.3`), indented code blocks (`§4.4`), HTML blocks (`§4.6`), balanced-parenthesis & reference links (`§6.6`), thematic breaks (`§4.1`), Setext headings (`§4.3`), and clickable task checkboxes (`§5.3`).
   - [ ] **Phase 5.4 — Local Relative Images (`§6.7`) & Rich AST Exporters:**
     - Resolve relative local image paths against `current_file_path` via Tauri's `asset:` protocol in Preview/Editor and embed local images in PDF/DOCX/ODT/EPUB/HTML exports.

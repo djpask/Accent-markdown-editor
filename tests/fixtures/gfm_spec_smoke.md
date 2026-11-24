@@ -317,6 +317,26 @@ e questa è la seconda riga separata da un singolo `\n` (in HTML diventa uno spa
 
 ---
 
+## Appendice Estensioni Modulari GFM (Callouts, KaTeX & Mermaid)
+
+> [!NOTE]
+> Callout informativo GFM (`extensions.alerts`): verifica barra laterale tematica e badge `Note` in *Anteprima in-line •* e nel pannello di anteprima.
+
+> [!WARNING]
+> Callout di avviso con formula inline $E = mc^2$, backtick math $`a^2 + b^2 = c^2`$ e collegamento ad ancora interna [Torna a §4.1](#41-thematic-breaks).
+
+$$
+\sum_{k=1}^{n} k = \frac{n(n+1)}{2}
+$$
+
+```mermaid
+graph LR
+  GFM["GFM 0.29-gfm"] --> AST["AST Live Preview"]
+  AST --> EXP["Rust Exporters"]
+```
+
+---
+
 #### Appendice §6.11-bis — Sonda finale `<plaintext>`
 
 Se il filtro GFM `§6.11` è attivo, la riga seguente appare come testo `&lt;plaintext&gt;...` normale; se non è filtrato, il parser HTML5 entra in modalità raw plaintext fino a fine documento:

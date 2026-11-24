@@ -4,7 +4,13 @@ import { renderMermaidDiagram } from './ipc';
 import type { ThemeMode } from './types';
 
 const mermaidSvgCache = new Map<string, string>();
-const mermaidInFlight = new Set<string>();
+const mermaidPendingCallbacks = new Map<string, Set<(svg: string) => void>>();
+
+export function getCachedMermaidSvg(code: string, theme: ThemeMode): string | null {
+  const normalized = code.trim();
+  if (!normalized) return null;
+  return mermaidSvgCache.get(`${theme}::${normalized}`) ?? null;
+}
 
 export function renderLatexToHtml(latex: string, displayMode: boolean): string {
   try {
@@ -51,17 +57,29 @@ export function getOrFetchMermaidSvg(
   if (cached) {
     return cached;
   }
-  if (!mermaidInFlight.has(key)) {
-    mermaidInFlight.add(key);
+  let callbacks = mermaidPendingCallbacks.get(key);
+  if (!callbacks) {
+    callbacks = new Set();
+    if (onLoaded) {
+      callbacks.add(onLoaded);
+    }
+    mermaidPendingCallbacks.set(key, callbacks);
     void renderMermaidDiagram(normalized, theme)
       .then((res) => {
         mermaidSvgCache.set(key, res.svg);
-        mermaidInFlight.delete(key);
-        onLoaded?.(res.svg);
+        const registered = mermaidPendingCallbacks.get(key);
+        mermaidPendingCallbacks.delete(key);
+        if (registered) {
+          for (const cb of registered) {
+            cb(res.svg);
+          }
+        }
       })
       .catch(() => {
-        mermaidInFlight.delete(key);
+        mermaidPendingCallbacks.delete(key);
       });
+  } else if (onLoaded) {
+    callbacks.add(onLoaded);
   }
   return null;
 }

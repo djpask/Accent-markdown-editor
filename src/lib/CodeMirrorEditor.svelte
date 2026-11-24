@@ -3,10 +3,6 @@
   import {
     EditorState,
     Compartment,
-    Facet,
-    StateEffect,
-    StateField,
-    type Extension,
     type Range,
   } from '@codemirror/state';
   import {
@@ -18,102 +14,22 @@
     type DecorationSet,
     ViewPlugin,
     type ViewUpdate,
-    WidgetType,
   } from '@codemirror/view';
   import { defaultKeymap } from '@codemirror/commands';
-  import { markdown, commonmarkLanguage } from '@codemirror/lang-markdown';
   import {
     syntaxHighlighting,
-    syntaxTree,
     HighlightStyle,
-    StreamLanguage,
-    type Language,
-    type LanguageSupport,
   } from '@codemirror/language';
-  import { jsonLanguage } from '@codemirror/lang-json';
-  import { rustLanguage } from '@codemirror/lang-rust';
-  import { pythonLanguage } from '@codemirror/lang-python';
-  import { yamlLanguage, yamlFrontmatter } from '@codemirror/lang-yaml';
-  import { htmlLanguage } from '@codemirror/lang-html';
-  import { cssLanguage } from '@codemirror/lang-css';
+  import { tags } from '@lezer/highlight';
   import {
-    javascriptLanguage,
-    typescriptLanguage,
-    jsxLanguage,
-    tsxLanguage,
-  } from '@codemirror/lang-javascript';
-  import { shell } from '@codemirror/legacy-modes/mode/shell';
-  import { toml } from '@codemirror/legacy-modes/mode/toml';
-  import { styleTags, tags, Tag } from '@lezer/highlight';
-  import { GFM, type MarkdownExtension } from '@lezer/markdown';
-  import {
-    appendSafeGfmTableCellDom,
-    extractGfmTablesFromState,
-    type ParsedGfmTable,
-    type ParsedTableCell,
-    type TableColumnAlign,
-  } from './gfmTable';
-  import { openExternalUrl } from './ipc';
-  import { getOrFetchMermaidSvg, renderLatexToHtml } from './mathAndMermaid';
+    buildMarkdownLanguageSupport,
+    codeBlockTextTag,
+    createLivePreviewExtensions,
+    inlineCodeTag,
+    listMarkerTag,
+  } from './livePreviewAst';
   import { charToUtf16Offset, utf16ToCharOffset } from './textOffsets';
   import type { MarkdownConfig, ThemeMode } from './types';
-
-  const shellLanguage = StreamLanguage.define(shell);
-  const tomlLanguage = StreamLanguage.define(toml);
-  const listMarkerTag = Tag.define();
-  const inlineCodeTag = Tag.define();
-
-  function resolveCodeLanguage(info: string): Language | null {
-    const lang = info.trim().toLowerCase().split(/\s+/)[0];
-    switch (lang) {
-      case 'json':
-      case 'jsonc':
-      case 'json5':
-        return jsonLanguage;
-      case 'rust':
-      case 'rs':
-        return rustLanguage;
-      case 'bash':
-      case 'sh':
-      case 'shell':
-      case 'zsh':
-      case 'console':
-        return shellLanguage;
-      case 'python':
-      case 'py':
-        return pythonLanguage;
-      case 'toml':
-      case 'ini':
-        return tomlLanguage;
-      case 'yaml':
-      case 'yml':
-        return yamlLanguage;
-      case 'html':
-      case 'htm':
-      case 'xml':
-      case 'svg':
-        return htmlLanguage;
-      case 'css':
-      case 'scss':
-      case 'less':
-        return cssLanguage;
-      case 'js':
-      case 'javascript':
-      case 'mjs':
-      case 'cjs':
-        return javascriptLanguage;
-      case 'ts':
-      case 'typescript':
-      case 'mts':
-        return typescriptLanguage;
-      case 'jsx':
-        return jsxLanguage;
-      case 'tsx':
-        return tsxLanguage;
-      default:
-        return null;
-    }
-  }
 
   interface Props {
     activeTabId: number;
@@ -174,983 +90,10 @@
   const readOnlyCompartment = new Compartment();
   const livePreviewCompartment = new Compartment();
   const searchHighlightCompartment = new Compartment();
-  const refreshLivePreviewEffect = StateEffect.define<boolean>();
-
-  const baseStyleExtension: MarkdownExtension = {
-    props: [
-      styleTags({
-        'OrderedList/... BulletList/...': tags.content,
-        ListMark: listMarkerTag,
-        CodeText: tags.content,
-        CodeInfo: tags.processingInstruction,
-        InlineCode: inlineCodeTag,
-        'InlineCode/...': inlineCodeTag,
-      }),
-    ],
-  };
-
-  function buildMarkdownLanguageSupport(cfg: MarkdownConfig): LanguageSupport {
-    if (cfg.base === 'CommonMark') {
-      return markdown({
-        base: commonmarkLanguage,
-        codeLanguages: resolveCodeLanguage,
-        extensions: [baseStyleExtension],
-      });
-    }
-    // GFM 0.29-gfm: commonmarkLanguage + GFM (Table, TaskList, Strikethrough, Autolink),
-    // explicitly excluding Pandoc Subscript (~...~) so single-tilde never conflicts with GFM §6.5.
-    const gfmSupport = markdown({
-      base: commonmarkLanguage,
-      codeLanguages: resolveCodeLanguage,
-      extensions: [GFM, baseStyleExtension],
-    });
-    return cfg.extensions.frontmatter
-      ? yamlFrontmatter({ content: gfmSupport })
-      : gfmSupport;
-  }
-
-  class KatexMathWidget extends WidgetType {
-    latex: string;
-    displayMode: boolean;
-    targetPos: number;
-
-    constructor(latex: string, displayMode: boolean, targetPos: number) {
-      super();
-      this.latex = latex;
-      this.displayMode = displayMode;
-      this.targetPos = targetPos;
-    }
-
-    eq(other: KatexMathWidget): boolean {
-      return (
-        this.latex === other.latex &&
-        this.displayMode === other.displayMode &&
-        this.targetPos === other.targetPos
-      );
-    }
-
-    toDOM(view: EditorView): HTMLElement {
-      const el = document.createElement(this.displayMode ? 'div' : 'span');
-      el.className = this.displayMode ? 'cm-katex-display-widget' : 'cm-katex-inline-widget';
-      el.dataset.testid = this.displayMode ? 'cm-katex-display' : 'cm-katex-inline';
-      el.innerHTML = renderLatexToHtml(this.latex, this.displayMode);
-      el.addEventListener('mousedown', (e) => {
-        e.preventDefault();
-        view.dispatch({
-          selection: { anchor: this.targetPos, head: this.targetPos },
-        });
-        view.focus();
-      });
-      return el;
-    }
-
-    ignoreEvent(): boolean {
-      return false;
-    }
-  }
-
-  class MermaidSvgWidget extends WidgetType {
-    code: string;
-    theme: ThemeMode;
-    targetPos: number;
-    svgHtml: string | null;
-
-    constructor(code: string, theme: ThemeMode, targetPos: number, svgHtml: string | null) {
-      super();
-      this.code = code;
-      this.theme = theme;
-      this.targetPos = targetPos;
-      this.svgHtml = svgHtml;
-    }
-
-    eq(other: MermaidSvgWidget): boolean {
-      return (
-        this.code === other.code &&
-        this.theme === other.theme &&
-        this.targetPos === other.targetPos &&
-        this.svgHtml === other.svgHtml
-      );
-    }
-
-    toDOM(view: EditorView): HTMLElement {
-      const wrap = document.createElement('div');
-      wrap.className = 'cm-mermaid-widget';
-      wrap.dataset.testid = 'cm-mermaid-widget';
-      wrap.title = 'Clicca per modificare il diagramma Mermaid';
-
-      const cachedSvg =
-        this.svgHtml ??
-        getOrFetchMermaidSvg(this.code, this.theme, () => {
-          queueMicrotask(() => {
-            view.dispatch({ effects: refreshLivePreviewEffect.of(true) });
-          });
-        });
-
-      if (cachedSvg) {
-        wrap.innerHTML = cachedSvg;
-      } else {
-        wrap.textContent = 'Rendering Mermaid diagram...';
-      }
-
-      wrap.addEventListener('mousedown', (e) => {
-        e.preventDefault();
-        view.dispatch({
-          selection: { anchor: this.targetPos, head: this.targetPos },
-        });
-        view.focus();
-      });
-      return wrap;
-    }
-
-    ignoreEvent(): boolean {
-      return false;
-    }
-  }
-
-  class TaskCheckboxWidget extends WidgetType {
-    checked: boolean;
-    targetPos: number;
-
-    constructor(checked: boolean, targetPos: number) {
-      super();
-      this.checked = checked;
-      this.targetPos = targetPos;
-    }
-
-    eq(other: TaskCheckboxWidget): boolean {
-      return this.checked === other.checked && this.targetPos === other.targetPos;
-    }
-
-    toDOM(view: EditorView): HTMLElement {
-      const span = document.createElement('span');
-      span.className = this.checked ? 'cm-task-checkbox is-checked' : 'cm-task-checkbox';
-      span.textContent = this.checked ? '☑ ' : '☐ ';
-      span.addEventListener('mousedown', (e) => {
-        e.preventDefault();
-        view.dispatch({
-          selection: { anchor: this.targetPos, head: this.targetPos },
-        });
-        view.focus();
-      });
-      return span;
-    }
-  }
-
-  class TableWidget extends WidgetType {
-    alignments: TableColumnAlign[];
-    headers: ParsedTableCell[];
-    rows: ParsedTableCell[][];
-    mathEnabled: boolean;
-    blockquoteDepth: number;
-
-    constructor(
-      alignments: TableColumnAlign[],
-      headers: ParsedTableCell[],
-      rows: ParsedTableCell[][],
-      mathEnabled: boolean,
-      blockquoteDepth: number
-    ) {
-      super();
-      this.alignments = alignments;
-      this.headers = headers;
-      this.rows = rows;
-      this.mathEnabled = mathEnabled;
-      this.blockquoteDepth = blockquoteDepth;
-    }
-
-    eq(other: TableWidget): boolean {
-      if (
-        this.mathEnabled !== other.mathEnabled ||
-        this.blockquoteDepth !== other.blockquoteDepth ||
-        this.alignments.length !== other.alignments.length ||
-        this.headers.length !== other.headers.length ||
-        this.rows.length !== other.rows.length
-      ) {
-        return false;
-      }
-      for (let c = 0; c < this.alignments.length; c++) {
-        if (this.alignments[c] !== other.alignments[c]) {
-          return false;
-        }
-      }
-      for (let c = 0; c < this.headers.length; c++) {
-        const a = this.headers[c];
-        const b = other.headers[c];
-        if (a.rawText !== b.rawText || a.relOffset !== b.relOffset) {
-          return false;
-        }
-      }
-      for (let r = 0; r < this.rows.length; r++) {
-        const rowA = this.rows[r];
-        const rowB = other.rows[r];
-        if (rowA.length !== rowB.length) {
-          return false;
-        }
-        for (let c = 0; c < rowA.length; c++) {
-          if (
-            rowA[c].rawText !== rowB[c].rawText ||
-            rowA[c].relOffset !== rowB[c].relOffset
-          ) {
-            return false;
-          }
-        }
-      }
-      return true;
-    }
-
-    toDOM(view: EditorView): HTMLElement {
-      const wrap = document.createElement('div');
-      wrap.className =
-        this.blockquoteDepth > 0
-          ? 'cm-table-widget is-in-blockquote'
-          : 'cm-table-widget';
-      wrap.dataset.testid = 'cm-table-widget';
-
-      const scrollWrap = document.createElement('div');
-      scrollWrap.className = 'cm-table-scroll';
-
-      const tableEl = document.createElement('table');
-      tableEl.className = 'cm-table-grid';
-
-      const thead = document.createElement('thead');
-      const headerTr = document.createElement('tr');
-      for (let c = 0; c < this.headers.length; c++) {
-        const cell = this.headers[c];
-        const th = document.createElement('th');
-        th.scope = 'col';
-        const align = this.alignments[c];
-        if (align) {
-          th.dataset.align = align;
-        }
-        th.dataset.cellRelOffset = String(cell.relOffset);
-        th.dataset.colIndex = String(c);
-        appendSafeGfmTableCellDom(cell.rawText, th, this.mathEnabled);
-        headerTr.appendChild(th);
-      }
-      thead.appendChild(headerTr);
-      tableEl.appendChild(thead);
-
-      if (this.rows.length > 0) {
-        const tbody = document.createElement('tbody');
-        for (let r = 0; r < this.rows.length; r++) {
-          const rowCells = this.rows[r];
-          const tr = document.createElement('tr');
-          for (let c = 0; c < rowCells.length; c++) {
-            const cell = rowCells[c];
-            const td = document.createElement('td');
-            const align = this.alignments[c];
-            if (align) {
-              td.dataset.align = align;
-            }
-            td.dataset.cellRelOffset = String(cell.relOffset);
-            td.dataset.rowIndex = String(r);
-            td.dataset.colIndex = String(c);
-            appendSafeGfmTableCellDom(cell.rawText, td, this.mathEnabled);
-            tr.appendChild(td);
-          }
-          tbody.appendChild(tr);
-        }
-        tableEl.appendChild(tbody);
-      }
-
-      scrollWrap.appendChild(tableEl);
-      wrap.appendChild(scrollWrap);
-
-      wrap.addEventListener('mousedown', (e: MouseEvent) => {
-        if (e.button !== 0) return;
-
-        // Allow native horizontal scrollbar dragging on wide tables without unfolding
-        if (
-          e.target === scrollWrap &&
-          (e.offsetY > scrollWrap.clientHeight || e.offsetX > scrollWrap.clientWidth)
-        ) {
-          return;
-        }
-
-        const anchor = (e.target as HTMLElement | null)?.closest(
-          'a.cm-table-link'
-        ) as HTMLAnchorElement | null;
-        if (anchor && (e.ctrlKey || e.metaKey)) {
-          e.preventDefault();
-          e.stopPropagation();
-          const href = anchor.getAttribute('href')?.trim() ?? '';
-          if (href.startsWith('https://') || href.startsWith('http://')) {
-            void openExternalUrl(href).catch((err) => {
-              console.error('openExternalUrl failed:', err);
-            });
-          }
-          return;
-        }
-
-        e.preventDefault();
-        e.stopPropagation();
-        const widgetDocStart = view.posAtDOM(wrap, 0);
-        const cellEl = (e.target as HTMLElement | null)?.closest(
-          'th, td'
-        ) as HTMLElement | null;
-        const relAttr = cellEl?.dataset.cellRelOffset;
-        const relOffset = relAttr !== undefined ? Number.parseInt(relAttr, 10) : 0;
-        const rawPos = widgetDocStart + (Number.isFinite(relOffset) ? relOffset : 0);
-        const targetPos = Math.max(0, Math.min(rawPos, view.state.doc.length));
-        view.dispatch({
-          selection: { anchor: targetPos, head: targetPos },
-        });
-        view.focus();
-      });
-
-      wrap.addEventListener('click', (e: MouseEvent) => {
-        const anchor = (e.target as HTMLElement | null)?.closest('a');
-        if (anchor) {
-          e.preventDefault();
-          e.stopPropagation();
-        }
-      });
-
-      return wrap;
-    }
-
-    ignoreEvent(): boolean {
-      return true;
-    }
-  }
-
-  interface LivePreviewConfigState {
-    enabled: boolean;
-    theme: ThemeMode;
-    markdownConfig: MarkdownConfig;
-  }
-
-  const livePreviewConfigFacet = Facet.define<
-    LivePreviewConfigState,
-    LivePreviewConfigState
-  >({
-    combine: (values) =>
-      values[0] ?? {
-        enabled: true,
-        theme: 'Sepia',
-        markdownConfig: {
-          base: 'Gfm',
-          extensions: {
-            math: true,
-            mermaid: true,
-            alerts: true,
-            footnotes: false,
-            frontmatter: false,
-          },
-        },
-      },
-  });
-
-  function buildTableBlockDecorations(state: EditorState): DecorationSet {
-    const liveCfg = state.facet(livePreviewConfigFacet);
-    if (!liveCfg.enabled || liveCfg.markdownConfig.base !== 'Gfm') {
-      return Decoration.none;
-    }
-
-    const tables = extractGfmTablesFromState(state);
-    if (tables.length === 0) {
-      return Decoration.none;
-    }
-
-    const selRanges = state.selection.ranges;
-    const mathEnabled = liveCfg.markdownConfig.extensions.math;
-    const decoRanges: Range<Decoration>[] = [];
-
-    for (const tbl of tables) {
-      const caretInsideTable = selRanges.some(
-        (r) => r.from <= tbl.to && r.to >= tbl.from
-      );
-      if (!caretInsideTable && tbl.to > tbl.from) {
-        decoRanges.push(
-          Decoration.replace({
-            widget: new TableWidget(
-              tbl.alignments,
-              tbl.headers,
-              tbl.rows,
-              mathEnabled,
-              tbl.blockquoteDepth
-            ),
-            block: true,
-          }).range(tbl.from, tbl.to)
-        );
-      }
-    }
-
-    return decoRanges.length > 0 ? Decoration.set(decoRanges, true) : Decoration.none;
-  }
-
-  const tableLivePreviewField = StateField.define<DecorationSet>({
-    create(state) {
-      return buildTableBlockDecorations(state);
-    },
-    update(decorations, tr) {
-      if (
-        tr.docChanged ||
-        tr.selection !== undefined ||
-        tr.reconfigured ||
-        syntaxTree(tr.startState) !== syntaxTree(tr.state)
-      ) {
-        return buildTableBlockDecorations(tr.state);
-      }
-      return decorations;
-    },
-    provide: (f) => EditorView.decorations.from(f),
-  });
-
-  function buildCaretAwareDecorations(
-    view: EditorView,
-    enabled: boolean,
-    currentTheme: ThemeMode,
-    cfg: MarkdownConfig
-  ): DecorationSet {
-    const state = view.state;
-    const doc = state.doc;
-    const sel = state.selection.main;
-    const selFrom = sel.from;
-    const selTo = sel.to;
-    const selStartLine = doc.lineAt(selFrom).number;
-    const selEndLine = doc.lineAt(selTo).number;
-
-    const isGfm = cfg.base === 'Gfm';
-    const mathEnabled = isGfm && cfg.extensions.math;
-    const mermaidEnabled = isGfm && cfg.extensions.mermaid;
-    const alertsEnabled = isGfm && cfg.extensions.alerts;
-    const frontmatterEnabled = isGfm && cfg.extensions.frontmatter;
-
-    const gfmTables = enabled && isGfm ? extractGfmTablesFromState(state) : [];
-    const tableByStartLine = new Map<number, ParsedGfmTable>();
-    for (const tbl of gfmTables) {
-      tableByStartLine.set(tbl.startLineNum, tbl);
-    }
-
-    const isCaretInSpan = (from: number, to: number): boolean => {
-      return selFrom <= to && selTo >= from;
-    };
-
-    const isCaretOnLines = (l1: number, l2: number): boolean => {
-      return selStartLine <= l2 && selEndLine >= l1;
-    };
-
-    const ranges: Range<Decoration>[] = [];
-    const totalLines = doc.lines;
-    let lineNum = 1;
-
-    // 0. Leading YAML Frontmatter (`--- ... ---`) when `frontmatterEnabled` is active
-    if (frontmatterEnabled && totalLines >= 2 && doc.line(1).text.trim() === '---') {
-      let fmEnd = -1;
-      for (let scan = 2; scan <= totalLines; scan++) {
-        const st = doc.line(scan).text.trim();
-        if (st === '---' || st === '...') {
-          fmEnd = scan;
-          break;
-        }
-      }
-      if (fmEnd > 1) {
-        for (let ln = 1; ln <= fmEnd; ln++) {
-          const l = doc.line(ln);
-          const classes = ['cm-live-codeblock-line'];
-          if (ln === 1) classes.push('cm-live-codeblock-first');
-          if (ln === fmEnd) classes.push('cm-live-codeblock-last');
-          ranges.push(
-            Decoration.line({
-              class: classes.join(' '),
-              ...(ln === 1 ? { attributes: { 'data-code-lang': 'yaml' } } : {}),
-            }).range(l.from)
-          );
-        }
-        lineNum = fmEnd + 1;
-      }
-    }
-
-    while (lineNum <= totalLines) {
-      const activeTable = tableByStartLine.get(lineNum);
-      if (activeTable) {
-        const caretInsideTable = state.selection.ranges.some(
-          (r) => r.from <= activeTable.to && r.to >= activeTable.from
-        );
-        if (caretInsideTable) {
-          // Caret is inside [table.from, table.to]: apply monospace table source line class
-          // and suspend inline delimiter collapsing on all rows of this table so `|` stays aligned.
-          for (let ln = activeTable.startLineNum; ln <= activeTable.endLineNum; ln++) {
-            const l = doc.line(ln);
-            const classes = ['cm-live-table-source-line'];
-            if (ln === activeTable.startLineNum) {
-              classes.push('cm-live-table-source-first');
-            }
-            if (ln === activeTable.headerLineNum) {
-              classes.push('cm-live-table-source-header');
-            }
-            if (ln === activeTable.delimiterLineNum) {
-              classes.push('cm-live-table-source-delimiter');
-            }
-            if (ln === activeTable.endLineNum) {
-              classes.push('cm-live-table-source-last');
-            }
-            ranges.push(
-              Decoration.line({ class: classes.join(' ') }).range(l.from)
-            );
-          }
-        }
-        lineNum = activeTable.endLineNum + 1;
-        continue;
-      }
-
-      const line = doc.line(lineNum);
-      const text = line.text;
-      const trimmed = text.trimStart();
-
-      // 1. Check for Fenced Code Block (``` or ~~~)
-      const fenceMatch = trimmed.match(/^(`{3,}|~{3,})\s*([^\s`~]*)/);
-      if (fenceMatch) {
-        const fenceChars = fenceMatch[1];
-        const fenceLang = (fenceMatch[2] || '').toLowerCase();
-        const startLineNum = lineNum;
-        let endLineNum = lineNum;
-        const bodyLines: string[] = [];
-
-        let scan = lineNum + 1;
-        while (scan <= totalLines) {
-          const sLine = doc.line(scan);
-          if (sLine.text.trimStart().startsWith(fenceChars)) {
-            endLineNum = scan;
-            break;
-          }
-          bodyLines.push(sLine.text);
-          scan++;
-        }
-
-        if (endLineNum > startLineNum) {
-          const caretInsideBlock = isCaretOnLines(startLineNum, endLineNum);
-
-          if (enabled && mermaidEnabled && fenceLang === 'mermaid' && !caretInsideBlock) {
-            const mermaidCode = bodyLines.join('\n');
-            const firstLine = doc.line(startLineNum);
-            const cachedSvg = getOrFetchMermaidSvg(mermaidCode, currentTheme, () => {
-              queueMicrotask(() => {
-                view.dispatch({ effects: refreshLivePreviewEffect.of(true) });
-              });
-            });
-            if (firstLine.to > firstLine.from) {
-              ranges.push(
-                Decoration.replace({
-                  widget: new MermaidSvgWidget(
-                    mermaidCode,
-                    currentTheme,
-                    firstLine.from,
-                    cachedSvg
-                  ),
-                }).range(firstLine.from, firstLine.to)
-              );
-            } else {
-              ranges.push(
-                Decoration.widget({
-                  widget: new MermaidSvgWidget(
-                    mermaidCode,
-                    currentTheme,
-                    firstLine.from,
-                    cachedSvg
-                  ),
-                  side: -1,
-                }).range(firstLine.from)
-              );
-            }
-            for (let ln = startLineNum + 1; ln <= endLineNum; ln++) {
-              const l = doc.line(ln);
-              ranges.push(
-                Decoration.line({ class: 'cm-live-mermaid-hidden-line' }).range(l.from)
-              );
-              if (l.to > l.from) {
-                ranges.push(Decoration.replace({}).range(l.from, l.to));
-              }
-            }
-          } else if (enabled && mathEnabled && fenceLang === 'math' && !caretInsideBlock) {
-            const mathCode = bodyLines.join('\n');
-            const firstLine = doc.line(startLineNum);
-            if (firstLine.to > firstLine.from) {
-              ranges.push(
-                Decoration.replace({
-                  widget: new KatexMathWidget(mathCode, true, firstLine.from),
-                }).range(firstLine.from, firstLine.to)
-              );
-            } else {
-              ranges.push(
-                Decoration.widget({
-                  widget: new KatexMathWidget(mathCode, true, firstLine.from),
-                  side: -1,
-                }).range(firstLine.from)
-              );
-            }
-            for (let ln = startLineNum + 1; ln <= endLineNum; ln++) {
-              const l = doc.line(ln);
-              ranges.push(
-                Decoration.line({ class: 'cm-live-mermaid-hidden-line' }).range(l.from)
-              );
-              if (l.to > l.from) {
-                ranges.push(Decoration.replace({}).range(l.from, l.to));
-              }
-            }
-          } else {
-            for (let ln = startLineNum; ln <= endLineNum; ln++) {
-              const l = doc.line(ln);
-              const isFirst = ln === startLineNum;
-              const isLast = ln === endLineNum;
-              const isFenceBoundary = isFirst || isLast;
-              const classes = ['cm-live-codeblock-line'];
-              if (isFirst) classes.push('cm-live-codeblock-first');
-              if (isLast) classes.push('cm-live-codeblock-last');
-
-              const attrs: Record<string, string> | undefined =
-                isFirst && fenceLang ? { 'data-code-lang': fenceLang } : undefined;
-
-              ranges.push(
-                Decoration.line({
-                  class: classes.join(' '),
-                  ...(attrs ? { attributes: attrs } : {}),
-                }).range(l.from)
-              );
-
-              if (enabled && isFenceBoundary && !caretInsideBlock && l.to > l.from) {
-                ranges.push(
-                  Decoration.mark({ class: 'cm-live-fence-muted' }).range(l.from, l.to)
-                );
-              }
-            }
-          }
-
-          lineNum = endLineNum + 1;
-          continue;
-        }
-      }
-
-      if (!enabled) {
-        lineNum++;
-        continue;
-      }
-
-      // 2. Check for multi-line Display Math Block ($$ ... $$) — gated on `mathEnabled`
-      if (
-        mathEnabled &&
-        trimmed.startsWith('$$') &&
-        (trimmed === '$$' || !trimmed.slice(2).includes('$$'))
-      ) {
-        const startLineNum = lineNum;
-        let endLineNum = lineNum;
-        const mathLines: string[] = [];
-        const firstRest = trimmed.slice(2).trim();
-        if (firstRest) mathLines.push(firstRest);
-
-        let scan = lineNum + 1;
-        while (scan <= totalLines) {
-          const sLine = doc.line(scan);
-          const sTrim = sLine.text.trim();
-          if (sTrim.endsWith('$$')) {
-            const beforeEnd = sTrim.slice(0, -2).trim();
-            if (beforeEnd) mathLines.push(beforeEnd);
-            endLineNum = scan;
-            break;
-          }
-          mathLines.push(sLine.text);
-          scan++;
-        }
-
-        if (endLineNum > startLineNum) {
-          const caretInsideMath = isCaretOnLines(startLineNum, endLineNum);
-          if (!caretInsideMath) {
-            const firstLine = doc.line(startLineNum);
-            if (firstLine.to > firstLine.from) {
-              ranges.push(
-                Decoration.replace({
-                  widget: new KatexMathWidget(mathLines.join('\n'), true, firstLine.from),
-                }).range(firstLine.from, firstLine.to)
-              );
-            } else {
-              ranges.push(
-                Decoration.widget({
-                  widget: new KatexMathWidget(mathLines.join('\n'), true, firstLine.from),
-                  side: -1,
-                }).range(firstLine.from)
-              );
-            }
-            for (let ln = startLineNum + 1; ln <= endLineNum; ln++) {
-              const l = doc.line(ln);
-              ranges.push(
-                Decoration.line({ class: 'cm-live-mermaid-hidden-line' }).range(l.from)
-              );
-              if (l.to > l.from) {
-                ranges.push(Decoration.replace({}).range(l.from, l.to));
-              }
-            }
-          }
-          lineNum = endLineNum + 1;
-          continue;
-        }
-      }
-
-      // 3. Single-line Display Math ($$...$$) — gated on `mathEnabled`
-      if (mathEnabled) {
-        const singleDisplayMath = trimmed.match(/^\$\$(.+)\$\$$/);
-        if (singleDisplayMath && !isCaretOnLines(lineNum, lineNum)) {
-          ranges.push(
-            Decoration.replace({
-              widget: new KatexMathWidget(singleDisplayMath[1], true, line.from),
-            }).range(line.from, line.to)
-          );
-          lineNum++;
-          continue;
-        }
-      }
-
-      // 4. ATX Headings (# .. ######)
-      const headingMatch = text.match(/^(\s*#{1,6}\s+)(.+)$/);
-      if (headingMatch) {
-        const prefix = headingMatch[1];
-        const level = prefix.trim().length;
-        ranges.push(
-          Decoration.line({
-            class: `cm-live-heading-line cm-live-h${level}`,
-          }).range(line.from)
-        );
-        if (!isCaretOnLines(lineNum, lineNum)) {
-          ranges.push(
-            Decoration.replace({}).range(line.from, line.from + prefix.length)
-          );
-        }
-      }
-
-      // 5. Blockquotes (> ) & GFM Alerts (> [!NOTE] etc. when `alertsEnabled`)
-      const quoteMatch = text.match(/^(\s*>\s?)/);
-      if (quoteMatch) {
-        const afterQuote = text.slice(quoteMatch[1].length).trimStart();
-        const alertMatch = alertsEnabled
-          ? afterQuote.match(/^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]/i)
-          : null;
-        const quoteLineClass = alertMatch
-          ? `cm-live-blockquote-line cm-live-alert-line cm-live-alert-${alertMatch[1].toLowerCase()}`
-          : 'cm-live-blockquote-line';
-        ranges.push(
-          Decoration.line({ class: quoteLineClass }).range(line.from)
-        );
-        if (!isCaretOnLines(lineNum, lineNum)) {
-          ranges.push(
-            Decoration.replace({}).range(line.from, line.from + quoteMatch[1].length)
-          );
-        }
-      }
-
-      // 6. Task Lists (- [ ] / - [x], GFM §5.3 only) & Bullet/Ordered List Markers
-      const taskMatch = isGfm ? text.match(/^(\s*[-*+]\s+\[([ xX])\]\s+)/) : null;
-      if (taskMatch && !isCaretOnLines(lineNum, lineNum)) {
-        const prefixLen = taskMatch[1].length;
-        const checked = taskMatch[2].toLowerCase() === 'x';
-        ranges.push(
-          Decoration.replace({
-            widget: new TaskCheckboxWidget(checked, line.from),
-          }).range(line.from, line.from + prefixLen)
-        );
-      } else {
-        const listMarkerMatch = text.match(/^(\s*(?:[-*+]|\d+[.)]))(\s+)/);
-        if (listMarkerMatch) {
-          ranges.push(
-            Decoration.mark({ class: 'cm-live-list-marker' }).range(
-              line.from,
-              line.from + listMarkerMatch[1].length
-            )
-          );
-        }
-      }
-
-      // 7. Inline constructs (non-overlapping intervals on this line)
-      const occupied: Array<[number, number]> = [];
-      const isOccupied = (a: number, b: number) =>
-        occupied.some(([x, y]) => a < y && b > x);
-      const markOccupied = (a: number, b: number) => {
-        occupied.push([a, b]);
-      };
-
-      // 7a. Inline Code (`code`) — plus backtick math ($`...`$) when `mathEnabled`
-      if (mathEnabled) {
-        for (const m of text.matchAll(/\$`([^`\n]+)`\$/g)) {
-          if (m.index === undefined) continue;
-          const from = line.from + m.index;
-          const to = from + m[0].length;
-          if (isOccupied(from, to)) continue;
-          markOccupied(from, to);
-          if (!isCaretInSpan(from, to)) {
-            ranges.push(
-              Decoration.replace({
-                widget: new KatexMathWidget(m[1], false, from),
-              }).range(from, to)
-            );
-          }
-        }
-      }
-
-      for (const m of text.matchAll(/`([^`\n]+)`/g)) {
-        if (m.index === undefined) continue;
-        const from = line.from + m.index;
-        const to = from + m[0].length;
-        if (isOccupied(from, to)) continue;
-        markOccupied(from, to);
-        if (!isCaretInSpan(from, to) && to - from > 2) {
-          ranges.push(Decoration.replace({}).range(from, from + 1));
-          ranges.push(
-            Decoration.mark({ class: 'cm-live-inline-code' }).range(from + 1, to - 1)
-          );
-          ranges.push(Decoration.replace({}).range(to - 1, to));
-        }
-      }
-
-      // 7b. Inline KaTeX Math ($...$) — gated on `mathEnabled`
-      if (mathEnabled) {
-        for (const m of text.matchAll(/(?<!\\|\$)\$([^\s$][^$\n]*?[^\s$]|[^\s$])\$/g)) {
-          if (m.index === undefined) continue;
-          const from = line.from + m.index;
-          const to = from + m[0].length;
-          if (isOccupied(from, to)) continue;
-          markOccupied(from, to);
-          if (!isCaretInSpan(from, to)) {
-            ranges.push(
-              Decoration.replace({
-                widget: new KatexMathWidget(m[1], false, from),
-              }).range(from, to)
-            );
-          }
-        }
-      }
-
-      // 7c. Inline Links ([label](url))
-      for (const m of text.matchAll(/(?<!!)\[([^\]]+)\]\(([^)\n]+)\)/g)) {
-        if (m.index === undefined) continue;
-        const from = line.from + m.index;
-        const to = from + m[0].length;
-        const labelLen = m[1].length;
-        if (isOccupied(from, to)) continue;
-        markOccupied(from, to);
-        if (!isCaretInSpan(from, to)) {
-          ranges.push(Decoration.replace({}).range(from, from + 1));
-          ranges.push(
-            Decoration.mark({ class: 'cm-live-link' }).range(
-              from + 1,
-              from + 1 + labelLen
-            )
-          );
-          ranges.push(Decoration.replace({}).range(from + 1 + labelLen, to));
-        }
-      }
-
-      // 7d. Bold (**text** or __text__)
-      for (const m of text.matchAll(/(\*\*|__)(?=\S)([^\n]*?\S)\1/g)) {
-        if (m.index === undefined) continue;
-        const from = line.from + m.index;
-        const to = from + m[0].length;
-        if (isOccupied(from, to)) continue;
-        markOccupied(from, to);
-        if (!isCaretInSpan(from, to) && to - from > 4) {
-          ranges.push(Decoration.replace({}).range(from, from + 2));
-          ranges.push(Decoration.mark({ class: 'cm-live-bold' }).range(from + 2, to - 2));
-          ranges.push(Decoration.replace({}).range(to - 2, to));
-        }
-      }
-
-      // 7e. Strikethrough (~~text~~, GFM §6.5 only)
-      if (isGfm) {
-        for (const m of text.matchAll(/~~(?=\S)([^\n]*?\S)~~/g)) {
-          if (m.index === undefined) continue;
-          const from = line.from + m.index;
-          const to = from + m[0].length;
-          if (isOccupied(from, to)) continue;
-          markOccupied(from, to);
-          if (!isCaretInSpan(from, to) && to - from > 4) {
-            ranges.push(Decoration.replace({}).range(from, from + 2));
-            ranges.push(
-              Decoration.mark({ class: 'cm-live-strike' }).range(from + 2, to - 2)
-            );
-            ranges.push(Decoration.replace({}).range(to - 2, to));
-          }
-        }
-      }
-
-      // 7f. Italic (*text* or _text_)
-      for (const m of text.matchAll(
-        /(?<!\*)\*(?=\S)([^*\n]*?\S)\*(?!\*)|(?<![_\w])_(?=\S)([^_\n]*?\S)_(?![_\w])/g
-      )) {
-        if (m.index === undefined) continue;
-        const from = line.from + m.index;
-        const to = from + m[0].length;
-        if (isOccupied(from, to)) continue;
-        markOccupied(from, to);
-        if (!isCaretInSpan(from, to) && to - from > 2) {
-          ranges.push(Decoration.replace({}).range(from, from + 1));
-          ranges.push(
-            Decoration.mark({ class: 'cm-live-italic' }).range(from + 1, to - 1)
-          );
-          ranges.push(Decoration.replace({}).range(to - 1, to));
-        }
-      }
-
-      lineNum++;
-    }
-
-    return Decoration.set(ranges, true);
-  }
-
-  function createLivePreviewPlugin(
-    enabled: boolean,
-    currentTheme: ThemeMode,
-    cfg: MarkdownConfig
-  ) {
-    return ViewPlugin.fromClass(
-      class {
-        decorations: DecorationSet;
-        constructor(view: EditorView) {
-          this.decorations = buildCaretAwareDecorations(view, enabled, currentTheme, cfg);
-        }
-        update(update: ViewUpdate) {
-          const hasRefreshEffect = update.transactions.some((tr) =>
-            tr.effects.some((e) => e.is(refreshLivePreviewEffect))
-          );
-          if (
-            update.docChanged ||
-            update.selectionSet ||
-            update.viewportChanged ||
-            hasRefreshEffect
-          ) {
-            this.decorations = buildCaretAwareDecorations(
-              update.view,
-              enabled,
-              currentTheme,
-              cfg
-            );
-          }
-        }
-      },
-      {
-        decorations: (v) => v.decorations,
-      }
-    );
-  }
-
-  function createLivePreviewExtensions(
-    enabled: boolean,
-    currentTheme: ThemeMode,
-    cfg: MarkdownConfig
-  ): Extension {
-    const extensions: Extension[] = [
-      livePreviewConfigFacet.of({
-        enabled,
-        theme: currentTheme,
-        markdownConfig: cfg,
-      }),
-      createLivePreviewPlugin(enabled, currentTheme, cfg),
-    ];
-    if (enabled && cfg.base === 'Gfm') {
-      extensions.unshift(tableLivePreviewField);
-    }
-    return extensions;
-  }
 
   const accentMarkdownHighlight = HighlightStyle.define([
     { tag: tags.quote, color: 'var(--markup-quote-fg)' },
+    { tag: tags.contentSeparator, color: 'var(--fg-muted)', fontWeight: '600' },
     { tag: tags.heading1, color: 'var(--fg-heading)', fontWeight: '700' },
     {
       tag: [
@@ -1174,6 +117,13 @@
       backgroundColor: 'var(--bg-code-inline)',
       borderRadius: '4px',
     },
+    {
+      tag: codeBlockTextTag,
+      fontFamily: 'var(--code-font-stack)',
+      color: 'var(--markup-codeblock-fg)',
+    },
+    { tag: tags.escape, color: 'var(--syntax-number)' },
+    { tag: tags.character, color: 'var(--syntax-number)' },
     { tag: tags.link, color: 'var(--accent-link)', textDecoration: 'underline' },
     { tag: tags.url, color: 'var(--markup-link-url)' },
     { tag: listMarkerTag, color: 'var(--markup-list-marker)', fontWeight: '700' },
@@ -1549,17 +499,81 @@
     color: var(--fg-subheading);
   }
 
+  :global(.cm-live-setext-heading + .cm-live-setext-heading) {
+    padding-top: 0 !important;
+  }
+
+  :global(.cm-live-setext-underline-line) {
+    color: var(--fg-muted);
+    opacity: 0.72;
+  }
+
+  :global(.cm-live-hr-line) {
+    padding-top: 8px !important;
+    padding-bottom: 8px !important;
+  }
+
+  :global(.cm-thematic-break-widget) {
+    display: inline-block;
+    width: 100%;
+    height: 0;
+    border-top: 1.5px solid var(--border-headerbar);
+    vertical-align: middle;
+    cursor: pointer;
+  }
+
   :global(.cm-live-blockquote-line) {
+    position: relative;
     border-left: 3px solid var(--markup-quote-bar);
     padding-left: 14px !important;
     color: var(--markup-quote-fg);
     font-style: normal;
   }
 
+  :global(.cm-live-blockquote-d2) {
+    padding-left: 28px !important;
+  }
+  :global(.cm-live-blockquote-d2::before) {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 11px;
+    width: 3px;
+    background-color: color-mix(in srgb, var(--markup-quote-bar) 72%, transparent);
+    pointer-events: none;
+  }
+
+  :global(.cm-live-blockquote-d3),
+  :global(.cm-live-blockquote-d4) {
+    padding-left: 42px !important;
+  }
+  :global(.cm-live-blockquote-d3::before),
+  :global(.cm-live-blockquote-d4::before) {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 11px;
+    width: 3px;
+    background-color: color-mix(in srgb, var(--markup-quote-bar) 72%, transparent);
+    box-shadow: 14px 0 0 0 color-mix(in srgb, var(--markup-quote-bar) 52%, transparent);
+    pointer-events: none;
+  }
+
   :global(.cm-live-alert-line) {
-    font-weight: 600;
+    border-left-width: 4px;
     background-color: color-mix(in srgb, var(--bg-code-block) 45%, transparent);
-    border-radius: 0 5px 5px 0;
+    border-radius: 0;
+    padding-right: 12px !important;
+  }
+  :global(.cm-live-alert-first) {
+    border-top-right-radius: 7px;
+    padding-top: 6px !important;
+  }
+  :global(.cm-live-alert-last) {
+    border-bottom-right-radius: 7px;
+    padding-bottom: 6px !important;
   }
   :global(.cm-live-alert-note) {
     border-left-color: var(--accent-link);
@@ -1575,6 +589,36 @@
   }
   :global(.cm-live-alert-caution) {
     border-left-color: var(--spellcheck-red);
+  }
+
+  :global(.cm-alert-badge) {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    padding: 1px 8px 1px 0;
+    cursor: pointer;
+    user-select: none;
+  }
+  :global(.cm-alert-badge-icon) {
+    font-size: 0.96em;
+    line-height: 1;
+  }
+  :global(.cm-alert-badge-note) {
+    color: var(--accent-link);
+  }
+  :global(.cm-alert-badge-tip) {
+    color: var(--markup-task-done);
+  }
+  :global(.cm-alert-badge-important) {
+    color: var(--syntax-keyword);
+  }
+  :global(.cm-alert-badge-warning) {
+    color: var(--accent-orange);
+  }
+  :global(.cm-alert-badge-caution) {
+    color: var(--spellcheck-red);
   }
 
   :global(.cm-live-codeblock-line) {
@@ -1632,36 +676,53 @@
     opacity: 0.28;
   }
 
-  :global(.cm-live-mermaid-hidden-line) {
-    height: 0 !important;
-    min-height: 0 !important;
-    padding: 0 !important;
-    margin: 0 !important;
-    font-size: 0 !important;
-    line-height: 0 !important;
-    opacity: 0 !important;
-    overflow: clip;
+  :global(.cm-live-bold),
+  :global(.cm-live-bold *) {
+    font-weight: 700;
+  }
+  :global(.cm-live-bold) {
+    color: var(--markup-bold-fg);
+  }
+
+  :global(.cm-live-italic),
+  :global(.cm-live-italic *) {
+    font-style: italic;
+  }
+  :global(.cm-live-italic) {
+    color: var(--markup-emphasis-fg);
+  }
+
+  :global(.cm-live-bold.cm-live-italic),
+  :global(.cm-live-italic .cm-live-bold),
+  :global(.cm-live-bold .cm-live-italic) {
+    color: var(--markup-bold-fg);
+  }
+
+  :global(.cm-live-strike) {
+    text-decoration: line-through;
+    color: var(--fg-muted);
+  }
+
+  :global(.cm-live-link),
+  :global(.cm-live-link *) {
+    color: var(--accent-link);
+    text-decoration: underline;
+    cursor: pointer;
   }
 
   :global(.cm-live-inline-code),
   :global(.cm-live-inline-code *) {
-    font-family: var(--code-font-stack);
+    font-family: var(--code-font-stack) !important;
     color: var(--markup-code-fg) !important;
     background-color: var(--bg-code-inline);
     padding: 1px 5px;
     border-radius: 4px;
   }
 
-  :global(.cm-live-bold),
-  :global(.cm-live-bold *) {
-    font-weight: 700;
-    color: var(--markup-bold-fg) !important;
-  }
-
-  :global(.cm-live-italic),
-  :global(.cm-live-italic *) {
-    font-style: italic;
-    color: var(--markup-emphasis-fg) !important;
+  :global(.cm-live-plain-brackets),
+  :global(.cm-live-plain-brackets *) {
+    color: var(--fg-primary) !important;
+    text-decoration: none !important;
   }
 
   :global(.cm-live-list-marker),
@@ -1670,25 +731,50 @@
     font-weight: 700;
   }
 
-  :global(.cm-live-strike) {
-    text-decoration: line-through;
-    color: var(--fg-muted);
-  }
-
-  :global(.cm-live-link) {
-    color: var(--accent-link);
-    text-decoration: underline;
-    cursor: pointer;
-  }
-
   :global(.cm-task-checkbox) {
+    display: inline-block;
     color: var(--markup-list-marker);
     font-weight: 700;
     cursor: pointer;
+    user-select: none;
+    border-radius: 3px;
+    padding: 0 1px;
+    transition: transform 0.08s ease, color 0.12s ease;
+  }
+
+  :global(.cm-task-checkbox:hover) {
+    background-color: color-mix(in srgb, var(--accent-orange) 16%, transparent);
   }
 
   :global(.cm-task-checkbox.is-checked) {
     color: var(--markup-task-done);
+  }
+
+  :global(.cm-entity-widget) {
+    cursor: text;
+  }
+
+  :global(.cm-footnote-ref) {
+    font-size: 0.78em;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--accent-link);
+    cursor: pointer;
+    padding: 0 1px;
+  }
+
+  :global(.cm-live-footnote-def-line) {
+    font-size: 0.92em;
+    color: var(--fg-muted);
+    border-left: 2px solid var(--border-headerbar);
+    padding-left: 10px !important;
+  }
+
+  :global(.cm-live-footnote-label),
+  :global(.cm-live-footnote-label *) {
+    color: var(--accent-link) !important;
+    font-weight: 700;
+    text-decoration: none !important;
   }
 
   :global(.cm-katex-inline-widget) {
@@ -1707,6 +793,10 @@
     cursor: pointer;
   }
 
+  :global(.cm-katex-display-widget.is-in-blockquote) {
+    border-left: 3px solid var(--markup-quote-bar);
+  }
+
   :global(.cm-mermaid-widget) {
     display: flex;
     justify-content: center;
@@ -1716,6 +806,10 @@
     background-color: color-mix(in srgb, var(--bg-code-block) 45%, transparent);
     cursor: pointer;
     overflow-x: auto;
+  }
+
+  :global(.cm-mermaid-widget.is-in-blockquote) {
+    border-left: 3px solid var(--markup-quote-bar);
   }
 
   :global(.cm-mermaid-widget svg) {
