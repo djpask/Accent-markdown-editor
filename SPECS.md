@@ -89,7 +89,7 @@
     - Replace `MarkdownDialect` with `MarkdownConfig` (`MarkdownBase` + `MarkdownExtensions`) across `accent-core`, `accent-session` (with backward-compatible `settings.json` migration and i18n in `it`/`en`/`es`), IPC snapshots, and the *Editor e Lingua* Preferences tab.
     - Remove `pulldown-cmark` from `render_preview_html` / copy-HTML so Preview Pane, Copy HTML, and standalone HTML export all share `accent-core`'s `comrak` pipeline with Extended Autolinks (`§6.9`), Disallowed Raw HTML `tagfilter` (`§6.11`), and CSS scoping on `.preview-prose`.
     - Wire `markdownConfig` into `<CodeMirrorEditor />` via a dedicated language `Compartment` (`commonmarkLanguage` vs `GFM` without `Subscript` `~...~` conflict, gating KaTeX/Mermaid/Alerts/Footnotes/Frontmatter according to active toggles), and remove any remaining mentions of third-party editors outside `README.md`.
-  - [ ] **Phase 5.2 — Caret-Aware Live Table Rendering (`§4.10`):**
+  - [x] **Phase 5.2 — Caret-Aware Live Table Rendering (`§4.10`):**
     - Implement a `StateField<DecorationSet>` reading Lezer `Table` AST nodes to render a themed `TableWidget` (`Decoration.replace({ widget, block: true })`) when the selection is outside `[table.from, table.to]`, supporting `:---` / `:---:` / `---:` alignments, escaped pipes `\|`, inline cell formatting, header styling (`tags.heading`), and click-to-place-caret.
     - Suspend inline delimiter collapsing on raw table lines when the caret enters a table so monospace `|` columns stay aligned.
   - [ ] **Phase 5.3 — AST-Driven *View-while-typing* & Interactive Task Lists (`§5.3`):**

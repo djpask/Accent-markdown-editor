@@ -1,6 +1,14 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { EditorState, Compartment, StateEffect, type Range } from '@codemirror/state';
+  import {
+    EditorState,
+    Compartment,
+    Facet,
+    StateEffect,
+    StateField,
+    type Extension,
+    type Range,
+  } from '@codemirror/state';
   import {
     EditorView,
     keymap,
@@ -16,6 +24,7 @@
   import { markdown, commonmarkLanguage } from '@codemirror/lang-markdown';
   import {
     syntaxHighlighting,
+    syntaxTree,
     HighlightStyle,
     StreamLanguage,
     type Language,
@@ -37,6 +46,14 @@
   import { toml } from '@codemirror/legacy-modes/mode/toml';
   import { styleTags, tags, Tag } from '@lezer/highlight';
   import { GFM, type MarkdownExtension } from '@lezer/markdown';
+  import {
+    appendSafeGfmTableCellDom,
+    extractGfmTablesFromState,
+    type ParsedGfmTable,
+    type ParsedTableCell,
+    type TableColumnAlign,
+  } from './gfmTable';
+  import { openExternalUrl } from './ipc';
   import { getOrFetchMermaidSvg, renderLatexToHtml } from './mathAndMermaid';
   import { charToUtf16Offset, utf16ToCharOffset } from './textOffsets';
   import type { MarkdownConfig, ThemeMode } from './types';
@@ -319,6 +336,267 @@
     }
   }
 
+  class TableWidget extends WidgetType {
+    alignments: TableColumnAlign[];
+    headers: ParsedTableCell[];
+    rows: ParsedTableCell[][];
+    mathEnabled: boolean;
+    blockquoteDepth: number;
+
+    constructor(
+      alignments: TableColumnAlign[],
+      headers: ParsedTableCell[],
+      rows: ParsedTableCell[][],
+      mathEnabled: boolean,
+      blockquoteDepth: number
+    ) {
+      super();
+      this.alignments = alignments;
+      this.headers = headers;
+      this.rows = rows;
+      this.mathEnabled = mathEnabled;
+      this.blockquoteDepth = blockquoteDepth;
+    }
+
+    eq(other: TableWidget): boolean {
+      if (
+        this.mathEnabled !== other.mathEnabled ||
+        this.blockquoteDepth !== other.blockquoteDepth ||
+        this.alignments.length !== other.alignments.length ||
+        this.headers.length !== other.headers.length ||
+        this.rows.length !== other.rows.length
+      ) {
+        return false;
+      }
+      for (let c = 0; c < this.alignments.length; c++) {
+        if (this.alignments[c] !== other.alignments[c]) {
+          return false;
+        }
+      }
+      for (let c = 0; c < this.headers.length; c++) {
+        const a = this.headers[c];
+        const b = other.headers[c];
+        if (a.rawText !== b.rawText || a.relOffset !== b.relOffset) {
+          return false;
+        }
+      }
+      for (let r = 0; r < this.rows.length; r++) {
+        const rowA = this.rows[r];
+        const rowB = other.rows[r];
+        if (rowA.length !== rowB.length) {
+          return false;
+        }
+        for (let c = 0; c < rowA.length; c++) {
+          if (
+            rowA[c].rawText !== rowB[c].rawText ||
+            rowA[c].relOffset !== rowB[c].relOffset
+          ) {
+            return false;
+          }
+        }
+      }
+      return true;
+    }
+
+    toDOM(view: EditorView): HTMLElement {
+      const wrap = document.createElement('div');
+      wrap.className =
+        this.blockquoteDepth > 0
+          ? 'cm-table-widget is-in-blockquote'
+          : 'cm-table-widget';
+      wrap.dataset.testid = 'cm-table-widget';
+
+      const scrollWrap = document.createElement('div');
+      scrollWrap.className = 'cm-table-scroll';
+
+      const tableEl = document.createElement('table');
+      tableEl.className = 'cm-table-grid';
+
+      const thead = document.createElement('thead');
+      const headerTr = document.createElement('tr');
+      for (let c = 0; c < this.headers.length; c++) {
+        const cell = this.headers[c];
+        const th = document.createElement('th');
+        th.scope = 'col';
+        const align = this.alignments[c];
+        if (align) {
+          th.dataset.align = align;
+        }
+        th.dataset.cellRelOffset = String(cell.relOffset);
+        th.dataset.colIndex = String(c);
+        appendSafeGfmTableCellDom(cell.rawText, th, this.mathEnabled);
+        headerTr.appendChild(th);
+      }
+      thead.appendChild(headerTr);
+      tableEl.appendChild(thead);
+
+      if (this.rows.length > 0) {
+        const tbody = document.createElement('tbody');
+        for (let r = 0; r < this.rows.length; r++) {
+          const rowCells = this.rows[r];
+          const tr = document.createElement('tr');
+          for (let c = 0; c < rowCells.length; c++) {
+            const cell = rowCells[c];
+            const td = document.createElement('td');
+            const align = this.alignments[c];
+            if (align) {
+              td.dataset.align = align;
+            }
+            td.dataset.cellRelOffset = String(cell.relOffset);
+            td.dataset.rowIndex = String(r);
+            td.dataset.colIndex = String(c);
+            appendSafeGfmTableCellDom(cell.rawText, td, this.mathEnabled);
+            tr.appendChild(td);
+          }
+          tbody.appendChild(tr);
+        }
+        tableEl.appendChild(tbody);
+      }
+
+      scrollWrap.appendChild(tableEl);
+      wrap.appendChild(scrollWrap);
+
+      wrap.addEventListener('mousedown', (e: MouseEvent) => {
+        if (e.button !== 0) return;
+
+        // Allow native horizontal scrollbar dragging on wide tables without unfolding
+        if (
+          e.target === scrollWrap &&
+          (e.offsetY > scrollWrap.clientHeight || e.offsetX > scrollWrap.clientWidth)
+        ) {
+          return;
+        }
+
+        const anchor = (e.target as HTMLElement | null)?.closest(
+          'a.cm-table-link'
+        ) as HTMLAnchorElement | null;
+        if (anchor && (e.ctrlKey || e.metaKey)) {
+          e.preventDefault();
+          e.stopPropagation();
+          const href = anchor.getAttribute('href')?.trim() ?? '';
+          if (href.startsWith('https://') || href.startsWith('http://')) {
+            void openExternalUrl(href).catch((err) => {
+              console.error('openExternalUrl failed:', err);
+            });
+          }
+          return;
+        }
+
+        e.preventDefault();
+        e.stopPropagation();
+        const widgetDocStart = view.posAtDOM(wrap, 0);
+        const cellEl = (e.target as HTMLElement | null)?.closest(
+          'th, td'
+        ) as HTMLElement | null;
+        const relAttr = cellEl?.dataset.cellRelOffset;
+        const relOffset = relAttr !== undefined ? Number.parseInt(relAttr, 10) : 0;
+        const rawPos = widgetDocStart + (Number.isFinite(relOffset) ? relOffset : 0);
+        const targetPos = Math.max(0, Math.min(rawPos, view.state.doc.length));
+        view.dispatch({
+          selection: { anchor: targetPos, head: targetPos },
+        });
+        view.focus();
+      });
+
+      wrap.addEventListener('click', (e: MouseEvent) => {
+        const anchor = (e.target as HTMLElement | null)?.closest('a');
+        if (anchor) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      });
+
+      return wrap;
+    }
+
+    ignoreEvent(): boolean {
+      return true;
+    }
+  }
+
+  interface LivePreviewConfigState {
+    enabled: boolean;
+    theme: ThemeMode;
+    markdownConfig: MarkdownConfig;
+  }
+
+  const livePreviewConfigFacet = Facet.define<
+    LivePreviewConfigState,
+    LivePreviewConfigState
+  >({
+    combine: (values) =>
+      values[0] ?? {
+        enabled: true,
+        theme: 'Sepia',
+        markdownConfig: {
+          base: 'Gfm',
+          extensions: {
+            math: true,
+            mermaid: true,
+            alerts: true,
+            footnotes: false,
+            frontmatter: false,
+          },
+        },
+      },
+  });
+
+  function buildTableBlockDecorations(state: EditorState): DecorationSet {
+    const liveCfg = state.facet(livePreviewConfigFacet);
+    if (!liveCfg.enabled || liveCfg.markdownConfig.base !== 'Gfm') {
+      return Decoration.none;
+    }
+
+    const tables = extractGfmTablesFromState(state);
+    if (tables.length === 0) {
+      return Decoration.none;
+    }
+
+    const selRanges = state.selection.ranges;
+    const mathEnabled = liveCfg.markdownConfig.extensions.math;
+    const decoRanges: Range<Decoration>[] = [];
+
+    for (const tbl of tables) {
+      const caretInsideTable = selRanges.some(
+        (r) => r.from <= tbl.to && r.to >= tbl.from
+      );
+      if (!caretInsideTable && tbl.to > tbl.from) {
+        decoRanges.push(
+          Decoration.replace({
+            widget: new TableWidget(
+              tbl.alignments,
+              tbl.headers,
+              tbl.rows,
+              mathEnabled,
+              tbl.blockquoteDepth
+            ),
+            block: true,
+          }).range(tbl.from, tbl.to)
+        );
+      }
+    }
+
+    return decoRanges.length > 0 ? Decoration.set(decoRanges, true) : Decoration.none;
+  }
+
+  const tableLivePreviewField = StateField.define<DecorationSet>({
+    create(state) {
+      return buildTableBlockDecorations(state);
+    },
+    update(decorations, tr) {
+      if (
+        tr.docChanged ||
+        tr.selection !== undefined ||
+        tr.reconfigured ||
+        syntaxTree(tr.startState) !== syntaxTree(tr.state)
+      ) {
+        return buildTableBlockDecorations(tr.state);
+      }
+      return decorations;
+    },
+    provide: (f) => EditorView.decorations.from(f),
+  });
+
   function buildCaretAwareDecorations(
     view: EditorView,
     enabled: boolean,
@@ -338,6 +616,12 @@
     const mermaidEnabled = isGfm && cfg.extensions.mermaid;
     const alertsEnabled = isGfm && cfg.extensions.alerts;
     const frontmatterEnabled = isGfm && cfg.extensions.frontmatter;
+
+    const gfmTables = enabled && isGfm ? extractGfmTablesFromState(state) : [];
+    const tableByStartLine = new Map<number, ParsedGfmTable>();
+    for (const tbl of gfmTables) {
+      tableByStartLine.set(tbl.startLineNum, tbl);
+    }
 
     const isCaretInSpan = (from: number, to: number): boolean => {
       return selFrom <= to && selTo >= from;
@@ -379,6 +663,38 @@
     }
 
     while (lineNum <= totalLines) {
+      const activeTable = tableByStartLine.get(lineNum);
+      if (activeTable) {
+        const caretInsideTable = state.selection.ranges.some(
+          (r) => r.from <= activeTable.to && r.to >= activeTable.from
+        );
+        if (caretInsideTable) {
+          // Caret is inside [table.from, table.to]: apply monospace table source line class
+          // and suspend inline delimiter collapsing on all rows of this table so `|` stays aligned.
+          for (let ln = activeTable.startLineNum; ln <= activeTable.endLineNum; ln++) {
+            const l = doc.line(ln);
+            const classes = ['cm-live-table-source-line'];
+            if (ln === activeTable.startLineNum) {
+              classes.push('cm-live-table-source-first');
+            }
+            if (ln === activeTable.headerLineNum) {
+              classes.push('cm-live-table-source-header');
+            }
+            if (ln === activeTable.delimiterLineNum) {
+              classes.push('cm-live-table-source-delimiter');
+            }
+            if (ln === activeTable.endLineNum) {
+              classes.push('cm-live-table-source-last');
+            }
+            ranges.push(
+              Decoration.line({ class: classes.join(' ') }).range(l.from)
+            );
+          }
+        }
+        lineNum = activeTable.endLineNum + 1;
+        continue;
+      }
+
       const line = doc.line(lineNum);
       const text = line.text;
       const trimmed = text.trimStart();
@@ -814,6 +1130,25 @@
     );
   }
 
+  function createLivePreviewExtensions(
+    enabled: boolean,
+    currentTheme: ThemeMode,
+    cfg: MarkdownConfig
+  ): Extension {
+    const extensions: Extension[] = [
+      livePreviewConfigFacet.of({
+        enabled,
+        theme: currentTheme,
+        markdownConfig: cfg,
+      }),
+      createLivePreviewPlugin(enabled, currentTheme, cfg),
+    ];
+    if (enabled && cfg.base === 'Gfm') {
+      extensions.unshift(tableLivePreviewField);
+    }
+    return extensions;
+  }
+
   const accentMarkdownHighlight = HighlightStyle.define([
     { tag: tags.quote, color: 'var(--markup-quote-fg)' },
     { tag: tags.heading1, color: 'var(--fg-heading)', fontWeight: '700' },
@@ -828,6 +1163,7 @@
       color: 'var(--fg-subheading)',
       fontWeight: '700',
     },
+    { tag: tags.heading, color: 'var(--fg-heading)', fontWeight: '700' },
     { tag: tags.strong, fontWeight: '700', color: 'var(--markup-bold-fg)' },
     { tag: tags.emphasis, fontStyle: 'italic', color: 'var(--markup-emphasis-fg)' },
     { tag: tags.strikethrough, textDecoration: 'line-through', color: 'var(--fg-muted)' },
@@ -1064,7 +1400,7 @@
         themeCompartment.of(buildEditorTheme()),
         readOnlyCompartment.of(EditorState.readOnly.of(readOnly)),
         livePreviewCompartment.of(
-          createLivePreviewPlugin(viewWhileTyping, themeMode, markdownConfig)
+          createLivePreviewExtensions(viewWhileTyping, themeMode, markdownConfig)
         ),
         searchHighlightCompartment.of(
           createSearchHighlightPlugin(searchBarOpen ? searchQuery : '')
@@ -1145,7 +1481,7 @@
           themeCompartment.reconfigure(buildEditorTheme()),
           readOnlyCompartment.reconfigure(EditorState.readOnly.of(readOnly)),
           livePreviewCompartment.reconfigure(
-            createLivePreviewPlugin(viewWhileTyping, themeMode, markdownConfig)
+            createLivePreviewExtensions(viewWhileTyping, themeMode, markdownConfig)
           ),
           searchHighlightCompartment.reconfigure(createSearchHighlightPlugin(activeSearch)),
         ],
@@ -1386,6 +1722,178 @@
     display: block;
     max-width: 100%;
     height: auto;
+  }
+
+  /* GFM §4.10 Caret-Aware Live Table Widget & Aligned Monospace Source Lines */
+  :global(.cm-table-widget) {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    padding: 8px 0;
+    user-select: none;
+  }
+
+  :global(.cm-table-widget.is-in-blockquote) {
+    border-left: 3px solid var(--markup-quote-bar);
+    padding-left: 14px;
+  }
+
+  :global(.cm-table-scroll) {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    border-radius: 8px;
+    border: 1px solid var(--border-headerbar);
+    background-color: color-mix(in srgb, var(--bg-canvas) 90%, var(--bg-code-block));
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+    scrollbar-width: thin;
+  }
+
+  :global(.cm-table-grid) {
+    width: 100%;
+    border-collapse: collapse;
+    border-spacing: 0;
+    font-family: var(--prose-font-stack);
+    font-size: 0.96em;
+    line-height: 1.45;
+    color: var(--fg-primary);
+    overflow-wrap: normal;
+    word-break: normal;
+  }
+
+  :global(.cm-table-grid th),
+  :global(.cm-table-grid td) {
+    padding: 8px 12px;
+    border-right: 1px solid var(--border-headerbar);
+    border-bottom: 1px solid var(--border-headerbar);
+    vertical-align: top;
+    overflow-wrap: normal;
+    word-break: normal;
+    cursor: text;
+    transition: background-color 0.12s ease;
+  }
+
+  :global(.cm-table-grid th:last-child),
+  :global(.cm-table-grid td:last-child) {
+    border-right: none;
+  }
+
+  :global(.cm-table-grid tbody tr:last-child td),
+  :global(.cm-table-grid thead:last-child tr:last-child th) {
+    border-bottom: none;
+  }
+
+  :global(.cm-table-grid :where(th, td):not([data-align])),
+  :global(.cm-table-grid [data-align='left']) {
+    text-align: left;
+  }
+
+  :global(.cm-table-grid [data-align='center']) {
+    text-align: center;
+  }
+
+  :global(.cm-table-grid [data-align='right']) {
+    text-align: right;
+  }
+
+  :global(.cm-table-grid th) {
+    background-color: var(--bg-table-header);
+    font-weight: 700;
+    color: var(--fg-primary);
+  }
+
+  :global(.cm-table-grid tbody tr:nth-child(even) td) {
+    background-color: color-mix(in srgb, var(--bg-code-block) 18%, transparent);
+  }
+
+  @media (hover: hover) {
+    :global(.cm-table-grid tbody tr:hover td) {
+      background-color: color-mix(in srgb, var(--bg-pill-button) 36%, transparent);
+    }
+
+    :global(.cm-table-grid th:hover) {
+      background-color: color-mix(in srgb, var(--accent-orange) 12%, var(--bg-table-header));
+    }
+
+    :global(.cm-table-grid tbody tr:hover td:hover) {
+      background-color: color-mix(in srgb, var(--accent-orange) 12%, var(--bg-pill-button));
+    }
+  }
+
+  :global(.cm-table-grid strong) {
+    color: var(--markup-bold-fg);
+    font-weight: 700;
+  }
+
+  :global(.cm-table-grid em) {
+    color: var(--markup-emphasis-fg);
+    font-style: italic;
+  }
+
+  :global(.cm-table-grid del) {
+    color: var(--fg-muted);
+    text-decoration: line-through;
+  }
+
+  :global(.cm-table-grid code) {
+    font-family: var(--code-font-stack);
+    font-size: 0.9em;
+    background-color: var(--bg-code-inline);
+    color: var(--markup-code-fg);
+    padding: 1px 5px;
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+
+  :global(.cm-table-grid a.cm-table-link) {
+    color: var(--accent-link);
+    text-decoration: underline;
+    cursor: pointer;
+  }
+
+  :global(.cm-table-grid kbd) {
+    font-family: var(--code-font-stack);
+    font-size: 0.86em;
+    padding: 1px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border-headerbar);
+    background-color: var(--bg-code-inline);
+    color: var(--fg-primary);
+  }
+
+  :global(.cm-table-math) {
+    display: inline-block;
+    padding: 0 2px;
+  }
+
+  :global(.cm-live-table-source-line) {
+    font-family: var(--code-font-stack) !important;
+    font-size: 0.92em !important;
+    line-height: 1.44 !important;
+    font-variant-ligatures: none;
+    background-color: color-mix(in srgb, var(--bg-code-block) 28%, transparent);
+    padding-left: 10px !important;
+    padding-right: 10px !important;
+    border-left: 1px solid color-mix(in srgb, var(--border-headerbar) 80%, transparent);
+    border-right: 1px solid color-mix(in srgb, var(--border-headerbar) 80%, transparent);
+  }
+
+  :global(.cm-live-table-source-header) {
+    background-color: color-mix(in srgb, var(--bg-table-header) 62%, transparent);
+  }
+
+  :global(.cm-live-table-source-first) {
+    border-top: 1px solid color-mix(in srgb, var(--border-headerbar) 80%, transparent);
+    border-top-left-radius: 7px;
+    border-top-right-radius: 7px;
+    padding-top: 4px !important;
+  }
+
+  :global(.cm-live-table-source-last) {
+    border-bottom: 1px solid color-mix(in srgb, var(--border-headerbar) 80%, transparent);
+    border-bottom-left-radius: 7px;
+    border-bottom-right-radius: 7px;
+    padding-bottom: 4px !important;
   }
 
   :global(.cm-search-match) {

@@ -12,9 +12,30 @@ export function renderLatexToHtml(latex: string, displayMode: boolean): string {
       displayMode,
       throwOnError: false,
       strict: false,
+      trust: false,
     });
   } catch {
     return `<code class="katex-fallback">${latex}</code>`;
+  }
+}
+
+export function renderLatexIntoElement(
+  latex: string,
+  targetEl: HTMLElement,
+  displayMode: boolean
+): void {
+  try {
+    katex.render(latex.trim(), targetEl, {
+      displayMode,
+      throwOnError: false,
+      strict: false,
+      trust: false,
+    });
+  } catch {
+    const fallback = document.createElement('code');
+    fallback.className = 'katex-fallback';
+    fallback.textContent = latex;
+    targetEl.replaceChildren(fallback);
   }
 }
 

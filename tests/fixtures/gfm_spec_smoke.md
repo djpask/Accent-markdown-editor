@@ -134,9 +134,9 @@ Tabella principale con **allineamenti** (`:---` sinistra, `:---:` centro, `---:`
 
 | Allineamento Sinistra | Allineamento Centro | Allineamento Destra | Edge Case Inline & Pipe Escapati |
 | :--- | :---: | ---: | --- |
-| Testo semplice | **Grassetto** | `1.250,00 €` | Pipe escapato: `a \| b` e fuori codice: A \| B |
-| *Corsivo* e ~~barrato~~ | `codice_inline()` | `42,5%` | Link in cella: [Spec GFM](https://github.github.com/gfm/) |
-| Combinazione **bold *italic*** | Emoji 🦀 🚀 | `999.999` | Code span con pipe non escapato: `` `x | y` `` |
+| Testo semplice &copy; | **Grassetto** | `1.250,00 €` | Pipe escapato: `a \| b` e fuori codice: A \| B |
+| *Corsivo* e ~~barrato **bold**~~ | `codice_inline()` | `42,5%` | Link in cella: [Spec GFM](https://github.github.com/gfm/) |
+| Combinazione **bold *italic*** | Formula $E = mc^2$ 🦀 | `999.999` &#8594; | Code span con pipe: `a | b` e `` `x | y` `` |
 
 Edge case GFM §4.10 — tabella compatta **senza pipe esterni** e con numero variabile di celle nelle righe dati (celle mancanti completate vuote, celle in eccesso ignorate):
 
