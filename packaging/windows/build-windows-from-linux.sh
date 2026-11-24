@@ -78,14 +78,19 @@ CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${LINKER_WRAPPER}" \
     cargo build --release --target x86_64-pc-windows-gnu -p accent-ui
 
 x86_64-w64-mingw32-strip "${REPO_ROOT}/target/x86_64-pc-windows-gnu/release/accent-ui.exe"
-rm -f "${SCRIPT_DIR}"/Accent-Setup-*.exe "${SCRIPT_DIR}"/accent-*-x86_64.exe
+rm -f "${SCRIPT_DIR}"/Accent-Setup-*.exe "${SCRIPT_DIR}"/Accent_v*-setup.exe "${SCRIPT_DIR}"/accent-*-x86_64.exe
 cp "${REPO_ROOT}/target/x86_64-pc-windows-gnu/release/accent-ui.exe" "${SCRIPT_DIR}/accent.exe"
 cp "${REPO_ROOT}/target/x86_64-pc-windows-gnu/release/accent-ui.exe" "${SCRIPT_DIR}/accent-${VERSION}-x86_64.exe"
 
-SETUP_EXE="${SCRIPT_DIR}/Accent-Setup-${VERSION}-x86_64.exe"
+# Compile embedded Windows icon + asInvoker (non-admin) Common Controls v6 manifest
+WINDRES_OBJ="/tmp/accent_installer_res.o"
+(cd "${SCRIPT_DIR}" && x86_64-w64-mingw32-windres -O coff -i installer.rc -o "${WINDRES_OBJ}")
+
+SETUP_EXE="${SCRIPT_DIR}/Accent_v${VERSION}-setup.exe"
 ACCENT_VERSION="${VERSION}" rustc --edition 2024 -O \
     --target x86_64-pc-windows-gnu \
     -C linker="${LINKER_WRAPPER}" \
+    -C link-arg="${WINDRES_OBJ}" \
     "${SCRIPT_DIR}/installer.rs" \
     -o "${SETUP_EXE}"
 x86_64-w64-mingw32-strip "${SETUP_EXE}"
@@ -93,4 +98,4 @@ x86_64-w64-mingw32-strip "${SETUP_EXE}"
 echo "==> Build Windows 11 completata:"
 echo "    Binario standalone (versionato): ${SCRIPT_DIR}/accent-${VERSION}-x86_64.exe"
 echo "    Binario standalone:              ${SCRIPT_DIR}/accent.exe"
-echo "    Setup & Disinstallatore:         ${SETUP_EXE}"
+echo "    Wizard Setup & Disinstallatore:  ${SETUP_EXE}"
