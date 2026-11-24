@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="512" height="512">
+  <defs>
+    <filter id="accent-sheet-shadow" x="-12%" y="-10%" width="128%" height="128%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#22252a" flood-opacity="0.18" />
+    </filter>
+    <filter id="accent-pen-shadow" x="-40%" y="-80%" width="180%" height="260%">
+      <feDropShadow dx="0" dy="3" stdDeviation="2.8" flood-color="#22252a" flood-opacity="0.24" />
+    </filter>
+
+    <linearGradient id="accent-paper" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#faf8f5" />
+    </linearGradient>
+    <linearGradient id="accent-stripe" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#f2c12e" />
+      <stop offset="48%" stop-color="#c85a17" />
+      <stop offset="100%" stop-color="#c82850" />
+    </linearGradient>
+    <linearGradient id="accent-amber-a" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#d97706" />
+      <stop offset="60%" stop-color="#9a4708" />
+      <stop offset="100%" stop-color="#7c3605" />
+    </linearGradient>
+    <linearGradient id="accent-coral-mark" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#c82850" />
+      <stop offset="100%" stop-color="#ff6b8b" />
+    </linearGradient>
+    <linearGradient id="accent-coral-badge" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#e63956" />
+      <stop offset="100%" stop-color="#b82248" />
+    </linearGradient>
+    <linearGradient id="accent-nib-top" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#f7d354" />
+      <stop offset="100%" stop-color="#eab700" />
+    </linearGradient>
+    <linearGradient id="accent-nib-bot" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#d48311" />
+      <stop offset="100%" stop-color="#9a4708" />
+    </linearGradient>
+    <linearGradient id="accent-barrel" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3a3f4a" />
+      <stop offset="55%" stop-color="#22252a" />
+      <stop offset="100%" stop-color="#14161a" />
+    </linearGradient>
+
+    <clipPath id="accent-sheet-clip">
+      <rect x="11" y="10" width="91" height="109" rx="12" ry="12" />
+    </clipPath>
+  </defs>
+
+  <!-- Crisp White Rounded Document Sheet with Left Amber-to-Coral Ribbon -->
+  <g filter="url(#accent-sheet-shadow)">
+    <rect x="11" y="10" width="91" height="109" rx="12" ry="12"
+          fill="url(#accent-paper)"
+          stroke="#e2dcd3"
+          stroke-width="1.5" />
+    <rect x="11" y="10" width="7.2" height="109" fill="url(#accent-stripe)" clip-path="url(#accent-sheet-clip)" />
+  </g>
+
+  <!-- Subtle Document Lines in Upper-Left -->
+  <g opacity="0.68">
+    <rect x="26" y="25" width="44" height="3.4" rx="1.7" fill="#e6e0d6" />
+    <rect x="26" y="34" width="32" height="2.8" rx="1.4" fill="#efece5" />
+  </g>
+
+  <!-- Bottom-Left: Geometric 'A' in Burnt Amber -->
+  <path d="M 37.8 75.5
+           C 38.7 73.5, 41.8 73.5, 42.7 75.5
+           L 55.8 106.5
+           C 56.4 107.9, 55.2 109.2, 53.6 109.2
+           L 48.8 109.2
+           C 47.5 109.2, 46.5 108.4, 46.1 107.2
+           L 43.9 101
+           L 36.6 101
+           L 34.4 107.2
+           C 34 108.4, 33 109.2, 31.7 109.2
+           L 26.9 109.2
+           C 25.3 109.2, 24.1 107.9, 24.7 106.5
+           Z
+           M 38.2 95.3
+           L 42.3 95.3
+           L 40.25 86
+           Z"
+        fill="url(#accent-amber-a)" />
+
+  <!-- Coral Acute Accent (´) Directly Above 'A' -->
+  <path d="M 38.2 69.5
+           C 37.7 68.1, 41.8 62.2, 50.2 56.5
+           C 51.9 55.4, 53.8 56.6, 53 58.5
+           C 49.4 63.3, 43.2 68.7, 39.6 70.2
+           C 38.7 70.5, 38.3 70.1, 38.2 69.5 Z"
+        fill="url(#accent-coral-mark)" />
+
+  <!-- Fountain Pen Nib Finishing the Coral Accent -->
+  <g filter="url(#accent-pen-shadow)" transform="translate(52.2, 57.2) rotate(-36)">
+    <path d="M 0 0 C 7.5 -2.1, 14 -6.4, 20.5 -9.8 L 33.5 -6 L 33.5 0 L 0 0 Z" fill="url(#accent-nib-top)" />
+    <path d="M 0 0 C 7.5 2.1, 14 6.4, 20.5 9.8 L 33.5 6 L 33.5 0 L 0 0 Z" fill="url(#accent-nib-bot)" />
+    <path d="M 0 0 L 6 -2 L 6 2 Z" fill="#c82850" />
+    <line x1="1.4" y1="0" x2="18.2" y2="0" stroke="#7c3605" stroke-width="1.2" stroke-linecap="round" />
+    <circle cx="19.6" cy="0" r="2" fill="#7c3605" />
+    <rect x="32.5" y="-7" width="2.8" height="14" rx="1" fill="#f2c12e" />
+    <rect x="35.4" y="-7" width="2.8" height="14" rx="1" fill="#c82850" />
+    <path d="M 38.2 -7 L 62 -9.3 C 65.2 -9.6, 67.5 -7.3, 67.5 -3.9 L 67.5 3.9 C 67.5 7.3, 65.2 9.6, 62 9.3 L 38.2 7 Z"
+          fill="url(#accent-barrel)" />
+    <path d="M 41 -4 L 61 -5.8" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round" opacity="0.28" />
+  </g>
+
+  <!-- Bottom-Right: Official Markdown Mark [M↓] (Solid Coral, CC0 dcurtis/markdown-mark) -->
+  <g transform="translate(61, 88.5) scale(0.155)">
+    <rect width="208" height="128" rx="20" ry="20" fill="url(#accent-coral-badge)" />
+    <path d="M30 98V30h20l20 25 20-25h20v68H90V59L70 84 50 59v39zm125 0l-30-33h20V30h20v35h20z"
+          fill="#ffffff" />
+  </g>
+</svg>

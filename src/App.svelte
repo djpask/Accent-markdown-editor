@@ -2,6 +2,7 @@
   import { onDestroy, onMount } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import CodeMirrorEditor from './lib/CodeMirrorEditor.svelte';
+  import accentLogoUrl from '../crates/accent-ui/resources/icon.svg';
   import { renderMathInPreviewHtml } from './lib/mathAndMermaid';
   import { charToUtf16Offset } from './lib/textOffsets';
   import {
@@ -2638,10 +2639,21 @@
               <div><span>{tr('fullscreen_mode')}</span><b>F11</b></div>
             </div>
           {:else}
-            <p style="margin: 0 0 8px 0; font-weight: 700;">Accent Markdown Editor v0.8.28</p>
-            <p style="margin: 0; color: var(--fg-muted);">
-              Rust Backend (L1–L4) • Tauri v2 • Svelte 5 • CodeMirror 6 • Offline KaTeX &amp; Mermaid
-            </p>
+            <div style="display: flex; align-items: center; gap: 16px;">
+              <img
+                src={accentLogoUrl}
+                alt="Accent Logo"
+                width="64"
+                height="64"
+                style="flex-shrink: 0; display: block;"
+              />
+              <div>
+                <p style="margin: 0 0 6px 0; font-weight: 700;">Accent Markdown Editor v0.8.29</p>
+                <p style="margin: 0; color: var(--fg-muted);">
+                  Rust Backend (L1–L4) • Tauri v2 • Svelte 5 • CodeMirror 6 • Offline KaTeX &amp; Mermaid
+                </p>
+              </div>
+            </div>
           {/if}
         </div>
       </div>
