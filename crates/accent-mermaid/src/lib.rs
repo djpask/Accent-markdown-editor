@@ -315,72 +315,103 @@ fn parse_edge_line(
     index_by_id: &mut HashMap<String, usize>,
     edges: &mut Vec<FlowEdge>,
 ) {
-    // Support arrows: `-.->`, `-->`, `==>`, `---` with optional `|label|`
+    // Support arrows: `-.->`, `-->`, `==>`, `---`, `->` with optional `|label|` iteratively (zero stack recursion)
     let arrows = ["-.->", "==>", "-->", "---", "->"];
-    for arrow in arrows {
-        if let Some(pos) = line.find(arrow) {
-            let left_raw = line[..pos].trim();
-            let mut right_raw = line[pos + arrow.len()..].trim();
-            let mut label: Option<String> = None;
-            let dashed = arrow.contains('.');
+    let mut current = line.trim();
+    let mut matched_any_arrow = false;
 
-            // Handle `A -- label --> B`
-            let left_token = if let Some(mid_dash) = left_raw.find(" -- ") {
-                label = Some(left_raw[mid_dash + 4..].trim().trim_matches('"').to_string());
-                left_raw[..mid_dash].trim()
-            } else {
-                left_raw
-            };
-
-            // Handle `-->|label| B`
-            if right_raw.starts_with('|') {
-                if let Some(end_pipe) = right_raw[1..].find('|') {
-                    let lbl = right_raw[1..1 + end_pipe].trim().trim_matches('"');
-                    if !lbl.is_empty() {
-                        label = Some(lbl.to_string());
+    for _step in 0..256 {
+        let mut best_match: Option<(usize, &str)> = None;
+        for arrow in arrows {
+            if let Some(pos) = current.find(arrow) {
+                match best_match {
+                    None => best_match = Some((pos, arrow)),
+                    Some((best_pos, best_arrow)) => {
+                        if pos < best_pos || (pos == best_pos && arrow.len() > best_arrow.len()) {
+                            best_match = Some((pos, arrow));
+                        }
                     }
-                    right_raw = right_raw[1 + end_pipe + 1..].trim();
                 }
             }
+        }
 
-            // Check if right_raw itself contains another chained arrow
-            let mut next_arrow_pos: Option<usize> = None;
-            for next_a in arrows {
-                if let Some(p) = right_raw.find(next_a) {
-                    next_arrow_pos = Some(next_arrow_pos.map_or(p, |cur| cur.min(p)));
+        let Some((pos, arrow)) = best_match else {
+            break;
+        };
+        matched_any_arrow = true;
+
+        let left_raw = current[..pos].trim();
+        let mut right_raw = current[pos + arrow.len()..].trim();
+        let mut label: Option<String> = None;
+        let dashed = arrow.contains('.');
+
+        // Handle `A -- label --> B`
+        let left_token = if let Some(mid_dash) = left_raw.find(" -- ") {
+            label = Some(left_raw[mid_dash + 4..].trim().trim_matches('"').to_string());
+            left_raw[..mid_dash].trim()
+        } else {
+            left_raw
+        };
+
+        // Handle `-->|label| B`
+        if right_raw.starts_with('|') {
+            if let Some(end_pipe) = right_raw[1..].find('|') {
+                let lbl = right_raw[1..1 + end_pipe].trim().trim_matches('"');
+                if !lbl.is_empty() {
+                    label = Some(lbl.to_string());
                 }
+                right_raw = right_raw[1 + end_pipe + 1..].trim();
             }
+        }
 
-            if let Some(np) = next_arrow_pos {
-                let mid_node_raw = right_raw[..np].trim();
-                let from_id = ensure_node(nodes, index_by_id, left_token);
-                let to_id = ensure_node(nodes, index_by_id, mid_node_raw);
-                if !from_id.is_empty() && !to_id.is_empty() {
-                    edges.push(FlowEdge {
-                        from: from_id,
-                        to: to_id,
-                        label,
-                        dashed,
-                    });
-                }
-                parse_edge_line(right_raw, nodes, index_by_id, edges);
+        // Check if `right_raw` itself contains another chained arrow
+        let mut next_arrow_pos: Option<usize> = None;
+        for next_a in arrows {
+            if let Some(p) = right_raw.find(next_a) {
+                next_arrow_pos = Some(next_arrow_pos.map_or(p, |cur| cur.min(p)));
+            }
+        }
+
+        if let Some(np) = next_arrow_pos {
+            let mid_node_raw = right_raw[..np].trim();
+            // Strip optional ` -- label` suffix if next arrow uses inline `-- label -->`
+            let mid_clean = if let Some(md) = mid_node_raw.find(" -- ") {
+                mid_node_raw[..md].trim()
             } else {
-                let from_id = ensure_node(nodes, index_by_id, left_token);
-                let to_id = ensure_node(nodes, index_by_id, right_raw);
-                if !from_id.is_empty() && !to_id.is_empty() {
-                    edges.push(FlowEdge {
-                        from: from_id,
-                        to: to_id,
-                        label,
-                        dashed,
-                    });
-                }
+                mid_node_raw
+            };
+            let from_id = ensure_node(nodes, index_by_id, left_token);
+            let to_id = ensure_node(nodes, index_by_id, mid_clean);
+            if !from_id.is_empty() && !to_id.is_empty() {
+                edges.push(FlowEdge {
+                    from: from_id,
+                    to: to_id,
+                    label,
+                    dashed,
+                });
             }
-            return;
+            current = right_raw;
+        } else {
+            let from_id = ensure_node(nodes, index_by_id, left_token);
+            let to_id = ensure_node(nodes, index_by_id, right_raw);
+            if !from_id.is_empty() && !to_id.is_empty() {
+                edges.push(FlowEdge {
+                    from: from_id,
+                    to: to_id,
+                    label,
+                    dashed,
+                });
+            }
+            break;
         }
     }
-    // Standalone node declaration line
-    if !line.starts_with("subgraph") && line != "end" && !line.starts_with("classDef") && !line.starts_with("style ") {
+
+    if !matched_any_arrow
+        && !line.starts_with("subgraph")
+        && line != "end"
+        && !line.starts_with("classDef")
+        && !line.starts_with("style ")
+    {
         let _ = ensure_node(nodes, index_by_id, line);
     }
 }
@@ -805,6 +836,8 @@ pub fn render_mermaid_to_svg(source: &str, theme: MermaidTheme) -> (String, u32,
     (svg, width, height)
 }
 
+const MAX_RASTER_DIMENSION_PX: u32 = 4096;
+
 fn render_svg_to_pixmap(svg: &str, scale: f32) -> Option<(u32, u32, tiny_skia::Pixmap)> {
     let mut opts = usvg::Options::default();
     if svg.contains("<text") {
@@ -812,17 +845,30 @@ fn render_svg_to_pixmap(svg: &str, scale: f32) -> Option<(u32, u32, tiny_skia::P
     }
     let tree = usvg::Tree::from_str(svg, &opts).ok()?;
     let size = tree.size().to_int_size();
-    let px_w = ((size.width() as f32) * scale).round().max(1.0) as u32;
-    let px_h = ((size.height() as f32) * scale).round().max(1.0) as u32;
+    let raw_w = ((size.width() as f32) * scale).round().max(1.0);
+    let raw_h = ((size.height() as f32) * scale).round().max(1.0);
+    let clamp_ratio = (MAX_RASTER_DIMENSION_PX as f32 / raw_w)
+        .min(MAX_RASTER_DIMENSION_PX as f32 / raw_h)
+        .min(1.0);
+    let effective_scale = scale * clamp_ratio;
+    let px_w = ((size.width() as f32) * effective_scale)
+        .round()
+        .clamp(1.0, MAX_RASTER_DIMENSION_PX as f32) as u32;
+    let px_h = ((size.height() as f32) * effective_scale)
+        .round()
+        .clamp(1.0, MAX_RASTER_DIMENSION_PX as f32) as u32;
 
     let mut pixmap = tiny_skia::Pixmap::new(px_w, px_h)?;
-    let transform = tiny_skia::Transform::from_scale(scale, scale);
+    let transform = tiny_skia::Transform::from_scale(effective_scale, effective_scale);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
     Some((px_w, px_h, pixmap))
 }
 
 fn demultiply_pixmap_rgba(pixmap: &tiny_skia::Pixmap, px_w: u32, px_h: u32) -> Vec<u8> {
-    let mut rgba = Vec::with_capacity((px_w * px_h * 4) as usize);
+    let cap = (px_w as usize)
+        .saturating_mul(px_h as usize)
+        .saturating_mul(4);
+    let mut rgba = Vec::with_capacity(cap);
     for px in pixmap.pixels() {
         let c = px.demultiply();
         rgba.push(c.red());
@@ -887,9 +933,10 @@ impl MermaidCache {
             .clone()
     }
 
-    /// Screen-optimized Mermaid renderer: skips PNG compression (`png_bytes` stays empty unless
-    /// later requested by an exporter) and enforces a bounded 16-entry LRU cache.
-    pub fn get_or_render_screen_themed(
+    /// Fast vector-only Mermaid renderer for WebView UI and HTML export: skips `resvg` bitmap
+    /// rasterization completely (`rgba_pixels` and `png_bytes` stay empty unless later requested
+    /// by a raster exporter) and enforces a bounded 16-entry LRU cache.
+    pub fn get_or_render_svg_themed(
         &mut self,
         source: &str,
         theme: MermaidTheme,
@@ -900,13 +947,43 @@ impl MermaidCache {
             return existing;
         }
         let (svg, logical_w, logical_h) = render_mermaid_to_svg(source, theme);
+        let arc = Arc::new(RenderedMermaidDiagram {
+            content_hash: key.0,
+            theme,
+            svg,
+            width: logical_w,
+            height: logical_h,
+            rgba_pixels: Vec::new(),
+            png_bytes: Vec::new(),
+        });
+        self.entries.insert(key, arc.clone());
+        self.touch_lru(key);
+        arc
+    }
+
+    /// Raster RGBA Mermaid renderer (skips PNG compression overhead; used by PDF exporter).
+    pub fn get_or_render_screen_themed(
+        &mut self,
+        source: &str,
+        theme: MermaidTheme,
+    ) -> Arc<RenderedMermaidDiagram> {
+        let key = (Self::hash_source(source), theme);
+        if let Some(existing) = self.entries.get(&key) {
+            if !existing.rgba_pixels.is_empty() {
+                let cloned = existing.clone();
+                self.touch_lru(key);
+                return cloned;
+            }
+        }
+        let (svg, logical_w, logical_h) = render_mermaid_to_svg(source, theme);
         let (width, height, rgba_pixels) =
             rasterize_svg_rgba(&svg, 1.5).unwrap_or_else(|| {
-                (
-                    logical_w,
-                    logical_h,
-                    vec![240; (logical_w * logical_h * 4) as usize],
-                )
+                let safe_w = logical_w.min(MAX_RASTER_DIMENSION_PX);
+                let safe_h = logical_h.min(MAX_RASTER_DIMENSION_PX);
+                let fallback_len = (safe_w as usize)
+                    .saturating_mul(safe_h as usize)
+                    .saturating_mul(4);
+                (safe_w, safe_h, vec![240; fallback_len])
             });
         let arc = Arc::new(RenderedMermaidDiagram {
             content_hash: key.0,
@@ -929,7 +1006,7 @@ impl MermaidCache {
     ) -> Arc<RenderedMermaidDiagram> {
         let key = (Self::hash_source(source), theme);
         if let Some(existing) = self.entries.get(&key) {
-            if !existing.png_bytes.is_empty() {
+            if !existing.png_bytes.is_empty() && !existing.rgba_pixels.is_empty() {
                 let cloned = existing.clone();
                 self.touch_lru(key);
                 return cloned;
@@ -938,12 +1015,12 @@ impl MermaidCache {
         let (svg, logical_w, logical_h) = render_mermaid_to_svg(source, theme);
         let (width, height, rgba_pixels, png_bytes) =
             rasterize_svg(&svg, 1.5).unwrap_or_else(|| {
-                (
-                    logical_w,
-                    logical_h,
-                    vec![240; (logical_w * logical_h * 4) as usize],
-                    Vec::new(),
-                )
+                let safe_w = logical_w.min(MAX_RASTER_DIMENSION_PX);
+                let safe_h = logical_h.min(MAX_RASTER_DIMENSION_PX);
+                let fallback_len = (safe_w as usize)
+                    .saturating_mul(safe_h as usize)
+                    .saturating_mul(4);
+                (safe_w, safe_h, vec![240; fallback_len], Vec::new())
             });
         let arc = Arc::new(RenderedMermaidDiagram {
             content_hash: key.0,
@@ -999,5 +1076,24 @@ mod tests {
         assert_eq!(semi_rendered.theme, MermaidTheme::SemiDark);
         assert!(semi_rendered.svg.contains("#282B32"));
         assert!(semi_rendered.png_bytes.len() > 1000);
+    }
+
+    #[test]
+    fn test_mermaid_deep_chained_edges_iterative_and_svg_fast_path() {
+        let mut chain = String::from("flowchart LR\n  N0");
+        for i in 1..=300 {
+            chain.push_str(&format!(" --> N{i}"));
+        }
+        let mut cache = MermaidCache::new();
+        let svg_only = cache.get_or_render_svg_themed(&chain, MermaidTheme::Sepia);
+        assert!(svg_only.svg.contains("<svg"));
+        assert!(svg_only.rgba_pixels.is_empty());
+        assert!(svg_only.png_bytes.is_empty());
+
+        // Upgrading the same cached entry via `get_or_render_screen_themed` populates clamped RGBA pixels
+        let screen = cache.get_or_render_screen_themed(&chain, MermaidTheme::Sepia);
+        assert!(!screen.rgba_pixels.is_empty());
+        assert!(screen.width <= MAX_RASTER_DIMENSION_PX);
+        assert!(screen.height <= MAX_RASTER_DIMENSION_PX);
     }
 }

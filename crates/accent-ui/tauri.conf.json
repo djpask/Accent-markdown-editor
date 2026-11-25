@@ -1,13 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Accent",
-  "version": "0.8.30",
+  "version": "0.8.31",
   "identifier": "io.accent.editor",
   "build": {
     "frontendDist": "../../dist"
   },
   "app": {
-    "withGlobalTauri": true,
+    "withGlobalTauri": false,
     "windows": [
       {
         "label": "main",

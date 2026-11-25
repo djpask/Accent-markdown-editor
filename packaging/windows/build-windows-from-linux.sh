@@ -74,8 +74,13 @@ chmod +x "${LINKER_WRAPPER}"
 export PATH="/tmp:${SYSROOT_DIR}/usr/bin:${PATH}"
 cd "${REPO_ROOT}"
 
+if [[ ! -d "${REPO_ROOT}/node_modules" ]]; then
+    npm ci
+fi
+npm run build
+
 CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${LINKER_WRAPPER}" \
-    cargo build --release --target x86_64-pc-windows-gnu -p accent-ui
+    cargo build --release --locked --target x86_64-pc-windows-gnu -p accent-ui
 
 x86_64-w64-mingw32-strip "${REPO_ROOT}/target/x86_64-pc-windows-gnu/release/accent-ui.exe"
 rm -f "${SCRIPT_DIR}"/Accent-Setup-*.exe "${SCRIPT_DIR}"/Accent_v*-setup.exe "${SCRIPT_DIR}"/accent-*-x86_64.exe

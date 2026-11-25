@@ -8,8 +8,15 @@ VERSION="$(tr -d '[:space:]' < "${ROOT_DIR}/VERSION")"
 
 echo "==> Building Accent v${VERSION} Arch Linux package..."
 
-# Ensure Cargo.lock is in sync with Cargo.toml workspace version before `makepkg` runs `cargo build --locked`
-(cd "${ROOT_DIR}" && cargo update --workspace --offline)
+# Ensure frontend dist/ bundle and Cargo.lock are fresh before `makepkg` runs `cargo build --locked`
+(
+    cd "${ROOT_DIR}"
+    if [[ ! -d "${ROOT_DIR}/node_modules" ]]; then
+        npm ci
+    fi
+    npm run build
+    cargo update --workspace --offline
+)
 
 cd "${SCRIPT_DIR}"
 

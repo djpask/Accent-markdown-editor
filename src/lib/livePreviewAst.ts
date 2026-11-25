@@ -782,15 +782,29 @@ export function resolveRelativeImagePathForEditor(
   }
 
   const rootFloor = stack.length > 0 && (stack[0] === '' || /^[a-zA-Z]:$/.test(stack[0])) ? 1 : 0;
+  let netUp = 0;
+  let depthBelow = 0;
   for (const seg of relParts) {
     if (!seg || seg === '.') continue;
     if (seg === '..') {
+      if (depthBelow > 0) {
+        depthBelow--;
+      } else {
+        netUp++;
+        if (netUp > 2) {
+          return null;
+        }
+      }
       if (stack.length > rootFloor) {
         stack.pop();
       } else {
         return null;
       }
     } else {
+      if (seg.startsWith('.')) {
+        return null;
+      }
+      depthBelow++;
       stack.push(seg);
     }
   }
@@ -1237,6 +1251,22 @@ export function activateEditorLinkHref(view: EditorView, href: string): boolean 
     void openExternalUrl(trimmed).catch((err) => {
       console.error('openExternalUrl failed:', err);
     });
+    return true;
+  }
+
+  const withoutHash = (trimmed.split('#')[0] ?? trimmed).split('?')[0] ?? trimmed;
+  if (
+    !trimmed.includes('://') &&
+    !trimmed.startsWith('javascript:') &&
+    !trimmed.startsWith('data:') &&
+    /\.(md|markdown|mdown|mkd|txt)$/i.test(withoutHash)
+  ) {
+    view.dom.dispatchEvent(
+      new CustomEvent('accent:open-relative-link', {
+        bubbles: true,
+        detail: { href: trimmed },
+      })
+    );
     return true;
   }
 
@@ -2164,51 +2194,69 @@ function isSelectionIntersecting(
   return state.selection.ranges.some((r) => r.from <= to && r.to >= from);
 }
 
-/**
- * Builds all multi-line and block-level replacements (`TableWidget`, `SetextHeading` underline
- * collapse, `MermaidSvgWidget`, fenced `math`, and `$$...$$` display math) via a `StateField`
- * per `AGENTS.md` §2.L5.3.
- */
-export function buildBlockLiveDecorations(state: EditorState): DecorationSet {
-  const liveCfg = state.facet(livePreviewConfigFacet);
-  if (!liveCfg.enabled) {
-    return Decoration.none;
-  }
+interface CachedSetextBlock {
+  blockFrom: number;
+  blockTo: number;
+  collapseFrom: number;
+  collapseTo: number;
+}
 
-  const isGfm = liveCfg.markdownConfig.base === 'Gfm';
-  const mathEnabled = isGfm && liveCfg.markdownConfig.extensions.math;
-  const mermaidEnabled = isGfm && liveCfg.markdownConfig.extensions.mermaid;
+interface CachedFencedDiagramOrMath {
+  blockFrom: number;
+  blockTo: number;
+  fenceLang: 'mermaid' | 'math';
+  bodyCode: string;
+  blockquoteDepth: number;
+}
+
+interface CachedMultiLineImage {
+  from: number;
+  to: number;
+  alt: string;
+  rawUrl: string;
+  title: string;
+  isStandalone: boolean;
+}
+
+interface CachedDocBlockStructure {
+  tables: ParsedGfmTable[];
+  setextHeadings: CachedSetextBlock[];
+  fencedSpecial: CachedFencedDiagramOrMath[];
+  displayMathBlocks: DisplayMathBlockInfo[];
+  multiLineImages: CachedMultiLineImage[];
+}
+
+const docBlockStructureCache = new WeakMap<Text, Map<string, CachedDocBlockStructure>>();
+
+function getCachedDocBlockStructure(
+  state: EditorState,
+  isGfm: boolean,
+  frontmatterEnabled: boolean
+): CachedDocBlockStructure {
+  const modeKey = `${isGfm ? 'gfm' : 'cm'}:${frontmatterEnabled ? 'fm' : 'nofm'}`;
+  let perDoc = docBlockStructureCache.get(state.doc);
+  if (perDoc) {
+    const hit = perDoc.get(modeKey);
+    if (hit) {
+      return hit;
+    }
+  } else {
+    perDoc = new Map();
+    docBlockStructureCache.set(state.doc, perDoc);
+  }
 
   const tree = ensureSyntaxTree(state, state.doc.length, 50) ?? syntaxTree(state);
   const doc = state.doc;
-  const decoRanges: Range<Decoration>[] = [];
+  const tables = isGfm ? extractGfmTablesFromState(state) : [];
+  const setextHeadings: CachedSetextBlock[] = [];
+  const fencedSpecial: CachedFencedDiagramOrMath[] = [];
+  const displayMathBlocks: DisplayMathBlockInfo[] = [];
+  const multiLineImages: CachedMultiLineImage[] = [];
+  const refMapForBlockImages = extractLinkReferenceMap(state);
 
-  // 1. GFM §4.10 Tables
-  if (isGfm) {
-    const tables = extractGfmTablesFromState(state);
-    for (const tbl of tables) {
-      if (!isSelectionIntersecting(state, tbl.from, tbl.to) && tbl.to > tbl.from) {
-        decoRanges.push(
-          Decoration.replace({
-            widget: new TableWidget(
-              tbl.alignments,
-              tbl.headers,
-              tbl.rows,
-              mathEnabled,
-              tbl.blockquoteDepth
-            ),
-            block: true,
-          }).range(tbl.from, tbl.to)
-        );
-      }
-    }
-  }
-
-  // 2. AST traversal for SetextHeading1..2, FencedCode (mermaid / math), and Paragraph Display Math
   tree.iterate({
     enter(nodeRef) {
       const name = nodeRef.name;
-
       if (
         name === 'Frontmatter' ||
         name === 'Table' ||
@@ -2227,106 +2275,63 @@ export function buildBlockLiveDecorations(state: EditorState): DecorationSet {
         const startLine = doc.lineAt(nodeRef.from);
         const endLine = doc.lineAt(nodeRef.to);
         if (endLine.number > startLine.number) {
-          const blockFrom = startLine.from;
-          const blockTo = endLine.to;
-          if (!isSelectionIntersecting(state, blockFrom, blockTo)) {
-            const prevLine = doc.line(endLine.number - 1);
-            if (endLine.to > prevLine.to) {
-              decoRanges.push(Decoration.replace({}).range(prevLine.to, endLine.to));
-            }
+          const prevLine = doc.line(endLine.number - 1);
+          if (endLine.to > prevLine.to) {
+            setextHeadings.push({
+              blockFrom: startLine.from,
+              blockTo: endLine.to,
+              collapseFrom: prevLine.to,
+              collapseTo: endLine.to,
+            });
           }
         }
         return false;
       }
 
       if (name === 'FencedCode') {
-        if (mermaidEnabled || mathEnabled) {
+        if (isGfm) {
           const info = inspectFencedCodeNode(doc, nodeRef.node);
           if (
             info.hasClosingFence &&
             info.blockTo > info.blockFrom &&
-            !isSelectionIntersecting(state, info.blockFrom, info.blockTo)
+            (info.fenceLang === 'mermaid' || info.fenceLang === 'math')
           ) {
-            if (mermaidEnabled && info.fenceLang === 'mermaid') {
-              const cachedSvg = getCachedMermaidSvg(info.bodyCode, liveCfg.theme);
-              decoRanges.push(
-                Decoration.replace({
-                  widget: new MermaidSvgWidget(
-                    info.bodyCode,
-                    liveCfg.theme,
-                    info.blockFrom,
-                    cachedSvg,
-                    info.blockquoteDepth
-                  ),
-                  block: true,
-                }).range(info.blockFrom, info.blockTo)
-              );
-            } else if (mathEnabled && info.fenceLang === 'math') {
-              decoRanges.push(
-                Decoration.replace({
-                  widget: new KatexMathWidget(
-                    info.bodyCode,
-                    true,
-                    info.blockFrom,
-                    info.blockquoteDepth
-                  ),
-                  block: true,
-                }).range(info.blockFrom, info.blockTo)
-              );
-            }
+            fencedSpecial.push({
+              blockFrom: info.blockFrom,
+              blockTo: info.blockTo,
+              fenceLang: info.fenceLang,
+              bodyCode: info.bodyCode,
+              blockquoteDepth: info.blockquoteDepth,
+            });
           }
         }
         return false;
       }
 
       if (name === 'Paragraph') {
-        if (mathEnabled) {
-          const mathBlocks = collectDisplayMathBlocksFromParagraph(doc, nodeRef.node);
-          for (const mb of mathBlocks) {
-            if (
-              mb.blockTo > mb.blockFrom &&
-              !isSelectionIntersecting(state, mb.blockFrom, mb.blockTo)
-            ) {
-              decoRanges.push(
-                Decoration.replace({
-                  widget: new KatexMathWidget(
-                    mb.latex,
-                    true,
-                    mb.blockFrom,
-                    mb.blockquoteDepth
-                  ),
-                  block: true,
-                }).range(mb.blockFrom, mb.blockTo)
-              );
+        if (isGfm) {
+          const mbs = collectDisplayMathBlocksFromParagraph(doc, nodeRef.node);
+          for (const mb of mbs) {
+            if (mb.blockTo > mb.blockFrom) {
+              displayMathBlocks.push(mb);
             }
           }
         }
-
-        // Multi-line §6.7 Images (`![alt\nline2](url)`) must be replaced via StateField so `\n` is allowed
-        const refMapForBlockImages = extractLinkReferenceMap(state);
         for (let ch = nodeRef.node.firstChild; ch; ch = ch.nextSibling) {
           if (ch.name === 'Image') {
             const sLine = doc.lineAt(ch.from).number;
             const eLine = doc.lineAt(ch.to).number;
-            if (
-              eLine > sLine &&
-              ch.to > ch.from &&
-              !isSelectionIntersecting(state, ch.from, ch.to)
-            ) {
+            if (eLine > sLine && ch.to > ch.from) {
               const classifiedImg = classifyAstImageNode(doc, ch, refMapForBlockImages);
               if (classifiedImg.kind === 'image') {
-                decoRanges.push(
-                  Decoration.replace({
-                    widget: new ImageWidget(
-                      classifiedImg.alt,
-                      classifiedImg.rawUrl,
-                      classifiedImg.title,
-                      ch.from,
-                      liveCfg.currentFilePath,
-                      classifiedImg.isStandalone
-                    ),
-                  }).range(ch.from, ch.to)
-                );
+                multiLineImages.push({
+                  from: ch.from,
+                  to: ch.to,
+                  alt: classifiedImg.alt,
+                  rawUrl: classifiedImg.rawUrl,
+                  title: classifiedImg.title,
+                  isStandalone: classifiedImg.isStandalone,
+                });
               }
             }
           }
@@ -2337,6 +2342,129 @@ export function buildBlockLiveDecorations(state: EditorState): DecorationSet {
       return true;
     },
   });
+
+  const entry: CachedDocBlockStructure = {
+    tables,
+    setextHeadings,
+    fencedSpecial,
+    displayMathBlocks,
+    multiLineImages,
+  };
+  perDoc.set(modeKey, entry);
+  return entry;
+}
+
+/**
+ * Builds all multi-line and block-level replacements (`TableWidget`, `SetextHeading` underline
+ * collapse, `MermaidSvgWidget`, fenced `math`, and `$$...$$` display math) via a `StateField`
+ * per `AGENTS.md` §2.L5.3, reusing a `WeakMap<Text, ...>` block structure cache so selection
+ * movements are $O(B)$ in the number of blocks rather than re-parsing the full document.
+ */
+export function buildBlockLiveDecorations(state: EditorState): DecorationSet {
+  const liveCfg = state.facet(livePreviewConfigFacet);
+  if (!liveCfg.enabled) {
+    return Decoration.none;
+  }
+
+  const isGfm = liveCfg.markdownConfig.base === 'Gfm';
+  const mathEnabled = isGfm && liveCfg.markdownConfig.extensions.math;
+  const mermaidEnabled = isGfm && liveCfg.markdownConfig.extensions.mermaid;
+  const frontmatterEnabled = isGfm && liveCfg.markdownConfig.extensions.frontmatter;
+
+  const cached = getCachedDocBlockStructure(state, isGfm, frontmatterEnabled);
+  const decoRanges: Range<Decoration>[] = [];
+
+  if (isGfm) {
+    for (const tbl of cached.tables) {
+      if (!isSelectionIntersecting(state, tbl.from, tbl.to) && tbl.to > tbl.from) {
+        decoRanges.push(
+          Decoration.replace({
+            widget: new TableWidget(
+              tbl.alignments,
+              tbl.headers,
+              tbl.rows,
+              mathEnabled,
+              tbl.blockquoteDepth
+            ),
+            block: true,
+          }).range(tbl.from, tbl.to)
+        );
+      }
+    }
+  }
+
+  for (const sh of cached.setextHeadings) {
+    if (!isSelectionIntersecting(state, sh.blockFrom, sh.blockTo)) {
+      decoRanges.push(Decoration.replace({}).range(sh.collapseFrom, sh.collapseTo));
+    }
+  }
+
+  for (const fc of cached.fencedSpecial) {
+    if (!isSelectionIntersecting(state, fc.blockFrom, fc.blockTo)) {
+      if (mermaidEnabled && fc.fenceLang === 'mermaid') {
+        const cachedSvg = getCachedMermaidSvg(fc.bodyCode, liveCfg.theme);
+        decoRanges.push(
+          Decoration.replace({
+            widget: new MermaidSvgWidget(
+              fc.bodyCode,
+              liveCfg.theme,
+              fc.blockFrom,
+              cachedSvg,
+              fc.blockquoteDepth
+            ),
+            block: true,
+          }).range(fc.blockFrom, fc.blockTo)
+        );
+      } else if (mathEnabled && fc.fenceLang === 'math') {
+        decoRanges.push(
+          Decoration.replace({
+            widget: new KatexMathWidget(
+              fc.bodyCode,
+              true,
+              fc.blockFrom,
+              fc.blockquoteDepth
+            ),
+            block: true,
+          }).range(fc.blockFrom, fc.blockTo)
+        );
+      }
+    }
+  }
+
+  if (mathEnabled) {
+    for (const mb of cached.displayMathBlocks) {
+      if (!isSelectionIntersecting(state, mb.blockFrom, mb.blockTo)) {
+        decoRanges.push(
+          Decoration.replace({
+            widget: new KatexMathWidget(
+              mb.latex,
+              true,
+              mb.blockFrom,
+              mb.blockquoteDepth
+            ),
+            block: true,
+          }).range(mb.blockFrom, mb.blockTo)
+        );
+      }
+    }
+  }
+
+  for (const img of cached.multiLineImages) {
+    if (!isSelectionIntersecting(state, img.from, img.to)) {
+      decoRanges.push(
+        Decoration.replace({
+          widget: new ImageWidget(
+            img.alt,
+            img.rawUrl,
+            img.title,
+            img.from,
+            liveCfg.currentFilePath,
+            img.isStandalone
+          ),
+        }).range(img.from, img.to)
+      );
+    }
+  }
 
   return decoRanges.length > 0 ? Decoration.set(decoRanges, true) : Decoration.none;
 }
@@ -2604,7 +2732,9 @@ export function buildInlineAndLineLiveDecorations(
   };
 
   const gfmTables: ParsedGfmTable[] =
-    enabled && isGfm ? extractGfmTablesFromState(state) : [];
+    enabled && isGfm
+      ? getCachedDocBlockStructure(state, isGfm, cfg.extensions.frontmatter).tables
+      : [];
   const activeRawTableIntervals: Array<[number, number]> = [];
   const tableByNodeStartLine = new Map<number, ParsedGfmTable>();
   for (const tbl of gfmTables) {

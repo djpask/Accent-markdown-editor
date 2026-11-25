@@ -18,7 +18,11 @@ $DistDir = Join-Path $ScriptDir "dist"
 Write-Host "==> Compilazione di Accent v$Version per Windows 11 (x86_64)..." -ForegroundColor Cyan
 Push-Location $RepoRoot
 try {
-    cargo test --workspace
+    if (-not (Test-Path (Join-Path $RepoRoot "node_modules"))) {
+        npm ci
+    }
+    npm run build
+    cargo test --workspace --locked
     cargo build --release --locked -p accent-ui
 } finally {
     Pop-Location
@@ -34,6 +38,14 @@ $BuiltExe = Join-Path $RepoRoot "target\release\accent-ui.exe"
 $LocalExe = Join-Path $ScriptDir "accent.exe"
 Copy-Item $BuiltExe $LocalExe -Force
 Copy-Item $BuiltExe (Join-Path $StagingDir "accent.exe") -Force
+$BuiltDll = Join-Path $RepoRoot "target\release\WebView2Loader.dll"
+$LocalDll = Join-Path $ScriptDir "WebView2Loader.dll"
+if (Test-Path $BuiltDll) {
+    Copy-Item $BuiltDll $LocalDll -Force
+}
+if (Test-Path $LocalDll) {
+    Copy-Item $LocalDll (Join-Path $StagingDir "WebView2Loader.dll") -Force
+}
 Copy-Item (Join-Path $RepoRoot "img\brand\accent_logo.ico") (Join-Path $StagingDir "accent_logo.ico") -Force
 Copy-Item (Join-Path $RepoRoot "img\brand\accent_logo.png") (Join-Path $StagingDir "accent_logo.png") -Force
 Copy-Item (Join-Path $RepoRoot "README.md") (Join-Path $StagingDir "README.md") -Force

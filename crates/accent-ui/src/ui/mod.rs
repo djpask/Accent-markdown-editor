@@ -315,6 +315,18 @@ pub fn build_i18n_map(locale: Locale) -> BTreeMap<String, String> {
             "Sin encabezados (#)",
         ),
         (
+            "unsaved_exit_title",
+            "Modifiche non salvate",
+            "Unsaved Changes",
+            "Cambios sin guardar",
+        ),
+        (
+            "unsaved_exit_msg",
+            "Ci sono documenti con modifiche non salvate. Vuoi salvarli prima di uscire da Accent?",
+            "There are documents with unsaved changes. Do you want to save them before exiting Accent?",
+            "Hay documentos con cambios sin guardar. ¿Deseas guardarlos antes de salir de Accent?",
+        ),
+        (
             "brightness_mode",
             "Modalità luminosità",
             "Brightness Mode",

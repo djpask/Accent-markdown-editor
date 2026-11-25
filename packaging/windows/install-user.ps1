@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Pacchetto di installazione User-Level per Windows 11 di Accent Markdown Editor.
@@ -13,7 +13,7 @@ $ErrorActionPreference = "Stop"
 
 $AppName = "Accent"
 $AppFullName = "Accent Markdown Editor"
-$AppVersion = "0.7.0"
+$AppVersion = "0.8.30"
 $Publisher = "Accent Developers"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -56,6 +56,19 @@ if (-not $SourceExe) {
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $TargetExe = Join-Path $InstallDir "accent.exe"
 Copy-Item -Path $SourceExe -Destination $TargetExe -Force
+
+$SourceExeDir = Split-Path -Parent $SourceExe
+$WebView2DllCandidates = @(
+    (Join-Path $ScriptDir "WebView2Loader.dll"),
+    (Join-Path $SourceExeDir "WebView2Loader.dll")
+)
+if ($RepoRoot) {
+    $WebView2DllCandidates += (Join-Path $RepoRoot "packaging\windows\WebView2Loader.dll")
+}
+$SourceDll = $WebView2DllCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($SourceDll) {
+    Copy-Item -Path $SourceDll -Destination (Join-Path $InstallDir "WebView2Loader.dll") -Force
+}
 
 $IconCandidates = @(
     (Join-Path $ScriptDir "accent_logo.ico")

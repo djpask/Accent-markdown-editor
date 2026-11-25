@@ -12,18 +12,20 @@ WIN_DIR="${ROOT_DIR}/packaging/windows"
 DIST_DIR="${WIN_DIR}/dist"
 VERSION="$(tr -d '[:space:]' < "${ROOT_DIR}/VERSION")"
 
-# 1. Cross-compila accent.exe e l'installer/disinstallatore Accent-Setup-<version>-x86_64.exe
+# 1. Cross-compila accent.exe e l'installer/disinstallatore Accent_v<version>-setup.exe
 "${WIN_DIR}/build-windows-from-linux.sh"
 
-# 2. Crea il bundle ZIP completo per Windows 11 (con Setup .exe, binario e script PowerShell User-Mode)
+# 2. Crea il bundle ZIP completo per Windows 11 (con Setup .exe, binario + WebView2Loader.dll e script PowerShell User-Mode)
 mkdir -p "${DIST_DIR}"
 rm -rf "${DIST_DIR}"/Accent-*-win11-x64-user*
 STAGING_DIR="${DIST_DIR}/Accent-${VERSION}-win11-x64-user"
 mkdir -p "${STAGING_DIR}"
 
-cp "${WIN_DIR}/Accent-Setup-${VERSION}-x86_64.exe" "${STAGING_DIR}/"
+SETUP_NAME="Accent_v${VERSION}-setup.exe"
+cp "${WIN_DIR}/${SETUP_NAME}" "${STAGING_DIR}/"
 cp "${WIN_DIR}/accent-${VERSION}-x86_64.exe" "${STAGING_DIR}/"
 cp "${WIN_DIR}/accent.exe" "${STAGING_DIR}/"
+cp "${WIN_DIR}/WebView2Loader.dll" "${STAGING_DIR}/"
 cp "${ROOT_DIR}/img/brand/accent_logo.ico" "${STAGING_DIR}/"
 cp "${ROOT_DIR}/img/brand/accent_logo.png" "${STAGING_DIR}/"
 cp "${WIN_DIR}/install-user.cmd" "${STAGING_DIR}/"
@@ -41,9 +43,8 @@ elif command -v bsdtar >/dev/null 2>&1; then
 fi
 
 echo "==> Artefatti Windows 11 (User-Mode + Disinstallatore integrato) pronti:"
-echo "    Setup .exe autonomo:             ${WIN_DIR}/Accent-Setup-${VERSION}-x86_64.exe"
-echo "    Binario standalone (versionato): ${WIN_DIR}/accent-${VERSION}-x86_64.exe"
-echo "    Binario standalone:              ${WIN_DIR}/accent.exe"
+echo "    Setup .exe autonomo:             ${WIN_DIR}/${SETUP_NAME}"
+echo "    Binario app (+ WebView2Loader):  ${WIN_DIR}/accent.exe + ${WIN_DIR}/WebView2Loader.dll"
 if [[ -f "${ZIP_FILE}" ]]; then
     echo "    Archivio ZIP:                    ${ZIP_FILE}"
 fi

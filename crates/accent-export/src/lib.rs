@@ -174,9 +174,65 @@ fn has_uri_scheme(s: &str) -> bool {
     false
 }
 
+fn is_boundary_ancestor_dir(dir: &Path) -> bool {
+    if dir.parent().is_none() {
+        return true;
+    }
+    if let Ok(tmp) = std::fs::canonicalize(std::env::temp_dir()) {
+        if strip_windows_verbatim_prefix(tmp) == dir {
+            return true;
+        }
+    }
+    let s = dir.to_string_lossy();
+    let norm = s.replace('\\', "/");
+    let lower = norm.trim_end_matches('/').to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        ""
+            | "/home"
+            | "/users"
+            | "/root"
+            | "/etc"
+            | "/var"
+            | "/usr"
+            | "/proc"
+            | "/sys"
+            | "c:/users"
+            | "c:/windows"
+    )
+}
+
+fn is_user_dropzone_dir(canonical_base: &Path) -> bool {
+    let Some(folder_name) = canonical_base.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let lower_name = folder_name.to_ascii_lowercase();
+    let is_dropzone_name = matches!(
+        lower_name.as_str(),
+        "downloads" | "scaricati" | "descargas" | "desktop" | "scrivania" | "escritorio"
+    );
+    if !is_dropzone_name {
+        return false;
+    }
+    let Some(parent) = canonical_base.parent() else {
+        return false;
+    };
+    for env_key in ["HOME", "USERPROFILE"] {
+        if let Ok(home_raw) = std::env::var(env_key) {
+            if let Ok(canon_home) = std::fs::canonicalize(home_raw.trim()) {
+                if strip_windows_verbatim_prefix(canon_home) == parent {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Resolves a Markdown/HTML local relative image destination (`diagram.png`, `./assets/img.jpg`,
 /// `../img/logo.png`, including spaces and percent-encoding) against `base_dir`, canonicalizing
-/// the path on disk and enforcing the allowed image extension whitelist.
+/// the path on disk, enforcing the allowed image extension whitelist, and preventing arbitrary
+/// path-traversal (`../../../`) or symlink exfiltration outside the document's project root.
 pub fn resolve_local_image_file(
     raw_url: &str,
     base_dir: Option<&Path>,
@@ -218,6 +274,47 @@ pub fn resolve_local_image_file(
         return None;
     }
 
+    // Enforce max 2 parent climbs (`..`) and block hidden dot-directories/files (`.ssh`, `.config`, etc.)
+    let mut net_up: usize = 0;
+    let mut depth_below: usize = 0;
+    for comp in rel_decoded.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if depth_below > 0 {
+                    depth_below -= 1;
+                } else {
+                    net_up += 1;
+                    if net_up > 2 {
+                        return None;
+                    }
+                }
+            }
+            std::path::Component::Normal(seg) => {
+                let s = seg.to_string_lossy();
+                if s.starts_with('.') {
+                    return None;
+                }
+                depth_below += 1;
+            }
+            _ => return None,
+        }
+    }
+
+    let canonical_base = strip_windows_verbatim_prefix(std::fs::canonicalize(base).ok()?);
+    if net_up > 0 && is_user_dropzone_dir(&canonical_base) {
+        return None;
+    }
+
+    let mut allowed_root = canonical_base.clone();
+    for _ in 0..net_up {
+        let parent = allowed_root.parent()?;
+        if is_boundary_ancestor_dir(parent) {
+            return None;
+        }
+        allowed_root = parent.to_path_buf();
+    }
+
     let candidate_decoded = base.join(rel_decoded);
     let canonical = std::fs::canonicalize(&candidate_decoded)
         .or_else(|_| {
@@ -234,7 +331,7 @@ pub fn resolve_local_image_file(
         .ok()?;
 
     let canonical = strip_windows_verbatim_prefix(canonical);
-    if !canonical.is_file() {
+    if !canonical.starts_with(&allowed_root) || !canonical.is_file() {
         return None;
     }
 
@@ -251,45 +348,60 @@ pub fn resolve_local_image_file(
     })
 }
 
-/// Strips dangerous elements (`<script>`, `<foreignObject>`, `<iframe>`, `<object>`, `<embed>`)
-/// together with their inner payloads, plus inline `on*` event handlers and `javascript:` URIs
-/// from SVG markup so untrusted `.svg` assets cannot execute scripts.
+/// Strips dangerous elements (`<script>`, `<foreignObject>`, `<iframe>`, `<object>`, `<embed>`,
+/// `<style>`, `<set>`, `<animate*>`) together with their inner payloads **iteratively** (zero stack
+/// recursion), plus inline `on*` event handlers and `javascript:` URIs from SVG markup.
 pub fn sanitize_svg_markup(svg_raw: &str) -> String {
     let mut cleaned = svg_raw.to_string();
-    for forbidden_tag in ["script", "foreignobject", "iframe", "object", "embed"] {
-        loop {
-            let lower = cleaned.to_ascii_lowercase();
-            let open_pat = format!("<{forbidden_tag}");
-            let Some(start) = lower.find(&open_pat) else {
+    for forbidden_tag in [
+        "script",
+        "foreignobject",
+        "iframe",
+        "object",
+        "embed",
+        "style",
+        "set",
+        "animate",
+        "animatetransform",
+        "animatemotion",
+    ] {
+        let open_pat = format!("<{forbidden_tag}");
+        let close_pat = format!("</{forbidden_tag}");
+        let mut search_from = 0usize;
+        while search_from < cleaned.len() {
+            let lower_tail = cleaned[search_from..].to_ascii_lowercase();
+            let Some(rel_start) = lower_tail.find(&open_pat) else {
                 break;
             };
+            let start = search_from + rel_start;
             let after_name = start + open_pat.len();
-            if after_name < lower.len() {
-                let next_b = lower.as_bytes()[after_name];
+            if after_name < cleaned.len() {
+                let next_b = cleaned.as_bytes()[after_name];
                 if !(next_b.is_ascii_whitespace() || next_b == b'>' || next_b == b'/') {
-                    // Prefix of a benign tag (e.g. `<feComposite` vs `<embed`): advance safely
-                    let mut rebuilt = String::with_capacity(cleaned.len());
-                    rebuilt.push_str(&cleaned[..after_name]);
-                    rebuilt.push_str(&sanitize_svg_markup(&cleaned[after_name..]));
-                    return rebuilt;
-                }
-            }
-            let close_pat = format!("</{forbidden_tag}");
-            if let Some(rel_gt) = lower[start..].find('>') {
-                let tag_end = start + rel_gt;
-                let self_closing = tag_end > start && lower.as_bytes()[tag_end - 1] == b'/';
-                if self_closing {
-                    cleaned.replace_range(start..=tag_end, "");
+                    // Prefix of a benign tag (e.g. `<embedded` vs `<embed`): advance cursor without recursion
+                    search_from = after_name;
                     continue;
                 }
-                if let Some(rel_close) = lower[tag_end + 1..].find(&close_pat) {
-                    let close_pos = tag_end + 1 + rel_close;
-                    if let Some(close_gt) = lower[close_pos..].find('>') {
+            }
+            if let Some(rel_gt) = lower_tail[rel_start..].find('>') {
+                let tag_end = start + rel_gt;
+                let self_closing = tag_end > start && cleaned.as_bytes()[tag_end - 1] == b'/';
+                if self_closing {
+                    cleaned.replace_range(start..=tag_end, "");
+                    search_from = start;
+                    continue;
+                }
+                let after_open_rel = rel_start + rel_gt + 1;
+                if let Some(rel_close) = lower_tail[after_open_rel..].find(&close_pat) {
+                    let close_pos = start + rel_gt + 1 + rel_close;
+                    if let Some(close_gt) = lower_tail[after_open_rel + rel_close..].find('>') {
                         cleaned.replace_range(start..=(close_pos + close_gt), "");
+                        search_from = start;
                         continue;
                     }
                 }
                 cleaned.replace_range(start..=tag_end, "");
+                search_from = start;
             } else {
                 cleaned.truncate(start);
                 break;
@@ -834,7 +946,7 @@ pub fn render_markdown_to_html(
 ) -> String {
     let mut cache = MermaidCache::new();
     render_markdown_to_html_with_mermaid(markdown, config, |code| {
-        cache.get_or_render_screen_themed(code, theme).svg.clone()
+        cache.get_or_render_svg_themed(code, theme).svg.clone()
     })
 }
 
@@ -867,6 +979,7 @@ pub fn export_markdown_to_standalone_html_with_base_dir(
 <html lang=\"it\">\n\
 <head>\n\
   <meta charset=\"utf-8\"/>\n\
+  <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:;\"/>\n\
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>\n\
   <title>{esc_title}</title>\n\
   <style>\n\
@@ -914,6 +1027,20 @@ pub fn export_document_bytes(
     format: ExportFormat,
     base_dir: Option<&Path>,
 ) -> Result<Vec<u8>, String> {
+    export_document_bytes_with_options(buffer, config, title, format, base_dir, true)
+}
+
+pub fn export_document_bytes_with_options(
+    buffer: &DocumentBuffer,
+    mut config: MarkdownConfig,
+    title: &str,
+    format: ExportFormat,
+    base_dir: Option<&Path>,
+    enable_syntax_and_mermaid: bool,
+) -> Result<Vec<u8>, String> {
+    if !enable_syntax_and_mermaid {
+        config.extensions.mermaid = false;
+    }
     if format == ExportFormat::Html {
         return Ok(export_markdown_to_standalone_html_with_base_dir(
             buffer.as_str(),
@@ -924,7 +1051,7 @@ pub fn export_document_bytes(
         .into_bytes());
     }
     let blocks = buffer.parse_preview_blocks(config);
-    let allow_mermaid = config.mermaid_enabled();
+    let allow_mermaid = enable_syntax_and_mermaid && config.mermaid_enabled();
     match format {
         ExportFormat::Pdf => Ok(export_to_pdf_with_options(
             &blocks,
@@ -969,8 +1096,43 @@ pub fn escape_latex_text(input: &str) -> String {
     out
 }
 
-fn clean_latex_graphics_path(path: &Path) -> String {
-    let forward = path.to_string_lossy().replace('\\', "/");
+fn relative_path_from_base(canonical_target: &Path, base_dir: Option<&Path>) -> PathBuf {
+    if let Some(base) = base_dir {
+        if let Ok(canon_base_raw) = std::fs::canonicalize(base) {
+            let canon_base = strip_windows_verbatim_prefix(canon_base_raw);
+            if let Ok(rel) = canonical_target.strip_prefix(&canon_base) {
+                return rel.to_path_buf();
+            }
+            let base_comps: Vec<_> = canon_base.components().collect();
+            let target_comps: Vec<_> = canonical_target.components().collect();
+            let mut common = 0usize;
+            while common < base_comps.len()
+                && common < target_comps.len()
+                && base_comps[common] == target_comps[common]
+            {
+                common += 1;
+            }
+            if common > 0 {
+                let mut rel = PathBuf::new();
+                for _ in common..base_comps.len() {
+                    rel.push("..");
+                }
+                for c in &target_comps[common..] {
+                    rel.push(c.as_os_str());
+                }
+                return rel;
+            }
+        }
+    }
+    canonical_target
+        .file_name()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("image"))
+}
+
+fn clean_latex_graphics_path(canonical_path: &Path, base_dir: Option<&Path>) -> String {
+    let rel_path = relative_path_from_base(canonical_path, base_dir);
+    let forward = rel_path.to_string_lossy().replace('\\', "/");
     let mut safe = String::with_capacity(forward.len() + 8);
     for ch in forward.chars() {
         match ch {
@@ -983,6 +1145,25 @@ fn clean_latex_graphics_path(path: &Path) -> String {
     } else {
         safe
     }
+}
+
+fn is_safe_export_link_url(url: &str) -> bool {
+    let trimmed = url.trim();
+    if trimmed.is_empty() || trimmed.chars().any(|c| c.is_control()) {
+        return false;
+    }
+    !accent_core::is_dangerous_uri_value(trimmed)
+}
+
+fn sanitize_latex_math_body(literal: &str) -> String {
+    // Prevent math-mode breakout (`\]` or unescaped `$`) and dangerous TeX file/shell primitives
+    let mut cleaned = literal
+        .replace(r"\]", r"\allowbreak ")
+        .replace('$', r"\$");
+    for forbidden in [r"\write18", r"\input", r"\include", r"\openin", r"\openout", r"\catcode"] {
+        cleaned = cleaned.replace(forbidden, r"\textrm{blocked}");
+    }
+    cleaned
 }
 
 fn escape_latex_href(url: &str) -> String {
@@ -1031,8 +1212,10 @@ fn serialize_inlines_to_latex(
                     chunk = format!(r"\sout{{{chunk}}}");
                 }
                 if let Some(ref url) = link_url {
-                    let safe_url = escape_latex_href(url);
-                    chunk = format!(r"\href{{{safe_url}}}{{{chunk}}}");
+                    if is_safe_export_link_url(url) {
+                        let safe_url = escape_latex_href(url);
+                        chunk = format!(r"\href{{{safe_url}}}{{{chunk}}}");
+                    }
                 }
                 out.push_str(&chunk);
             }
@@ -1045,7 +1228,7 @@ fn serialize_inlines_to_latex(
             }
             PreviewInline::Image { alt, url, .. } => {
                 if let Some(resolved) = resolve_local_image_file(url, base_dir) {
-                    let clean_p = clean_latex_graphics_path(&resolved.canonical_path);
+                    let clean_p = clean_latex_graphics_path(&resolved.canonical_path, base_dir);
                     out.push_str(&format!(r"\includegraphics[height=1.4em]{{{clean_p}}}"));
                 } else {
                     let fb = escape_latex_text(&format_missing_image_fallback(alt, url));
@@ -1056,10 +1239,11 @@ fn serialize_inlines_to_latex(
                 literal,
                 display_math,
             } => {
+                let safe_math = sanitize_latex_math_body(literal);
                 if *display_math && !in_table_cell {
-                    out.push_str(&format!(r"\[{literal}\]"));
+                    out.push_str(&format!(r"\[{safe_math}\]"));
                 } else {
-                    out.push_str(&format!("${literal}$"));
+                    out.push_str(&format!("${safe_math}$"));
                 }
             }
         }
@@ -1101,8 +1285,10 @@ fn render_latex_blocks(blocks: &[PreviewBlock], base_dir: Option<&Path>, tex: &m
                 if lang.eq_ignore_ascii_case("mermaid") {
                     tex.push_str("% Mermaid Diagram Block\n");
                 }
+                // Neutralize premature `\end{lstlisting}` environment breakout inside verbatim code
+                let safe_code = code.replace("\\end{lstlisting}", "\\end {lstlisting}");
                 tex.push_str("\\begin{lstlisting}\n");
-                tex.push_str(code);
+                tex.push_str(&safe_code);
                 tex.push_str("\n\\end{lstlisting}\n\n");
             }
             PreviewBlock::List {
@@ -1177,7 +1363,7 @@ fn render_latex_blocks(blocks: &[PreviewBlock], base_dir: Option<&Path>, tex: &m
             PreviewBlock::Image { alt, url, .. } => {
                 let esc_alt = escape_latex_text(alt);
                 if let Some(resolved) = resolve_local_image_file(url, base_dir) {
-                    let clean_p = clean_latex_graphics_path(&resolved.canonical_path);
+                    let clean_p = clean_latex_graphics_path(&resolved.canonical_path, base_dir);
                     tex.push_str("\\begin{figure}[htbp]\n\\centering\n");
                     tex.push_str(&format!(
                         "\\includegraphics[width=0.8\\textwidth]{{{clean_p}}}\n"
@@ -1302,13 +1488,17 @@ fn build_docx_paragraph_from_inlines(
                     r = r.size(sz);
                 }
                 if let Some(ref url) = link_url {
-                    r = r.color("25589E").underline("single");
-                    let link = if let Some(anchor) = url.strip_prefix('#') {
-                        Hyperlink::new(anchor, HyperlinkType::Anchor).add_run(r)
+                    if is_safe_export_link_url(url) {
+                        r = r.color("25589E").underline("single");
+                        let link = if let Some(anchor) = url.strip_prefix('#') {
+                            Hyperlink::new(anchor, HyperlinkType::Anchor).add_run(r)
+                        } else {
+                            Hyperlink::new(url, HyperlinkType::External).add_run(r)
+                        };
+                        p = p.add_hyperlink(link);
                     } else {
-                        Hyperlink::new(url, HyperlinkType::External).add_run(r)
-                    };
-                    p = p.add_hyperlink(link);
+                        p = p.add_run(r);
+                    }
                 } else {
                     p = p.add_run(r);
                 }
@@ -1725,15 +1915,19 @@ fn serialize_inlines_to_odf(
                     esc
                 };
                 if let Some(ref url) = link_url {
-                    let esc_url = xml_escape(url);
-                    let title_attr = link_title
-                        .as_deref()
-                        .filter(|t| !t.is_empty())
-                        .map(|t| format!(r#" office:title="{}""#, xml_escape(t)))
-                        .unwrap_or_default();
-                    out.push_str(&format!(
-                        r#"<text:a xlink:type="simple" xlink:href="{esc_url}"{title_attr}>{styled}</text:a>"#
-                    ));
+                    if is_safe_export_link_url(url) {
+                        let esc_url = xml_escape(url);
+                        let title_attr = link_title
+                            .as_deref()
+                            .filter(|t| !t.is_empty())
+                            .map(|t| format!(r#" office:title="{}""#, xml_escape(t)))
+                            .unwrap_or_default();
+                        out.push_str(&format!(
+                            r#"<text:a xlink:type="simple" xlink:href="{esc_url}"{title_attr}>{styled}</text:a>"#
+                        ));
+                    } else {
+                        out.push_str(&styled);
+                    }
                 } else {
                     out.push_str(&styled);
                 }
@@ -2177,12 +2371,14 @@ fn serialize_inlines_to_xhtml(
                     chunk = format!("<del>{chunk}</del>");
                 }
                 if let Some(ref url) = link_url {
-                    let title_attr = link_title
-                        .as_deref()
-                        .filter(|t| !t.is_empty())
-                        .map(|t| format!(r#" title="{}""#, xml_escape(t)))
-                        .unwrap_or_default();
-                    chunk = format!(r#"<a href="{}"{title_attr}>{chunk}</a>"#, xml_escape(url));
+                    if is_safe_export_link_url(url) {
+                        let title_attr = link_title
+                            .as_deref()
+                            .filter(|t| !t.is_empty())
+                            .map(|t| format!(r#" title="{}""#, xml_escape(t)))
+                            .unwrap_or_default();
+                        chunk = format!(r#"<a href="{}"{title_attr}>{chunk}</a>"#, xml_escape(url));
+                    }
                 }
                 out.push_str(&chunk);
             }
@@ -2578,10 +2774,40 @@ fn pdf_win_ansi_escape(text: &str) -> String {
             out.push_str(&format!("\\{:03o}", code));
         } else {
             match ch {
-                '—' | '–' => out.push('-'),
-                '•' => out.push_str("\\267"),
-                '“' | '”' | '«' | '»' => out.push('"'),
-                '’' | '‘' => out.push('\''),
+                '€' => out.push_str("\\200"),
+                '‚' => out.push_str("\\202"),
+                'ƒ' => out.push_str("\\203"),
+                '„' => out.push_str("\\204"),
+                '…' => out.push_str("\\205"),
+                '†' => out.push_str("\\206"),
+                '‡' => out.push_str("\\207"),
+                'ˆ' => out.push_str("\\210"),
+                '‰' => out.push_str("\\211"),
+                'Š' => out.push_str("\\212"),
+                '‹' => out.push_str("\\213"),
+                'Œ' => out.push_str("\\214"),
+                'Ž' => out.push_str("\\216"),
+                '‘' => out.push_str("\\221"),
+                '’' => out.push_str("\\222"),
+                '“' => out.push_str("\\223"),
+                '”' => out.push_str("\\224"),
+                '•' => out.push_str("\\225"),
+                '–' => out.push_str("\\226"),
+                '—' => out.push_str("\\227"),
+                '˜' => out.push_str("\\230"),
+                '™' => out.push_str("\\231"),
+                'š' => out.push_str("\\232"),
+                '›' => out.push_str("\\233"),
+                'œ' => out.push_str("\\234"),
+                'ž' => out.push_str("\\236"),
+                'Ÿ' => out.push_str("\\237"),
+                '→' => out.push_str("->"),
+                '←' => out.push_str("<-"),
+                '↔' => out.push_str("<->"),
+                '⇒' => out.push_str("=>"),
+                '≠' => out.push_str("!="),
+                '≤' => out.push_str("<="),
+                '≥' => out.push_str(">="),
                 '☑' => out.push_str("[x]"),
                 '☐' => out.push_str("[ ]"),
                 _ => out.push('?'),
@@ -3076,23 +3302,46 @@ impl PdfPageBuilder {
                             continue;
                         }
                     }
-                    let code_lines: Vec<&str> = code.lines().collect();
-                    let box_h = (code_lines.len().max(1) as f32) * 13.5 + 12.0;
-                    self.ensure_space(box_h + 8.0);
-                    let box_bottom = self.cur_y - box_h + 10.0;
-                    self.cur_ops.push_str(&format!(
-                        "0.95 0.94 0.91 rg {left_x:.1} {box_bottom:.1} {avail_w:.1} {box_h:.1} re f\n"
-                    ));
-                    for cline in code_lines {
-                        self.cur_ops.push_str(&format!(
-                            "BT /F4 9.5 Tf 0.20 0.20 0.22 rg {:.1} {:.1} Td ({}) Tj ET\n",
-                            left_x + 8.0,
-                            self.cur_y,
-                            pdf_win_ansi_escape(cline)
-                        ));
-                        self.cur_y -= 13.5;
+                    let mut code_lines: Vec<&str> = code.lines().collect();
+                    if code_lines.is_empty() {
+                        code_lines.push("");
                     }
-                    self.cur_y -= 10.0;
+                    let line_step = 13.5_f32;
+                    let mut line_idx = 0usize;
+                    while line_idx < code_lines.len() {
+                        if self.cur_y - (line_step + 16.0) < self.bottom_y {
+                            self.pages_ops.push(std::mem::take(&mut self.cur_ops));
+                            self.pages_annots.push(std::mem::take(&mut self.cur_annots));
+                            self.cur_y = self.top_y;
+                        }
+                        let avail_pt = (self.cur_y - self.bottom_y - 12.0).max(line_step);
+                        let chunk_len = ((avail_pt / line_step).floor() as usize)
+                            .max(1)
+                            .min(code_lines.len() - line_idx);
+                        let chunk = &code_lines[line_idx..line_idx + chunk_len];
+                        let box_h = (chunk.len() as f32) * line_step + 12.0;
+                        let box_bottom = self.cur_y - box_h + 10.0;
+                        self.cur_ops.push_str(&format!(
+                            "0.95 0.94 0.91 rg {left_x:.1} {box_bottom:.1} {avail_w:.1} {box_h:.1} re f\n"
+                        ));
+                        for cline in chunk {
+                            self.cur_ops.push_str(&format!(
+                                "BT /F4 9.5 Tf 0.20 0.20 0.22 rg {:.1} {:.1} Td ({}) Tj ET\n",
+                                left_x + 8.0,
+                                self.cur_y,
+                                pdf_win_ansi_escape(cline)
+                            ));
+                            self.cur_y -= line_step;
+                        }
+                        line_idx += chunk_len;
+                        if line_idx < code_lines.len() {
+                            self.pages_ops.push(std::mem::take(&mut self.cur_ops));
+                            self.pages_annots.push(std::mem::take(&mut self.cur_annots));
+                            self.cur_y = self.top_y;
+                        } else {
+                            self.cur_y -= 10.0;
+                        }
+                    }
                 }
                 PreviewBlock::List {
                     ordered,
@@ -3866,6 +4115,79 @@ Paragrafo con break\\\nSeconda riga e badge inline ![Badge SVG](./assets/badge.s
         assert!(tex_out.contains("\\setcounter{enumi}{3}"));
         assert!(!tex_out.contains("[Immagine: Diagramma Locale"));
         assert!(tex_out.contains("[Immagine: Non Trovata"));
+        // Verify LaTeX does not leak the absolute OS path of `tmp_root`
+        let canon_tmp_str = strip_windows_verbatim_prefix(std::fs::canonicalize(&tmp_root).unwrap())
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert!(
+            !tex_out.contains(&canon_tmp_str),
+            "LaTeX export must emit portable relative image paths without leaking OS canonical paths"
+        );
+
+        // 4. Security & resilience checks: deep `../../../` traversal blocked, iterative SVG sanitizer,
+        //    HTML CSP meta, LaTeX `\end{lstlisting}` neutralization, EPUB `javascript:` filtering, PDF WinAnsi `€` & pagination
+        let secret_outside = tmp_root.join("outside_secret.png");
+        std::fs::write(&secret_outside, &png_bytes).unwrap();
+        let deep_sub = docs_dir.join("a").join("b").join("c");
+        std::fs::create_dir_all(&deep_sub).unwrap();
+        assert!(
+            resolve_local_image_file("../../../outside_secret.png", Some(&deep_sub)).is_none(),
+            "Deep >2 parent traversal must be blocked"
+        );
+        let dot_dir = docs_dir.join(".hidden");
+        std::fs::create_dir_all(&dot_dir).unwrap();
+        std::fs::write(dot_dir.join("priv.png"), &png_bytes).unwrap();
+        assert!(
+            resolve_local_image_file("./.hidden/priv.png", Some(&docs_dir)).is_none(),
+            "Hidden dot-directories must be blocked"
+        );
+
+        // 5,000 benign `<embedded` / `<scripting` tags must not cause stack overflow in `sanitize_svg_markup`
+        let mut prefix_heavy_svg = String::from("<svg xmlns=\"http://www.w3.org/2000/svg\">");
+        for _ in 0..5000 {
+            prefix_heavy_svg.push_str("<g data-kind=\"embedded\"/>");
+        }
+        prefix_heavy_svg.push_str("<set attributeName=\"onload\" to=\"evil()\"/></svg>");
+        let clean_heavy = sanitize_svg_markup(&prefix_heavy_svg);
+        assert!(!clean_heavy.to_ascii_lowercase().contains("<set"));
+        assert!(html_out.contains("http-equiv=\"Content-Security-Policy\""));
+
+        let sec_md = "Prezzo: 99€ — test…\n\n[Bad](javascript:alert(1))\n\n```tex\n\\end{lstlisting}\n\\input{/etc/passwd}\n```\n";
+        let sec_buf = DocumentBuffer::from_str_content(sec_md);
+        let tex_sec = String::from_utf8(
+            export_document_bytes(&sec_buf, cfg, "Sec", ExportFormat::Latex, None).unwrap(),
+        )
+        .unwrap();
+        assert!(!tex_sec.contains("\\end{lstlisting}\n\\input"));
+        assert!(!tex_sec.contains("javascript:"));
+
+        let epub_sec =
+            export_document_bytes(&sec_buf, cfg, "Sec", ExportFormat::Epub, None).unwrap();
+        let mut epub_sec_zip = ZipArchive::new(Cursor::new(&epub_sec)).unwrap();
+        let mut epub_ch = String::new();
+        epub_sec_zip
+            .by_name("OEBPS/chapter1.xhtml")
+            .unwrap()
+            .read_to_string(&mut epub_ch)
+            .unwrap();
+        assert!(!epub_ch.contains("javascript:"));
+
+        let mut long_code_md = String::from("Prezzo 42€…\n\n```rust\n");
+        for i in 0..130 {
+            long_code_md.push_str(&format!("let riga_{i} = {i};\n"));
+        }
+        long_code_md.push_str("```\n");
+        let long_buf = DocumentBuffer::from_str_content(&long_code_md);
+        let pdf_long = String::from_utf8_lossy(
+            &export_document_bytes(&long_buf, cfg, "Long", ExportFormat::Pdf, None).unwrap(),
+        )
+        .into_owned();
+        assert!(pdf_long.contains("\\200"), "Euro sign must encode as WinAnsi \\200");
+        assert!(pdf_long.contains("\\205"), "Ellipsis must encode as WinAnsi \\205");
+        assert!(
+            pdf_long.matches("/Type /Page ").count() >= 2,
+            "130-line code block must paginate cleanly across >= 2 PDF pages"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp_root);
     }

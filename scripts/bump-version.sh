@@ -46,9 +46,9 @@ if [[ -f "$ROOT_DIR/packaging/windows/install-user.ps1" ]]; then
     sed -i -E "s/^\$AppVersion = \"[0-9]+\.[0-9]+\.[0-9]+\"/\$AppVersion = \"${SEMVER}\"/" "$ROOT_DIR/packaging/windows/install-user.ps1"
 fi
 
-# 6. Version consistency unit test in crates/accent-ui/src/lib.rs
+# 6. Optional legacy hardcoded assertion in crates/accent-ui/src/lib.rs (dynamic check reads VERSION directly)
 if [[ -f "$ROOT_DIR/crates/accent-ui/src/lib.rs" ]]; then
-    sed -i -E "s/assert_eq!\(VERSION, \"[0-9]+\.[0-9]+\.[0-9]+\"\);/assert_eq!(VERSION, \"${SEMVER}\");/" "$ROOT_DIR/crates/accent-ui/src/lib.rs"
+    sed -i -E "s/assert_eq!\(VERSION, \"[0-9]+\.[0-9]+\.[0-9]+\"\);/assert_eq!(VERSION, \"${SEMVER}\");/" "$ROOT_DIR/crates/accent-ui/src/lib.rs" || true
 fi
 
 # 7. Frontend package.json, tauri.conf.json, and App.svelte About dialog

@@ -75,6 +75,8 @@
   let outlineOpen = $state(false);
   let themesModalOpen = $state(false);
   let pendingCloseTabIndex: number | null = $state(null);
+  let pendingWindowClose = $state(false);
+  let allowImmediateWindowClose = false;
   let draftTheme: ThemeMode = $state('Sepia');
   let draftPreset: ColorPalettePreset = $state('AmberCoral');
   let draftPreviewTokens: PaletteCssTokens | null = $state(null);
@@ -92,6 +94,7 @@
   let lastActiveTabIdForScroll = -1;
   let unlistenSession: (() => void) | null = null;
   let unlistenResize: (() => void) | null = null;
+  let unlistenCloseReq: (() => void) | null = null;
 
   function tr(key: string, fallback = ''): string {
     return snapshot?.i18n?.[key] ?? (fallback || key);
@@ -272,6 +275,7 @@
     return (
       themesModalOpen ||
       pendingCloseTabIndex !== null ||
+      pendingWindowClose ||
       snapshot.overlay === 'PreferencesDialog' ||
       snapshot.overlay === 'ExportDialog' ||
       snapshot.overlay === 'ShortcutsDialog' ||
@@ -322,6 +326,101 @@
     }
   }
 
+  async function requestWindowClose() {
+    if (!snapshot || !snapshot.tabs.some((t) => t.is_dirty)) {
+      allowImmediateWindowClose = true;
+      await windowClose();
+      return;
+    }
+    if (snapshot.overlay !== 'None') {
+      await send({ SetOverlay: 'None' });
+    }
+    pendingWindowClose = true;
+  }
+
+  async function confirmDiscardAndExitWindow() {
+    pendingWindowClose = false;
+    await send('DiscardAllUnsavedForExit');
+    allowImmediateWindowClose = true;
+    await windowClose();
+  }
+
+  async function confirmSaveAllAndExitWindow() {
+    if (!snapshot) return;
+    for (let i = 0; i < snapshot.tabs.length; i++) {
+      if (!snapshot.tabs[i]?.is_dirty) continue;
+      if (snapshot.active_tab_index !== i) {
+        await send({ SwitchTab: i });
+      }
+      if (snapshot?.current_file_path) {
+        await send('SaveDocument');
+      } else {
+        latestEditSeq += 1;
+        const next = await saveAsNativeFileDialog();
+        syncSnapshot(next, true);
+      }
+      if (snapshot?.tabs[i]?.is_dirty) {
+        // User cancelled native Save-As dialog or save failed: abort exit cleanly
+        return;
+      }
+    }
+    pendingWindowClose = false;
+    allowImmediateWindowClose = true;
+    await windowClose();
+  }
+
+  function resolveRelativeDocTarget(baseFilePath: string | null, rawRelPath: string): string {
+    let decoded = rawRelPath;
+    try {
+      decoded = decodeURIComponent(rawRelPath);
+    } catch {
+      decoded = rawRelPath;
+    }
+    if (!baseFilePath) return decoded;
+    const isWin = /^[a-zA-Z]:/.test(baseFilePath) || baseFilePath.includes('\\');
+    const sep = isWin ? '\\' : '/';
+    const lastSep = Math.max(baseFilePath.lastIndexOf('/'), baseFilePath.lastIndexOf('\\'));
+    if (lastSep < 0) return decoded;
+    const dir = lastSep === 0 ? '/' : baseFilePath.slice(0, lastSep);
+    const stack = dir.split(/[\\/]+/).filter((s, idx) => idx === 0 || (s.length > 0 && s !== '.'));
+    const floor = stack.length > 0 && (stack[0] === '' || /^[a-zA-Z]:$/.test(stack[0])) ? 1 : 0;
+    for (const seg of decoded.split(/[\\/]+/)) {
+      if (!seg || seg === '.') continue;
+      if (seg === '..') {
+        if (stack.length > floor) stack.pop();
+      } else {
+        stack.push(seg);
+      }
+    }
+    return stack.length === 1 && stack[0] === '' ? '/' : stack.join(sep);
+  }
+
+  async function openRelativeMarkdownHref(rawHref: string) {
+    const hashIdx = rawHref.indexOf('#');
+    const anchorPart = hashIdx >= 0 ? rawHref.slice(hashIdx + 1) : '';
+    const beforeHash = hashIdx >= 0 ? rawHref.slice(0, hashIdx) : rawHref;
+    const cleanPath = (beforeHash.split('?')[0] ?? beforeHash).trim();
+    if (!cleanPath) return;
+
+    const targetPath = resolveRelativeDocTarget(snapshot?.current_file_path ?? null, cleanPath);
+    await send({ OpenFile: targetPath });
+
+    if (anchorPart && previewPaneEl) {
+      queueMicrotask(() => {
+        const slug = decodeURIComponent(anchorPart).trim().toLowerCase();
+        const byId = previewPaneEl?.querySelector(`[id="${CSS.escape(slug)}"]`);
+        byId?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    }
+  }
+
+  function handleEditorRelativeLinkEvent(ev: Event) {
+    const href = (ev as CustomEvent<{ href?: string }>).detail?.href?.trim() ?? '';
+    if (href) {
+      void openRelativeMarkdownHref(href);
+    }
+  }
+
   function handleGlobalKeyDown(e: KeyboardEvent) {
     if (!snapshot) return;
     const ctrl = e.ctrlKey || e.metaKey;
@@ -345,6 +444,11 @@
     }
 
     if (e.key === 'Escape') {
+      if (pendingWindowClose) {
+        pendingWindowClose = false;
+        e.preventDefault();
+        return;
+      }
       if (pendingCloseTabIndex !== null) {
         pendingCloseTabIndex = null;
         e.preventDefault();
@@ -712,17 +816,9 @@
       !href.includes('://') &&
       !href.startsWith('javascript:') &&
       !href.startsWith('data:') &&
-      /\.(md|markdown|txt)$/i.test(href)
+      /\.(md|markdown|mdown|mkd|txt)(?:[?#].*)?$/i.test(href)
     ) {
-      const basePath = snapshot?.current_file_path;
-      if (basePath) {
-        const sep = basePath.includes('\\') ? '\\' : '/';
-        const lastSep = Math.max(basePath.lastIndexOf('/'), basePath.lastIndexOf('\\'));
-        const dir = lastSep >= 0 ? basePath.slice(0, lastSep) : '.';
-        void send({ OpenFile: `${dir}${sep}${href}` });
-      } else {
-        void send({ OpenFile: href });
-      }
+      void openRelativeMarkdownHref(href);
     }
   }
 
@@ -810,9 +906,23 @@
 
   onMount(async () => {
     window.addEventListener('keydown', handleGlobalKeyDown, { capture: true });
+    window.addEventListener('accent:open-relative-link', handleEditorRelativeLinkEvent);
     const win = getCurrentWindow();
     try {
       isMaximized = await win.isMaximized();
+    } catch {
+      // Ignore outside Tauri runtime
+    }
+    try {
+      unlistenCloseReq = await win.onCloseRequested((event) => {
+        if (!allowImmediateWindowClose && snapshot?.tabs.some((t) => t.is_dirty)) {
+          event.preventDefault();
+          if (snapshot.overlay !== 'None') {
+            void send({ SetOverlay: 'None' });
+          }
+          pendingWindowClose = true;
+        }
+      });
     } catch {
       // Ignore outside Tauri runtime
     }
@@ -843,8 +953,10 @@
 
   onDestroy(() => {
     window.removeEventListener('keydown', handleGlobalKeyDown, { capture: true });
+    window.removeEventListener('accent:open-relative-link', handleEditorRelativeLinkEvent);
     unlistenSession?.();
     unlistenResize?.();
+    unlistenCloseReq?.();
     window.removeEventListener('resize', updateTabOverflowState);
   });
 
@@ -1120,7 +1232,7 @@
             class="csd-win-btn csd-win-close"
             aria-label={tr('tooltip_close')}
             title={tr('tooltip_close')}
-            onclick={() => windowClose()}
+            onclick={() => requestWindowClose()}
           >
             ×
           </button>
@@ -2648,7 +2760,7 @@
                 style="flex-shrink: 0; display: block;"
               />
               <div>
-                <p style="margin: 0 0 6px 0; font-weight: 700;">Accent Markdown Editor v0.8.30</p>
+                <p style="margin: 0 0 6px 0; font-weight: 700;">Accent Markdown Editor v0.8.31</p>
                 <p style="margin: 0; color: var(--fg-muted);">
                   Rust Backend (L1–L4) • Tauri v2 • Svelte 5 • CodeMirror 6 • Offline KaTeX &amp; Mermaid
                 </p>
@@ -2718,6 +2830,74 @@
             type="button"
             class="footer-btn footer-btn-primary"
             onclick={confirmSaveAndCloseTab}
+          >
+            {tr('save')}
+          </button>
+        </div>
+      </div>
+    {/if}
+
+    <!-- ====================================================================
+         11. UNSAVED WINDOW EXIT CONFIRMATION MODAL
+         ==================================================================== -->
+    {#if pendingWindowClose}
+      <div
+        class="overlay-backdrop is-modal"
+        role="presentation"
+        onclick={() => (pendingWindowClose = false)}
+      ></div>
+      <div
+        class="modal-card info-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="unsaved-exit-modal-title"
+        data-testid="modal-unsaved-exit"
+      >
+        <div class="modal-header">
+          <h2 id="unsaved-exit-modal-title">
+            {tr('unsaved_exit_title', 'Modifiche non salvate')}
+          </h2>
+          <button
+            type="button"
+            class="modal-close-btn"
+            aria-label={tr('cancel')}
+            onclick={() => (pendingWindowClose = false)}
+          >
+            ×
+          </button>
+        </div>
+        <div class="modal-body">
+          <p style="margin: 0; line-height: 1.5;">
+            {tr(
+              'unsaved_exit_msg',
+              'Ci sono documenti con modifiche non salvate. Vuoi salvarli prima di uscire da Accent?'
+            )}
+          </p>
+        </div>
+        <div class="modal-footer">
+          <!-- svelte-ignore a11y_autofocus -->
+          <button
+            id="unsaved-exit-cancel"
+            type="button"
+            class="footer-btn"
+            autofocus
+            onclick={() => (pendingWindowClose = false)}
+          >
+            {tr('cancel')}
+          </button>
+          <button
+            id="unsaved-exit-discard"
+            type="button"
+            class="footer-btn footer-btn-danger"
+            onclick={confirmDiscardAndExitWindow}
+          >
+            {tr('discard_changes')}
+          </button>
+          <button
+            id="unsaved-exit-save"
+            type="button"
+            class="footer-btn footer-btn-primary"
+            onclick={confirmSaveAllAndExitWindow}
           >
             {tr('save')}
           </button>

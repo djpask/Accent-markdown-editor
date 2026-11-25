@@ -252,6 +252,15 @@ fi
 EOF
     chmod +x "${LINKER_WRAPPER}"
 
+    echo "==> Build bundle frontend Vite (dist/)..."
+    (
+        cd "${REPO_ROOT}"
+        if [[ ! -d "${REPO_ROOT}/node_modules" ]]; then
+            npm ci
+        fi
+        npm run build
+    )
+
     echo "==> Compilazione release di Accent con ABI Debian 13 (glibc <= ${TARGET_MAX_GLIBC})..."
     (
         cd "${REPO_ROOT}"
@@ -260,6 +269,15 @@ EOF
     )
     BUILT_BIN="${REPO_ROOT}/target/x86_64-unknown-linux-gnu/release/accent-ui"
 else
+    echo "==> Build bundle frontend Vite (dist/)..."
+    (
+        cd "${REPO_ROOT}"
+        if [[ ! -d "${REPO_ROOT}/node_modules" ]]; then
+            npm ci
+        fi
+        npm run build
+    )
+
     echo "==> Compilazione release nativa di Accent (host glibc ${HOST_GLIBC} <= ${TARGET_MAX_GLIBC})..."
     (
         cd "${REPO_ROOT}"
@@ -304,8 +322,9 @@ if [[ "$(printf '%s\n%s\n' "${TARGET_MAX_GLIBC}" "${MAX_REQ_GLIBC}" | sort -V | 
     exit 1
 fi
 
-# 3. File Desktop, icone e documentazione
+# 3. File Desktop, icone e documentazione (+ alias Wayland `io.accent.editor.desktop`)
 install -Dm644 "${SCRIPT_DIR}/accent.desktop" "${STAGE_DIR}/usr/share/applications/accent.desktop"
+ln -sf accent.desktop "${STAGE_DIR}/usr/share/applications/io.accent.editor.desktop"
 if command -v desktop-file-validate >/dev/null 2>&1; then
     desktop-file-validate "${STAGE_DIR}/usr/share/applications/accent.desktop"
 fi

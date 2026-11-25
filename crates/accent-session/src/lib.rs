@@ -838,6 +838,7 @@ pub enum Action {
     ExportDocument(String),
     SetWalAutosave(bool),
     SetDiskWatcher(bool),
+    DiscardAllUnsavedForExit,
     SetStatusMessage(String),
     InsertText(String),
     MoveCursor(usize),
@@ -1048,14 +1049,37 @@ pub const JOURNAL_DEBOUNCE_MS: u64 = 200;
 /// Debounce threshold for rapid settings mutations (zoom wheel, slider drags, tab cycling).
 pub const SETTINGS_DEBOUNCE_MS: u64 = 250;
 
-fn default_sample_file_path() -> PathBuf {
-    std::env::temp_dir().join("esempio_accent.md")
+fn runtime_dir_for_recovery(recovery_dir: &std::path::Path) -> PathBuf {
+    let dir = recovery_dir
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(recovery_dir)
+        .to_path_buf();
+    let _ = accent_storage::ensure_private_dir(&dir);
+    dir
+}
+
+fn sample_file_path_for_recovery(recovery_dir: &std::path::Path) -> PathBuf {
+    runtime_dir_for_recovery(recovery_dir).join("esempio_accent.md")
+}
+
+fn make_untitled_wal_session_id(tab_id: u64) -> String {
+    static UNTITLED_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let seq = UNTITLED_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!(
+        "untitled-{}-{}-{}-{}",
+        std::process::id(),
+        accent_storage::current_utc_ms(),
+        tab_id,
+        seq
+    )
 }
 
 /// Represents an open document tab with its own isolated buffer, undo/redo stack, cursor, dirty state, and WAL metadata.
 #[derive(Debug, Clone)]
 pub struct DocumentTab {
     pub tab_id: u64,
+    pub wal_session_id: String,
     pub document_title: String,
     pub current_file_path: Option<PathBuf>,
     pub is_dirty: bool,
@@ -1100,6 +1124,7 @@ pub struct Session {
     pub tab_scroll_offset: usize,
     pub tab_bar_max_vis: usize,
     pub next_tab_id: u64,
+    pub wal_session_id: String,
     pub document_title: String,
     pub current_file_path: Option<PathBuf>,
     pub is_dirty: bool,
@@ -1191,9 +1216,9 @@ impl Session {
 
     pub fn with_config_and_recovery(config_path: PathBuf, recovery_dir: PathBuf) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let sample_path = default_sample_file_path();
+        let sample_path = sample_file_path_for_recovery(&recovery_dir);
         if !sample_path.exists() {
-            let _ = std::fs::write(&sample_path, DEFAULT_SAMPLE_MARKDOWN);
+            let _ = accent_storage::atomic_save_private_fast(&sample_path, DEFAULT_SAMPLE_MARKDOWN);
         }
         let mut recent_files = Vec::new();
         for candidate in [
@@ -1209,12 +1234,14 @@ impl Session {
         let initial_len = Some(default_buf.len_bytes());
         let initial_hash = Some(accent_storage::compute_content_hash(default_buf.as_str()));
         let initial_meta = Some(accent_storage::probe_file_meta(&sample_path));
-        let default_export_path = std::env::temp_dir()
+        let default_export_path = runtime_dir_for_recovery(&recovery_dir)
             .join("esempio_accent.pdf")
             .to_string_lossy()
             .to_string();
+        let initial_wal_sid = accent_storage::journal_session_id_for_path(Some(&sample_path));
         let initial_tab = DocumentTab {
             tab_id: 1,
+            wal_session_id: initial_wal_sid.clone(),
             document_title: "esempio_accent.md".to_string(),
             current_file_path: Some(sample_path.clone()),
             is_dirty: false,
@@ -1236,6 +1263,7 @@ impl Session {
             tab_scroll_offset: 0,
             tab_bar_max_vis: 16,
             next_tab_id: 2,
+            wal_session_id: initial_wal_sid,
             document_title: "esempio_accent.md".to_string(),
             current_file_path: Some(sample_path),
             is_dirty: false,
@@ -1310,8 +1338,17 @@ impl Session {
         if self.tabs.is_empty() {
             let id = self.next_tab_id;
             self.next_tab_id += 1;
+            let sid = if !self.wal_session_id.is_empty() {
+                self.wal_session_id.clone()
+            } else if let Some(ref p) = self.current_file_path {
+                accent_storage::journal_session_id_for_path(Some(p))
+            } else {
+                make_untitled_wal_session_id(id)
+            };
+            self.wal_session_id = sid.clone();
             self.tabs.push(DocumentTab {
                 tab_id: id,
+                wal_session_id: sid,
                 document_title: self.document_title.clone(),
                 current_file_path: self.current_file_path.clone(),
                 is_dirty: self.is_dirty,
@@ -1340,6 +1377,9 @@ impl Session {
         if slot.current_file_path != self.current_file_path {
             slot.current_file_path = self.current_file_path.clone();
         }
+        if !self.wal_session_id.is_empty() && slot.wal_session_id != self.wal_session_id {
+            slot.wal_session_id = self.wal_session_id.clone();
+        }
         slot.is_dirty = self.is_dirty;
         if slot.original_file_hash != self.original_file_hash {
             slot.original_file_hash = self.original_file_hash.clone();
@@ -1367,6 +1407,7 @@ impl Session {
             self.active_tab_index = self.tabs.len() - 1;
         }
         let slot = &self.tabs[self.active_tab_index];
+        self.wal_session_id = slot.wal_session_id.clone();
         self.document_title = slot.document_title.clone();
         self.current_file_path = slot.current_file_path.clone();
         self.is_dirty = slot.is_dirty;
@@ -1535,11 +1576,13 @@ impl Session {
     }
 
     fn is_single_untouched_placeholder(&self) -> bool {
+        let expected_sample = sample_file_path_for_recovery(&self.recovery_dir);
         self.tabs.len() == 1
             && !self.is_dirty
             && !self.tabs[0].is_dirty
+            && !self.tabs[0].recovered_from_crash
             && (self.current_file_path.is_none()
-                || self.current_file_path.as_deref() == Some(default_sample_file_path().as_path()))
+                || self.current_file_path.as_deref() == Some(expected_sample.as_path()))
     }
 
     fn apply_journal_to_tab(tab: &mut DocumentTab, entry: accent_storage::RecoveryJournalEntry) {
@@ -1552,6 +1595,13 @@ impl Session {
             .unwrap_or_else(|| entry.document_title.clone());
         let mut restored_buf = DocumentBuffer::from_str_content(&entry.content);
         restored_buf.set_cursor(entry.cursor_char_offset.min(restored_buf.len_chars()));
+        tab.wal_session_id = if let Some(ref p) = entry.target_path {
+            accent_storage::journal_session_id_for_path(Some(p))
+        } else if !entry.session_id.is_empty() {
+            entry.session_id
+        } else {
+            make_untitled_wal_session_id(tab.tab_id)
+        };
         tab.document_title = title;
         tab.current_file_path = entry.target_path;
         tab.original_file_hash = entry.original_file_hash;
@@ -1700,6 +1750,7 @@ impl Session {
                     self.next_tab_id += 1;
                     restored_tabs.push(DocumentTab {
                         tab_id: id,
+                        wal_session_id: accent_storage::journal_session_id_for_path(Some(tab_path)),
                         document_title: title,
                         current_file_path: Some(tab_path.clone()),
                         is_dirty: false,
@@ -1744,6 +1795,8 @@ impl Session {
                         }
                     }
                     self.last_checked_disk_meta = Some(accent_storage::probe_file_meta(&last_file));
+                    self.wal_session_id =
+                        accent_storage::journal_session_id_for_path(Some(&last_file));
                     self.current_file_path = Some(last_file);
                     self.original_file_hash = Some(accent_storage::compute_content_hash(&content));
                     self.original_file_len = Some(content.len());
@@ -1767,7 +1820,7 @@ impl Session {
         };
         self.mermaid_cache
             .borrow_mut()
-            .get_or_render_screen_themed(source, m_theme)
+            .get_or_render_svg_themed(source, m_theme)
     }
 
     fn update_default_export_path(&mut self) {
@@ -1800,7 +1853,16 @@ impl Session {
     pub fn flush_journal_now(&mut self) -> std::io::Result<PathBuf> {
         let cur_char = self.buffer.cursor();
         let cur_byte = self.buffer.char_to_byte(cur_char);
-        let entry = accent_storage::RecoveryJournalEntry::new(
+        let sid = if let Some(ref p) = self.current_file_path {
+            accent_storage::journal_session_id_for_path(Some(p))
+        } else if !self.wal_session_id.is_empty() {
+            self.wal_session_id.clone()
+        } else {
+            make_untitled_wal_session_id(0)
+        };
+        self.wal_session_id = sid.clone();
+        let entry = accent_storage::RecoveryJournalEntry::with_session_id(
+            sid,
             self.current_file_path.clone(),
             self.document_title.clone(),
             self.buffer.text(),
@@ -1841,7 +1903,16 @@ impl Session {
             if ready {
                 let cur_char = tab.buffer.cursor();
                 let cur_byte = tab.buffer.char_to_byte(cur_char);
-                let entry = accent_storage::RecoveryJournalEntry::new(
+                let sid = if let Some(ref p) = tab.current_file_path {
+                    accent_storage::journal_session_id_for_path(Some(p))
+                } else if !tab.wal_session_id.is_empty() {
+                    tab.wal_session_id.clone()
+                } else {
+                    make_untitled_wal_session_id(tab.tab_id)
+                };
+                tab.wal_session_id = sid.clone();
+                let entry = accent_storage::RecoveryJournalEntry::with_session_id(
+                    sid,
                     tab.current_file_path.clone(),
                     tab.document_title.clone(),
                     tab.buffer.text(),
@@ -1858,6 +1929,7 @@ impl Session {
         }
         if self.active_tab_index < self.tabs.len() {
             self.journal_pending_flush = self.tabs[self.active_tab_index].journal_pending_flush;
+            self.wal_session_id = self.tabs[self.active_tab_index].wal_session_id.clone();
         }
         any_flushed
     }
@@ -1928,6 +2000,13 @@ impl Session {
                 }
             }
         }
+        self.wal_session_id = if let Some(ref p) = entry.target_path {
+            accent_storage::journal_session_id_for_path(Some(p))
+        } else if !entry.session_id.is_empty() {
+            entry.session_id
+        } else {
+            make_untitled_wal_session_id(0)
+        };
         self.current_file_path = entry.target_path;
         self.original_file_hash = entry.original_file_hash;
         self.original_file_len = None;
@@ -2001,10 +2080,9 @@ impl Session {
                         .as_deref()
                         .is_some_and(|p| Self::paths_match(p, target))
                 }),
-                None => self
-                    .tabs
-                    .iter()
-                    .position(|t| t.current_file_path.is_none() && !t.is_dirty),
+                None => self.tabs.iter().position(|t| {
+                    t.current_file_path.is_none() && !t.is_dirty && !t.recovered_from_crash
+                }),
             };
 
             if let Some(idx) = matching_idx {
@@ -2013,6 +2091,40 @@ impl Session {
             } else if self.is_single_untouched_placeholder() {
                 Self::apply_journal_to_tab(&mut self.tabs[0], entry);
                 self.active_tab_index = 0;
+                any_recovered = true;
+            } else if entry.target_path.is_none() {
+                // Recover crashed untitled tab into its own new tab alongside any restored saved-file tabs
+                let id = self.next_tab_id;
+                self.next_tab_id += 1;
+                let mut new_tab = DocumentTab {
+                    tab_id: id,
+                    wal_session_id: if entry.session_id.is_empty() {
+                        make_untitled_wal_session_id(id)
+                    } else {
+                        entry.session_id.clone()
+                    },
+                    document_title: self.next_untitled_name(),
+                    current_file_path: None,
+                    is_dirty: true,
+                    original_file_hash: None,
+                    original_file_len: None,
+                    last_checked_disk_meta: None,
+                    last_edit_instant: None,
+                    last_edit_utc_ms: 0,
+                    journal_pending_flush: false,
+                    recovered_from_crash: true,
+                    recovery_banner_active: true,
+                    disk_modified_banner_active: false,
+                    dismissed_disk_hash: None,
+                    buffer: DocumentBuffer::default(),
+                };
+                if entry.document_title == "untitled.md"
+                    && self.tabs.iter().any(|t| t.document_title == "untitled.md")
+                {
+                    entry.document_title = new_tab.document_title.clone();
+                }
+                Self::apply_journal_to_tab(&mut new_tab, entry);
+                self.tabs.push(new_tab);
                 any_recovered = true;
             }
         }
@@ -2048,7 +2160,16 @@ impl Session {
                 if tab.journal_pending_flush {
                     let cur_char = tab.buffer.cursor();
                     let cur_byte = tab.buffer.char_to_byte(cur_char);
-                    let entry = accent_storage::RecoveryJournalEntry::new(
+                    let sid = if let Some(ref p) = tab.current_file_path {
+                        accent_storage::journal_session_id_for_path(Some(p))
+                    } else if !tab.wal_session_id.is_empty() {
+                        tab.wal_session_id.clone()
+                    } else {
+                        make_untitled_wal_session_id(tab.tab_id)
+                    };
+                    tab.wal_session_id = sid.clone();
+                    let entry = accent_storage::RecoveryJournalEntry::with_session_id(
+                        sid,
                         tab.current_file_path.clone(),
                         tab.document_title.clone(),
                         tab.buffer.text(),
@@ -2061,31 +2182,41 @@ impl Session {
                     tab.journal_pending_flush = false;
                 }
             } else {
-                let _ = accent_storage::remove_journal_for_target(
+                let _ = accent_storage::remove_journal_by_session_id(
                     &self.recovery_dir,
-                    tab.current_file_path.as_deref(),
+                    &tab.wal_session_id,
                 );
+                if let Some(ref p) = tab.current_file_path {
+                    let _ = accent_storage::remove_journal_for_target(&self.recovery_dir, Some(p));
+                }
             }
         }
         // Remove any orphan journal in `self.recovery_dir` not belonging to an open dirty tab
         for entry in accent_storage::scan_recovery_journals(&self.recovery_dir) {
             let belongs_to_dirty_tab = self.tabs.iter().any(|t| {
                 t.is_dirty
-                    && match (&t.current_file_path, &entry.target_path) {
-                        (Some(a), Some(b)) => Self::paths_match(a, b),
-                        (None, None) => true,
-                        _ => false,
-                    }
+                    && (t.wal_session_id == entry.session_id
+                        || match (&t.current_file_path, &entry.target_path) {
+                            (Some(a), Some(b)) => Self::paths_match(a, b),
+                            _ => false,
+                        })
             });
             if !belongs_to_dirty_tab {
-                let _ = accent_storage::remove_journal_for_target(
+                let _ = accent_storage::remove_journal_by_session_id(
                     &self.recovery_dir,
-                    entry.target_path.as_deref(),
+                    &entry.session_id,
                 );
+                if let Some(ref target) = entry.target_path {
+                    let _ = accent_storage::remove_journal_for_target(
+                        &self.recovery_dir,
+                        Some(target),
+                    );
+                }
             }
         }
         if self.active_tab_index < self.tabs.len() {
             self.journal_pending_flush = self.tabs[self.active_tab_index].journal_pending_flush;
+            self.wal_session_id = self.tabs[self.active_tab_index].wal_session_id.clone();
         }
     }
 
@@ -2407,7 +2538,6 @@ impl Session {
             }
             Action::NewDocument | Action::NewTab => {
                 self.sync_active_tab_to_slot();
-                let _ = accent_storage::remove_journal_for_target(&self.recovery_dir, None);
                 let title = self.next_untitled_name();
                 let init_txt = "# Nuovo Documento\n\nInizia a scrivere qui...\n";
                 let mut new_buf = DocumentBuffer::from_str_content(init_txt);
@@ -2416,6 +2546,7 @@ impl Session {
                 self.next_tab_id += 1;
                 let new_tab = DocumentTab {
                     tab_id: id,
+                    wal_session_id: make_untitled_wal_session_id(id),
                     document_title: title,
                     current_file_path: None,
                     is_dirty: false,
@@ -2537,10 +2668,14 @@ impl Session {
             Action::CloseTab(idx) => {
                 if idx < self.tabs.len() {
                     self.sync_active_tab_to_slot();
-                    let _ = accent_storage::remove_journal_for_target(
+                    let _ = accent_storage::remove_journal_by_session_id(
                         &self.recovery_dir,
-                        self.tabs[idx].current_file_path.as_deref(),
+                        &self.tabs[idx].wal_session_id,
                     );
+                    if let Some(ref p) = self.tabs[idx].current_file_path {
+                        let _ =
+                            accent_storage::remove_journal_for_target(&self.recovery_dir, Some(p));
+                    }
                     if self.tabs.len() <= 1 {
                         let init_txt = "# Nuovo Documento\n\nInizia a scrivere qui...\n";
                         let mut new_buf = DocumentBuffer::from_str_content(init_txt);
@@ -2549,6 +2684,7 @@ impl Session {
                         self.next_tab_id += 1;
                         self.tabs[0] = DocumentTab {
                             tab_id: id,
+                            wal_session_id: make_untitled_wal_session_id(id),
                             document_title: "untitled.md".to_string(),
                             current_file_path: None,
                             is_dirty: false,
@@ -2612,10 +2748,16 @@ impl Session {
                     self.is_dirty = !is_clean;
                     self.journal_pending_flush = self.is_dirty;
                     if !self.is_dirty {
-                        let _ = accent_storage::remove_journal_for_target(
+                        let _ = accent_storage::remove_journal_by_session_id(
                             &self.recovery_dir,
-                            self.current_file_path.as_deref(),
+                            &self.wal_session_id,
                         );
+                        if let Some(ref p) = self.current_file_path {
+                            let _ = accent_storage::remove_journal_for_target(
+                                &self.recovery_dir,
+                                Some(p),
+                            );
+                        }
                     }
                     self.last_edit_instant = Some(std::time::Instant::now());
                 }
@@ -2631,10 +2773,16 @@ impl Session {
                     self.is_dirty = !is_clean;
                     self.journal_pending_flush = self.is_dirty;
                     if !self.is_dirty {
-                        let _ = accent_storage::remove_journal_for_target(
+                        let _ = accent_storage::remove_journal_by_session_id(
                             &self.recovery_dir,
-                            self.current_file_path.as_deref(),
+                            &self.wal_session_id,
                         );
+                        if let Some(ref p) = self.current_file_path {
+                            let _ = accent_storage::remove_journal_for_target(
+                                &self.recovery_dir,
+                                Some(p),
+                            );
+                        }
                     }
                     self.last_edit_instant = Some(std::time::Instant::now());
                 }
@@ -2719,6 +2867,9 @@ impl Session {
                             self.next_tab_id += 1;
                             self.tabs.push(DocumentTab {
                                 tab_id: id,
+                                wal_session_id: accent_storage::journal_session_id_for_path(Some(
+                                    &path,
+                                )),
                                 document_title: title,
                                 current_file_path: Some(path.clone()),
                                 is_dirty: true,
@@ -2757,11 +2908,14 @@ impl Session {
                             .to_string();
                         let mut fresh_buf = DocumentBuffer::from_str_content(&content);
                         fresh_buf.set_cursor(0);
+                        let path_sid =
+                            accent_storage::journal_session_id_for_path(Some(&path));
                         if !is_untouched_placeholder {
                             let id = self.next_tab_id;
                             self.next_tab_id += 1;
                             self.tabs.push(DocumentTab {
                                 tab_id: id,
+                                wal_session_id: path_sid.clone(),
                                 document_title: title.clone(),
                                 current_file_path: Some(path.clone()),
                                 is_dirty: false,
@@ -2787,6 +2941,7 @@ impl Session {
                                 self.file_dialog_dir = parent.to_path_buf();
                             }
                         }
+                        self.wal_session_id = path_sid;
                         self.current_file_path = Some(path.clone());
                         self.update_default_export_path();
                         self.original_file_hash = disk_hash;
@@ -2817,8 +2972,9 @@ impl Session {
             }
             Action::OpenTutorial => {
                 self.sync_active_tab_to_slot();
-                let tutorial_path = std::env::temp_dir().join("accent_tutorial.md");
-                let _ = std::fs::write(&tutorial_path, TUTORIAL_MARKDOWN);
+                let tutorial_path =
+                    runtime_dir_for_recovery(&self.recovery_dir).join("accent_tutorial.md");
+                let _ = accent_storage::atomic_save_private_fast(&tutorial_path, TUTORIAL_MARKDOWN);
                 let _ = accent_storage::remove_journal_for_target(
                     &self.recovery_dir,
                     Some(&tutorial_path),
@@ -2836,6 +2992,8 @@ impl Session {
                         || (!self.is_dirty && self.current_file_path.is_none());
                     let tut_meta = accent_storage::probe_file_meta(&tutorial_path);
                     let tut_hash = Some(accent_storage::compute_content_hash(TUTORIAL_MARKDOWN));
+                    let tut_sid =
+                        accent_storage::journal_session_id_for_path(Some(&tutorial_path));
                     let mut tut_buf = DocumentBuffer::from_str_content(TUTORIAL_MARKDOWN);
                     tut_buf.set_cursor(0);
                     if !is_untouched_placeholder {
@@ -2843,6 +3001,7 @@ impl Session {
                         self.next_tab_id += 1;
                         self.tabs.push(DocumentTab {
                             tab_id: id,
+                            wal_session_id: tut_sid.clone(),
                             document_title: "tutorial_accent.md".to_string(),
                             current_file_path: Some(tutorial_path.clone()),
                             is_dirty: false,
@@ -2861,6 +3020,7 @@ impl Session {
                         self.active_tab_index = self.tabs.len() - 1;
                     }
                     self.ensure_active_tab_visible();
+                    self.wal_session_id = tut_sid;
                     self.document_title = "tutorial_accent.md".to_string();
                     self.file_dialog_input = "tutorial_accent.md".to_string();
                     self.current_file_path = Some(tutorial_path);
@@ -2886,22 +3046,29 @@ impl Session {
                 self.overlay = ActiveOverlay::None;
             }
             Action::SaveDocument | Action::ConfirmRecoverySave => {
-                let target = self
-                    .current_file_path
-                    .clone()
-                    .unwrap_or_else(|| std::env::temp_dir().join("accent_autosave.md"));
+                let target = self.current_file_path.clone().unwrap_or_else(|| {
+                    runtime_dir_for_recovery(&self.recovery_dir).join("accent_autosave.md")
+                });
                 let saved_ok = accent_storage::atomic_save(&target, self.buffer.as_str()).is_ok();
                 if saved_ok {
-                    if self.current_file_path.as_deref() != Some(target.as_path()) {
-                        let _ = accent_storage::remove_journal_for_target(
-                            &self.recovery_dir,
-                            self.current_file_path.as_deref(),
-                        );
+                    let _ = accent_storage::remove_journal_by_session_id(
+                        &self.recovery_dir,
+                        &self.wal_session_id,
+                    );
+                    if let Some(ref prev_p) = self.current_file_path {
+                        if prev_p != &target {
+                            let _ = accent_storage::remove_journal_for_target(
+                                &self.recovery_dir,
+                                Some(prev_p),
+                            );
+                        }
                     }
                     let _ = accent_storage::remove_journal_for_target(
                         &self.recovery_dir,
                         Some(&target),
                     );
+                    self.wal_session_id =
+                        accent_storage::journal_session_id_for_path(Some(&target));
                     self.is_dirty = false;
                     self.journal_pending_flush = false;
                     self.recovered_from_crash = false;
@@ -2922,10 +3089,13 @@ impl Session {
                 }
             }
             Action::DiscardRecovery => {
-                let _ = accent_storage::remove_journal_for_target(
+                let _ = accent_storage::remove_journal_by_session_id(
                     &self.recovery_dir,
-                    self.current_file_path.as_deref(),
+                    &self.wal_session_id,
                 );
+                if let Some(ref p) = self.current_file_path {
+                    let _ = accent_storage::remove_journal_for_target(&self.recovery_dir, Some(p));
+                }
                 self.is_dirty = false;
                 self.journal_pending_flush = false;
                 self.recovered_from_crash = false;
@@ -2947,6 +3117,7 @@ impl Session {
                         let init_txt = "# Nuovo Documento\n\nInizia a scrivere qui...\n";
                         self.document_title = self.next_untitled_name();
                         self.current_file_path = None;
+                        self.wal_session_id = make_untitled_wal_session_id(0);
                         self.original_file_len = Some(init_txt.len());
                         self.original_file_hash =
                             Some(accent_storage::compute_content_hash(init_txt));
@@ -2972,10 +3143,16 @@ impl Session {
             }
             Action::SaveAsFile(path) => {
                 if accent_storage::atomic_save(&path, self.buffer.as_str()).is_ok() {
-                    let _ = accent_storage::remove_journal_for_target(
+                    let _ = accent_storage::remove_journal_by_session_id(
                         &self.recovery_dir,
-                        self.current_file_path.as_deref(),
+                        &self.wal_session_id,
                     );
+                    if let Some(ref prev_p) = self.current_file_path {
+                        let _ = accent_storage::remove_journal_for_target(
+                            &self.recovery_dir,
+                            Some(prev_p),
+                        );
+                    }
                     let _ =
                         accent_storage::remove_journal_for_target(&self.recovery_dir, Some(&path));
                     let title = path
@@ -2990,6 +3167,8 @@ impl Session {
                             self.file_dialog_dir = parent.to_path_buf();
                         }
                     }
+                    self.wal_session_id =
+                        accent_storage::journal_session_id_for_path(Some(&path));
                     self.current_file_path = Some(path.clone());
                     self.update_default_export_path();
                     self.original_file_len = Some(self.buffer.len_bytes());
@@ -3098,12 +3277,13 @@ impl Session {
                 let fmt = self.selected_export_format;
                 let out_path = PathBuf::from(self.export_output_path.trim());
                 let base_dir = self.current_file_path.as_deref().and_then(|p| p.parent());
-                match accent_export::export_document_bytes(
+                match accent_export::export_document_bytes_with_options(
                     &self.buffer,
                     self.markdown_config,
                     &self.document_title,
                     fmt,
                     base_dir,
+                    self.export_syntax_highlight,
                 ) {
                     Ok(bytes) => {
                         if accent_storage::atomic_save_bytes(&out_path, &bytes).is_ok() {
@@ -3138,12 +3318,13 @@ impl Session {
                 self.update_default_export_path();
                 let out_path = PathBuf::from(&self.export_output_path);
                 let base_dir = self.current_file_path.as_deref().and_then(|p| p.parent());
-                if let Ok(bytes) = accent_export::export_document_bytes(
+                if let Ok(bytes) = accent_export::export_document_bytes_with_options(
                     &self.buffer,
                     self.markdown_config,
                     &self.document_title,
                     fmt,
                     base_dir,
+                    self.export_syntax_highlight,
                 ) {
                     let _ = accent_storage::atomic_save_bytes(&out_path, &bytes);
                     self.status_message = Some(match self.locale {
@@ -3172,6 +3353,19 @@ impl Session {
                         tab.disk_modified_banner_active = false;
                     }
                 }
+            }
+            Action::DiscardAllUnsavedForExit => {
+                self.is_dirty = false;
+                self.journal_pending_flush = false;
+                self.recovered_from_crash = false;
+                self.recovery_banner_active = false;
+                for tab in &mut self.tabs {
+                    tab.is_dirty = false;
+                    tab.journal_pending_flush = false;
+                    tab.recovered_from_crash = false;
+                    tab.recovery_banner_active = false;
+                }
+                let _ = accent_storage::clear_all_journals(&self.recovery_dir);
             }
             Action::SetStatusMessage(msg) => {
                 self.status_message = Some(msg);
@@ -4435,6 +4629,76 @@ mod tests {
         assert!(!s_roundtrip.markdown_config.extensions.alerts);
         assert!(s_roundtrip.markdown_config.extensions.footnotes);
         assert!(!s_roundtrip.markdown_config.extensions.frontmatter);
+
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn test_multiple_dirty_untitled_tabs_and_saved_tabs_isolated_wal_recovery() {
+        let base_dir = std::env::temp_dir().join(format!(
+            "accent_multi_untitled_wal_test_{}_{}",
+            std::process::id(),
+            accent_storage::current_utc_ms()
+        ));
+        let recovery_dir = base_dir.join("recovery");
+        let config_path = base_dir.join("settings.json");
+        std::fs::create_dir_all(&recovery_dir).unwrap();
+
+        let saved_doc = base_dir.join("salvato.md");
+        accent_storage::atomic_save(&saved_doc, "# Documento Salvato\n").unwrap();
+
+        {
+            let mut session =
+                Session::with_config_and_recovery(config_path.clone(), recovery_dir.clone());
+            // Tab 0: saved file `salvato.md`
+            session.apply(Action::OpenFile(saved_doc.clone()));
+
+            // Tab 1: first dirty untitled tab
+            session.apply(Action::NewTab);
+            session.apply(Action::UpdateBufferText("# Bozza Senza Titolo Uno\n".to_string()));
+
+            // Tab 2: second dirty untitled tab
+            session.apply(Action::NewTab);
+            session.apply(Action::UpdateBufferText("# Bozza Senza Titolo Due\n".to_string()));
+
+            // Tab 3: third untitled tab that gets closed -> closing Tab 3 MUST NOT wipe Tab 1 or Tab 2 WAL!
+            session.apply(Action::NewTab);
+            session.apply(Action::UpdateBufferText("# Bozza Tre Da Chiudere\n".to_string()));
+
+            let future = std::time::Instant::now()
+                + std::time::Duration::from_millis(JOURNAL_DEBOUNCE_MS + 50);
+            assert!(session.poll_journal_flush(future));
+
+            session.apply(Action::CloseTab(3));
+            assert_eq!(session.tabs.len(), 3);
+            let _ = session.save_settings();
+        }
+
+        // Simulate restart after crash: `salvato.md` + BOTH dirty untitled tabs must be present!
+        let restored = Session::with_config_and_recovery(config_path, recovery_dir);
+        assert_eq!(
+            restored.tabs.len(),
+            3,
+            "Saved tab + 2 dirty untitled tabs must all survive crash recovery"
+        );
+        assert!(
+            restored
+                .tabs
+                .iter()
+                .any(|t| t.buffer.text() == "# Documento Salvato\n")
+        );
+        assert!(
+            restored
+                .tabs
+                .iter()
+                .any(|t| t.buffer.text() == "# Bozza Senza Titolo Uno\n" && t.recovered_from_crash)
+        );
+        assert!(
+            restored
+                .tabs
+                .iter()
+                .any(|t| t.buffer.text() == "# Bozza Senza Titolo Due\n" && t.recovered_from_crash)
+        );
 
         let _ = std::fs::remove_dir_all(&base_dir);
     }

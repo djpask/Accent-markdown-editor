@@ -1,6 +1,6 @@
 # Maintainer: Accent Developers
 pkgname=accent-markdown-editor
-pkgver=0.8.30
+pkgver=0.8.31
 pkgrel=1
 pkgdesc="Multiplatform distraction-free Markdown editor and viewer written in 100% pure Rust"
 arch=('x86_64')
@@ -18,6 +18,12 @@ _project_root="$(cd "${startdir}/../.." && pwd)"
 
 build() {
     cd "${_project_root}"
+    if command -v npm >/dev/null 2>&1; then
+        if [[ ! -d "${_project_root}/node_modules" ]]; then
+            npm ci
+        fi
+        npm run build
+    fi
     export CARGO_TARGET_DIR="${_project_root}/target"
     cargo build --release --locked -p accent-ui
 }
@@ -33,8 +39,9 @@ package() {
     install -Dm755 "${_project_root}/target/release/accent-ui" "${pkgdir}/usr/bin/accent"
     ln -sf /usr/bin/accent "${pkgdir}/usr/bin/accent-ui"
 
-    # Install FreeDesktop entry
+    # Install FreeDesktop entry + Wayland app_id alias (`io.accent.editor.desktop`)
     install -Dm644 "${srcdir}/accent.desktop" "${pkgdir}/usr/share/applications/accent.desktop"
+    ln -sf accent.desktop "${pkgdir}/usr/share/applications/io.accent.editor.desktop"
 
     # Install scalable SVG and 512x512 PNG icons
     install -Dm644 "${_project_root}/img/brand/accent_logo.svg" \

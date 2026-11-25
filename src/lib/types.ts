@@ -269,6 +269,7 @@ export type SessionAction =
   | { ExportDocument: string }
   | { SetWalAutosave: boolean }
   | { SetDiskWatcher: boolean }
+  | 'DiscardAllUnsavedForExit'
   | { SetStatusMessage: string }
   | { InsertText: string }
   | { MoveCursor: number };

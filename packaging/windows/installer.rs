@@ -482,16 +482,17 @@ fn perform_install(opts: &InstallOptions, hwnd: HWND) -> Result<String, String> 
         "Configurazione collegamenti, associazioni file e registro utente...",
     );
 
-    let dir_ps = dir.display().to_string().replace('\'', "''");
     let create_start_ps = if opts.create_start_menu { "$true" } else { "$false" };
     let create_desktop_ps = if opts.create_desktop { "$true" } else { "$false" };
     let assoc_md_ps = if opts.associate_markdown { "$true" } else { "$false" };
     let add_path_ps = if opts.add_to_path { "$true" } else { "$false" };
 
+    // Pass target directory via environment variable (`$env:ACCENT_INSTALL_DIR`) so path characters
+    // (`'`, `"`, `&`, `$`) are never interpolated into PowerShell source code.
     let ps_script = format!(
         r#"
 $ErrorActionPreference = 'SilentlyContinue'
-$InstallDir = '{dir_ps}'
+$InstallDir = $env:ACCENT_INSTALL_DIR
 $TargetExe = Join-Path $InstallDir 'accent.exe'
 $TargetIcon = Join-Path $InstallDir 'accent_logo.ico'
 $TargetUninst = Join-Path $InstallDir 'Accent-Uninstall.exe'
@@ -559,13 +560,12 @@ Set-ItemProperty -Path $UninstallKey -Name 'NoRepair' -Value 1 -Type DWord
     );
 
     let _ = Command::new("powershell.exe")
+        .env("ACCENT_INSTALL_DIR", dir.as_os_str())
         .args([
             "-NoProfile",
             "-NonInteractive",
             "-WindowStyle",
             "Hidden",
-            "-ExecutionPolicy",
-            "Bypass",
             "-Command",
             &ps_script,
         ])
@@ -579,7 +579,7 @@ Set-ItemProperty -Path $UninstallKey -Name 'NoRepair' -Value 1 -Type DWord
 fn perform_uninstall(dir: &Path, hwnd: HWND) -> Result<String, String> {
     post_progress(hwnd, 18, "Chiusura eventuali istanze di Accent in esecuzione...");
     let _ = Command::new("taskkill")
-        .args(["/F", "/IM", "accent.exe"])
+        .args(["/IM", "accent.exe"])
         .creation_flags(CREATE_NO_WINDOW)
         .status();
 
@@ -588,16 +588,14 @@ fn perform_uninstall(dir: &Path, hwnd: HWND) -> Result<String, String> {
         48,
         "Rimozione collegamenti, associazioni file e voce di registro...",
     );
-    let dir_ps = dir.display().to_string().replace('\'', "''");
-    let ps_script = format!(
-        r#"
+    let ps_script = r#"
 $ErrorActionPreference = 'SilentlyContinue'
-$InstallDir = '{dir_ps}'
+$InstallDir = $env:ACCENT_INSTALL_DIR
 $StartMenuShortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Accent Markdown Editor.lnk'
 $DesktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Accent Markdown Editor.lnk'
 
-if (Test-Path $StartMenuShortcut) {{ Remove-Item $StartMenuShortcut -Force }}
-if (Test-Path $DesktopShortcut) {{ Remove-Item $DesktopShortcut -Force }}
+if (Test-Path $StartMenuShortcut) { Remove-Item $StartMenuShortcut -Force }
+if (Test-Path $DesktopShortcut) { Remove-Item $DesktopShortcut -Force }
 
 Remove-Item -Path 'HKCU:\Software\Classes\AccentMarkdownFile' -Recurse -Force
 Remove-ItemProperty -Path 'HKCU:\Software\Classes\.md\OpenWithProgids' -Name 'AccentMarkdownFile' -Force
@@ -605,23 +603,21 @@ Remove-ItemProperty -Path 'HKCU:\Software\Classes\.markdown\OpenWithProgids' -Na
 Remove-Item -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\AccentMarkdownEditor' -Recurse -Force
 
 $UserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-if ($UserPath) {{
-    $CleanedPath = ($UserPath -split ';' | Where-Object {{ $_ -and ($_ -ne $InstallDir) }}) -join ';'
+if ($UserPath) {
+    $CleanedPath = ($UserPath -split ';' | Where-Object { $_ -and ($_ -ne $InstallDir) }) -join ';'
     [Environment]::SetEnvironmentVariable('Path', $CleanedPath, 'User')
-}}
-"#
-    );
+}
+"#;
 
     let _ = Command::new("powershell.exe")
+        .env("ACCENT_INSTALL_DIR", dir.as_os_str())
         .args([
             "-NoProfile",
             "-NonInteractive",
             "-WindowStyle",
             "Hidden",
-            "-ExecutionPolicy",
-            "Bypass",
             "-Command",
-            &ps_script,
+            ps_script,
         ])
         .creation_flags(CREATE_NO_WINDOW)
         .status();
@@ -636,12 +632,15 @@ if ($UserPath) {{
 }
 
 fn schedule_self_cleanup(dir: &Path) {
-    let cmd_cleanup = format!(
-        "ping 127.0.0.1 -n 2 > nul & rmdir /s /q \"{}\"",
-        dir.display()
-    );
+    // Pass directory via environment variable (`%ACCENT_UNINSTALL_DIR%`) with `/D` so special
+    // NTFS path characters (`&`, `"`, `|`, `^`) can never inject commands into `cmd.exe`.
     let _ = Command::new("cmd.exe")
-        .args(["/C", &cmd_cleanup])
+        .env("ACCENT_UNINSTALL_DIR", dir.as_os_str())
+        .args([
+            "/D",
+            "/C",
+            "ping 127.0.0.1 -n 2 > nul & if defined ACCENT_UNINSTALL_DIR rmdir /s /q \"%ACCENT_UNINSTALL_DIR%\"",
+        ])
         .creation_flags(CREATE_NO_WINDOW)
         .spawn();
 }

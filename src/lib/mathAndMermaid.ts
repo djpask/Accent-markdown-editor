@@ -12,6 +12,15 @@ export function getCachedMermaidSvg(code: string, theme: ThemeMode): string | nu
   return mermaidSvgCache.get(`${theme}::${normalized}`) ?? null;
 }
 
+function escapeHtmlText(raw: string): string {
+  return raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 export function renderLatexToHtml(latex: string, displayMode: boolean): string {
   try {
     return katex.renderToString(latex.trim(), {
@@ -21,7 +30,7 @@ export function renderLatexToHtml(latex: string, displayMode: boolean): string {
       trust: false,
     });
   } catch {
-    return `<code class="katex-fallback">${latex}</code>`;
+    return `<code class="katex-fallback">${escapeHtmlText(latex)}</code>`;
   }
 }
 

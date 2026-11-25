@@ -573,7 +573,11 @@ pub fn validate_external_http_url(url: &str) -> Result<&str, String> {
     if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
         return Err("Unsupported URL scheme".to_string());
     }
-    if trimmed.chars().any(|c| c.is_control() || c.is_whitespace()) {
+    if trimmed.chars().any(|c| {
+        c.is_control()
+            || c.is_whitespace()
+            || matches!(c, '"' | '\'' | '\\' | '<' | '>' | '`')
+    }) {
         return Err("Invalid characters in URL".to_string());
     }
     Ok(trimmed)
@@ -594,13 +598,39 @@ fn open_external_url(url: String) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("rundll32")
-            .args(["url.dll,FileProtocolHandler", safe_url])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "shell32")]
+        extern "system" {
+            fn ShellExecuteW(
+                hwnd: *mut std::ffi::c_void,
+                lp_operation: *const u16,
+                lp_file: *const u16,
+                lp_parameters: *const u16,
+                lp_directory: *const u16,
+                n_show_cmd: i32,
+            ) -> isize;
+        }
+        let op_wide: Vec<u16> = std::ffi::OsStr::new("open")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let url_wide: Vec<u16> = std::ffi::OsStr::new(safe_url)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let ret = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                op_wide.as_ptr(),
+                url_wide.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1, // SW_SHOWNORMAL
+            )
+        };
+        if ret <= 32 {
+            return Err(format!("ShellExecuteW failed with code {ret}"));
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -640,7 +670,7 @@ fn render_mermaid_diagram(
         session
             .mermaid_cache
             .borrow_mut()
-            .get_or_render_screen_themed(&source, m_theme)
+            .get_or_render_svg_themed(&source, m_theme)
     } else {
         session.render_mermaid(&source)
     };
@@ -1146,25 +1176,46 @@ mod tests {
         assert!(png_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
         assert!(png_bytes.len() > 10_000);
 
-        let brand_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../img/brand");
-        let _ = std::fs::create_dir_all(&brand_dir);
-        std::fs::write(brand_dir.join("accent_logo.png"), &png_bytes)
-            .expect("Failed to write img/brand/accent_logo.png");
+        let tmp_icon_dir = std::env::temp_dir().join(format!(
+            "accent_icon_gen_test_{}_{}",
+            std::process::id(),
+            accent_storage::current_utc_ms()
+        ));
+        std::fs::create_dir_all(&tmp_icon_dir).expect("Failed to create temp icon dir");
+        std::fs::write(tmp_icon_dir.join("accent_logo.png"), &png_bytes)
+            .expect("Failed to write temp accent_logo.png");
 
         let ico_bytes = generate_windows_ico().expect("Failed to generate Windows .ico");
         assert!(&ico_bytes[0..4] == &[0x00, 0x00, 0x01, 0x00]);
-        std::fs::write(brand_dir.join("accent_logo.ico"), &ico_bytes)
-            .expect("Failed to write img/brand/accent_logo.ico");
+        std::fs::write(tmp_icon_dir.join("accent_logo.ico"), &ico_bytes)
+            .expect("Failed to write temp accent_logo.ico");
+
+        let _ = std::fs::remove_dir_all(&tmp_icon_dir);
     }
 
     #[test]
     fn test_version_system_consistency() {
-        assert_eq!(VERSION, "0.8.30");
         assert_eq!(accent_core::VERSION, VERSION);
-        let version_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../VERSION");
-        let file_ver = std::fs::read_to_string(version_file)
+        let root_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let file_ver = std::fs::read_to_string(root_dir.join("VERSION"))
             .expect("Failed to read root VERSION file");
         assert_eq!(file_ver.trim(), VERSION);
+
+        let pkg_json = std::fs::read_to_string(root_dir.join("package.json"))
+            .expect("Failed to read package.json");
+        assert!(
+            pkg_json.contains(&format!("\"version\": \"{VERSION}\"")),
+            "package.json version must match VERSION ({VERSION})"
+        );
+
+        let tauri_conf = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json"),
+        )
+        .expect("Failed to read tauri.conf.json");
+        assert!(
+            tauri_conf.contains(&format!("\"version\": \"{VERSION}\"")),
+            "tauri.conf.json version must match VERSION ({VERSION})"
+        );
     }
 
     #[test]
