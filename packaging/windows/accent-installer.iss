@@ -49,6 +49,7 @@ Name: "addtopath"; Description: "Aggiungi Accent al PATH utente (%LOCALAPPDATA%\
 
 [Files]
 Source: "..\..\target\release\accent-ui.exe"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Flags: ignoreversion
+Source: "WebView2Loader.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\..\img\brand\accent_logo.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\img\brand\accent_logo.png"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion

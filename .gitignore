@@ -13,3 +13,4 @@ packaging/arch/*.pkg.tar.zst
 packaging/debian/build/
 packaging/debian/*.deb
 packaging/windows/*.exe
+packaging/windows/*.dll

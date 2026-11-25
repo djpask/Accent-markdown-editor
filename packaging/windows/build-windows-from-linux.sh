@@ -81,6 +81,7 @@ x86_64-w64-mingw32-strip "${REPO_ROOT}/target/x86_64-pc-windows-gnu/release/acce
 rm -f "${SCRIPT_DIR}"/Accent-Setup-*.exe "${SCRIPT_DIR}"/Accent_v*-setup.exe "${SCRIPT_DIR}"/accent-*-x86_64.exe
 cp "${REPO_ROOT}/target/x86_64-pc-windows-gnu/release/accent-ui.exe" "${SCRIPT_DIR}/accent.exe"
 cp "${REPO_ROOT}/target/x86_64-pc-windows-gnu/release/accent-ui.exe" "${SCRIPT_DIR}/accent-${VERSION}-x86_64.exe"
+cp "${REPO_ROOT}/target/x86_64-pc-windows-gnu/release/WebView2Loader.dll" "${SCRIPT_DIR}/WebView2Loader.dll"
 
 # Compile embedded Windows icon + asInvoker (non-admin) Common Controls v6 manifest
 WINDRES_OBJ="/tmp/accent_installer_res.o"

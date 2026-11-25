@@ -12,6 +12,7 @@ use std::thread;
 
 const APP_VERSION: &str = env!("ACCENT_VERSION");
 const ACCENT_EXE_BYTES: &[u8] = include_bytes!("accent.exe");
+const WEBVIEW2_LOADER_DLL_BYTES: &[u8] = include_bytes!("WebView2Loader.dll");
 const ACCENT_ICO_BYTES: &[u8] = include_bytes!("../../img/brand/accent_logo.ico");
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -456,12 +457,15 @@ fn perform_install(opts: &InstallOptions, hwnd: HWND) -> Result<String, String> 
         .map_err(|e| format!("Impossibile creare la cartella {}:\n{e}", dir.display()))?;
 
     let target_exe = dir.join("accent.exe");
+    let target_webview_dll = dir.join("WebView2Loader.dll");
     let target_ico = dir.join("accent_logo.ico");
     let target_uninst = dir.join("Accent-Uninstall.exe");
 
     post_progress(hwnd, 52, "Estrazione di Accent Markdown Editor...");
     fs::write(&target_exe, ACCENT_EXE_BYTES)
         .map_err(|e| format!("Impossibile scrivere {}:\n{e}", target_exe.display()))?;
+    fs::write(&target_webview_dll, WEBVIEW2_LOADER_DLL_BYTES)
+        .map_err(|e| format!("Impossibile scrivere {}:\n{e}", target_webview_dll.display()))?;
     fs::write(&target_ico, ACCENT_ICO_BYTES)
         .map_err(|e| format!("Impossibile scrivere {}:\n{e}", target_ico.display()))?;
 
@@ -624,6 +628,7 @@ if ($UserPath) {{
 
     post_progress(hwnd, 80, "Rimozione dei file dell'applicazione...");
     let _ = fs::remove_file(dir.join("accent.exe"));
+    let _ = fs::remove_file(dir.join("WebView2Loader.dll"));
     let _ = fs::remove_file(dir.join("accent_logo.ico"));
 
     post_progress(hwnd, 100, "Disinstallazione completata!");
@@ -1121,13 +1126,13 @@ unsafe extern "system" fn wnd_proc(
                     hwnd,
                     h_inst,
                     "STATIC",
-                    "Cartella di destinazione (profilo utente, senza privilegi di amministratore):",
+                    "Cartella di destinazione (profilo utente, senza privilegi admin):",
                     0,
                     0,
                     28,
                     98,
                     496,
-                    20,
+                    22,
                     0,
                     f_bold,
                 );
