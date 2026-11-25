@@ -2648,7 +2648,7 @@
                 style="flex-shrink: 0; display: block;"
               />
               <div>
-                <p style="margin: 0 0 6px 0; font-weight: 700;">Accent Markdown Editor v0.8.29</p>
+                <p style="margin: 0 0 6px 0; font-weight: 700;">Accent Markdown Editor v0.8.30</p>
                 <p style="margin: 0; color: var(--fg-muted);">
                   Rust Backend (L1–L4) • Tauri v2 • Svelte 5 • CodeMirror 6 • Offline KaTeX &amp; Mermaid
                 </p>
